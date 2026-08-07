@@ -1,0 +1,28 @@
+# Build output and packaged releases.
+build/
+dist/
+*.log
+
+# Python bytecode from the offset tooling.
+__pycache__/
+*.pyc
+
+# Bulk extracts from the game's own files.
+#
+# These are regenerable on any machine that owns Sifu, are not needed to build
+# or run the mod, and are wholesale copies of data the developers ship for
+# debugging rather than as documentation -- symbols.txt alone is six megabytes
+# of private symbol names lifted out of the shipped PDB. Keeping them local is
+# the polite line to draw when publishing something that interoperates with
+# somebody else's game.
+#
+# tools/pdbdump regenerates any of it in about two seconds; see the README.
+# The whole directory is these regenerable symbol/workflow extracts, so none of
+# it is tracked.
+research/
+
+# Never commit a game binary, PDB or pak.
+*.exe
+*.pdb
+*.pak
+!dist/tools/*.exe

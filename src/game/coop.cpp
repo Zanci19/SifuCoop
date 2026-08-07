@@ -1,0 +1,142 @@
+#include "coop.h"
+
+#include <windows.h>
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+
+#include "../core/log.h"
+
+namespace sifucoop::coop {
+namespace {
+
+Config g_config;
+Stats g_stats;
+
+const char* kSection = "coop";
+
+bool ReadBool(const char* key, bool fallback, const char* ini) {
+    return GetPrivateProfileIntA(kSection, key, fallback ? 1 : 0, ini) != 0;
+}
+
+void WriteBool(const char* key, bool value, const char* ini) {
+    WritePrivateProfileStringA(kSection, key, value ? "1" : "0", ini);
+}
+
+void WriteInt(const char* key, int value, const char* ini) {
+    char text[16] = {};
+    _snprintf(text, sizeof(text), "%d", value);
+    WritePrivateProfileStringA(kSection, key, text, ini);
+}
+
+}  // namespace
+
+Config& Get() { return g_config; }
+Stats& GetStats() { return g_stats; }
+
+void IniPath(char* out, int out_size) {
+    if (!out || out_size <= 0) return;
+    out[0] = '\0';
+    char path[MAX_PATH] = {};
+    if (GetModuleFileNameA(nullptr, path, MAX_PATH) == 0) return;
+    char* last_slash = strrchr(path, '\\');
+    if (last_slash) *(last_slash + 1) = '\0';
+    strncat(path, "SifuCoop.ini", MAX_PATH - strlen(path) - 1);
+    lstrcpynA(out, path, out_size);
+}
+
+void Load() {
+    char ini[MAX_PATH] = {};
+    IniPath(ini, sizeof(ini));
+    if (!ini[0]) return;
+
+    g_config.mode = GetPrivateProfileIntA(kSection, "versus", 0, ini) != 0 ? Mode::Versus
+                                                                          : Mode::Coop;
+    g_config.sync_enemies = ReadBool("sync_enemies", g_config.sync_enemies, ini);
+    g_config.suppress_client_ai = ReadBool("suppress_client_ai",
+                                           g_config.suppress_client_ai, ini);
+    g_config.sync_enemy_vitals = ReadBool("sync_enemy_vitals",
+                                          g_config.sync_enemy_vitals, ini);
+    g_config.park_extra_enemies = ReadBool("park_extra_enemies",
+                                           g_config.park_extra_enemies, ini);
+    g_config.echo_enemy_attacks = ReadBool("echo_enemy_attacks",
+                                           g_config.echo_enemy_attacks, ini);
+    g_config.echo_player_attacks = ReadBool("echo_player_attacks",
+                                            g_config.echo_player_attacks, ini);
+    g_config.friendly_relationship = ReadBool("friendly_relationship",
+                                              g_config.friendly_relationship, ini);
+    g_config.report_damage = ReadBool("report_damage", g_config.report_damage, ini);
+    g_config.mirror_peer_vitals = ReadBool("mirror_peer_vitals",
+                                           g_config.mirror_peer_vitals, ini);
+    g_config.sync_run_state = ReadBool("sync_run_state", g_config.sync_run_state, ini);
+    g_config.fix_room_clear = ReadBool("fix_room_clear", g_config.fix_room_clear, ini);
+    g_config.auto_follow_level = ReadBool("auto_follow_level",
+                                          g_config.auto_follow_level, ini);
+    g_config.adaptive_interp = ReadBool("adaptive_interp", g_config.adaptive_interp, ini);
+    g_config.in_game_overlay = ReadBool("in_game_overlay", g_config.in_game_overlay, ini);
+    g_config.selftest = ReadBool("selftest", g_config.selftest, ini);
+    g_config.verbose_enemies = ReadBool("verbose_enemies", g_config.verbose_enemies, ini);
+    g_config.verbose_orders = ReadBool("verbose_orders", g_config.verbose_orders, ini);
+
+    g_config.interp_delay_ms = GetPrivateProfileIntA(kSection, "interp_delay_ms",
+                                                     g_config.interp_delay_ms, ini);
+    g_config.snapshot_hz = GetPrivateProfileIntA(kSection, "snapshot_hz",
+                                                 g_config.snapshot_hz, ini);
+
+    // Out-of-range values in a hand-edited ini would otherwise be silently
+    // catastrophic: 0 Hz stops all sending, and a huge delay looks like a hang.
+    if (g_config.interp_delay_ms < 0) g_config.interp_delay_ms = 0;
+    if (g_config.interp_delay_ms > 500) g_config.interp_delay_ms = 500;
+    if (g_config.snapshot_hz < 10) g_config.snapshot_hz = 10;
+    if (g_config.snapshot_hz > 120) g_config.snapshot_hz = 120;
+
+    SC_LOG("coop: mode=%s enemies=%d ai_off=%d vitals=%d attacks=%d damage=%d "
+           "park=%d follow=%d adaptive=%d",
+           g_config.mode == Mode::Coop ? "CO-OP" : "VERSUS", g_config.sync_enemies,
+           g_config.suppress_client_ai, g_config.sync_enemy_vitals,
+           g_config.echo_enemy_attacks, g_config.report_damage,
+           g_config.park_extra_enemies, g_config.auto_follow_level,
+           g_config.adaptive_interp);
+}
+
+void Save() {
+    char ini[MAX_PATH] = {};
+    IniPath(ini, sizeof(ini));
+    if (!ini[0]) return;
+
+    WriteBool("versus", g_config.mode == Mode::Versus, ini);
+    WriteBool("sync_enemies", g_config.sync_enemies, ini);
+    WriteBool("suppress_client_ai", g_config.suppress_client_ai, ini);
+    WriteBool("sync_enemy_vitals", g_config.sync_enemy_vitals, ini);
+    WriteBool("park_extra_enemies", g_config.park_extra_enemies, ini);
+    WriteBool("echo_enemy_attacks", g_config.echo_enemy_attacks, ini);
+    WriteBool("echo_player_attacks", g_config.echo_player_attacks, ini);
+    WriteBool("friendly_relationship", g_config.friendly_relationship, ini);
+    WriteBool("report_damage", g_config.report_damage, ini);
+    WriteBool("mirror_peer_vitals", g_config.mirror_peer_vitals, ini);
+    WriteBool("sync_run_state", g_config.sync_run_state, ini);
+    WriteBool("fix_room_clear", g_config.fix_room_clear, ini);
+    WriteBool("auto_follow_level", g_config.auto_follow_level, ini);
+    WriteBool("adaptive_interp", g_config.adaptive_interp, ini);
+    WriteBool("in_game_overlay", g_config.in_game_overlay, ini);
+    WriteBool("verbose_enemies", g_config.verbose_enemies, ini);
+    WriteBool("verbose_orders", g_config.verbose_orders, ini);
+    WriteInt("interp_delay_ms", g_config.interp_delay_ms, ini);
+    WriteInt("snapshot_hz", g_config.snapshot_hz, ini);
+}
+
+void ReportProblem(const char* format, ...) {
+    char text[160] = {};
+    va_list args;
+    va_start(args, format);
+    _vsnprintf(text, sizeof(text) - 1, format, args);
+    va_end(args);
+
+    // Only log a *change*: the same problem repeating every frame would bury
+    // everything else, but the overlay still wants the current value.
+    if (strcmp(text, g_stats.last_problem) != 0) SC_LOG("coop: %s", text);
+    lstrcpynA(g_stats.last_problem, text, sizeof(g_stats.last_problem));
+}
+
+}  // namespace sifucoop::coop
