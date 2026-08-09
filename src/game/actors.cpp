@@ -478,6 +478,14 @@ int ReadRelationship(ue::UObject* from_actor, ue::UObject* to_actor) {
 
 bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
     if (!social || !toward || value < 0) return false;
+    // BPF_ServerChangeRelationship forwards to MulticastChangeRelationship, and
+    // that implementation walks the actor it is handed. Restarting a level
+    // crashed here -- reading a live-looking heap address inside
+    // SocialComponent.cpp:420 -- because the enemy or puppet being pointed at
+    // had already been torn down with the old world while this side was still
+    // asserting relationships against it. Both ends are checked, because either
+    // one can be the dead one.
+    if (!ue::IsValidObject(social) || !ue::IsValidObject(toward)) return false;
     struct Params {
         ue::UObject* Actor;
         std::uint8_t eRelation;

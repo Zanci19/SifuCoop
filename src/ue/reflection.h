@@ -68,6 +68,13 @@ bool PlayAnimationAsset(UObject* actor, UObject* animation_asset);
 // the component to single-node mode while a raw sequence is playing.
 bool RestoreAnimationBlueprint(UObject* actor);
 
+// UKismetSystemLibrary::IsValid -- false for null and for anything already
+// marked pending kill. Worth a ProcessEvent only where handing a dead actor to
+// the game is fatal rather than merely wrong: Sifu's relationship multicast
+// walks the actor it is given, so a pointer from a level that is being torn
+// down takes the process with it.
+bool IsValidObject(UObject* object);
+
 // UAnimationAsset::GetPlayLength, reflected so raw sequence replay knows when
 // to return control to Sifu's normal locomotion AnimBlueprint.
 float GetAnimationAssetLength(UObject* animation_asset);

@@ -813,6 +813,21 @@ void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
     if (config.mode != coop::Mode::Coop) return;
     if (!player || !puppet) return;
 
+    // A level restart tears both bodies down while this keeps asserting against
+    // them, and Sifu's relationship multicast walks whatever actor it is given.
+    // Forget everything learned about a puppet from a previous world rather
+    // than carrying a stale verdict into the new one.
+    static ue::UObject* applied_world = nullptr;
+    ue::UObject* world = ue::GetWorld();
+    if (applied_world != world) {
+        applied_world = world;
+        g_friendly_applied_for = nullptr;
+        g_friendly_verified = false;
+        g_relationship_that_stuck = rel::kUnknown;
+        g_next_relationship_attempt = 0;
+        return;
+    }
+
     if (g_friendly_applied_for != puppet) {
         g_friendly_applied_for = puppet;
         g_friendly_verified = false;

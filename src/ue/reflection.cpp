@@ -289,11 +289,32 @@ bool RestoreAnimationBlueprint(UObject* actor) {
     UObject* mesh = GetSkeletalMeshComponent(actor);
     if (!mesh) return false;
     // EAnimationMode::AnimationBlueprint = 0 in UE4.26.
+    //
+    // bForceInitAnimScript stays FALSE. It used to be true, which re-ran the
+    // animation blueprint's initialisation -- and on a spawned clone with no
+    // controller and no order source that produced a graph which never left
+    // idle again. The symptom was exact: the remote player animates until the
+    // first strike, then moves for the rest of the session without ever
+    // animating. PlayAnimationAsset is asked not to clear the instance, so
+    // there is a correctly initialised graph still sitting there; returning to
+    // it is all that is wanted here, not building a new one.
     struct Params {
         std::uint8_t InAnimationMode;
         bool bForceInitAnimScript;
-    } params = {0, true};
+    } params = {0, false};
     return CallFunction(mesh, L"SetAnimationMode", &params);
+}
+
+bool IsValidObject(UObject* object) {
+    if (!g_ready || !object) return false;
+    UObject* kismet = FindObjectByPath(L"/Script/Engine.Default__KismetSystemLibrary");
+    if (!kismet) return false;
+    struct Params {
+        UObject* Object;
+        bool ReturnValue;
+    } params = {object, false};
+    if (!CallFunction(kismet, L"IsValid", &params)) return false;
+    return params.ReturnValue;
 }
 
 float GetAnimationAssetLength(UObject* animation_asset) {

@@ -421,6 +421,10 @@ bool AssertHostileToward(Tracked& entry, ue::UObject* peer) {
 void MaintainPeerHostility(ue::UObject* peer) {
     if (!peer || g_hostility_hopeless) return;
     if (coop::Get().mode != coop::Mode::Coop) return;
+    // Never assert a relationship against a table built for a level we have
+    // left. These pointers are freed by the transition, and the relationship
+    // multicast dereferences whatever it is handed.
+    if (!TrackingIsCurrent()) return;
 
     const DWORD now = GetTickCount();
     int budget = 4;
@@ -1179,7 +1183,18 @@ void ApplyRemoteEnemies() {
                 } else if (state.health > local_health + 0.05f) {
                     SetHealth(fighter, state.health);
                 }
-                SetGuard(fighter, state.guard);
+                // Guard follows the same rule as health: take the host's value
+                // when it is LOWER, never raise it.
+                //
+                // Writing it unconditionally is why the joining player could not
+                // hurt anything. Sifu spends an attack on guard before it
+                // touches health, and this restored the host's guard on every
+                // single frame -- so the remote player's hits were absorbed by a
+                // gauge that refilled faster than it could be emptied, health
+                // never moved, and with nothing to report the host was never
+                // told they had landed a blow. The joiner's whole session shows
+                // `dmg out=0` and no first-hit line at all.
+                if (state.guard + 0.05f < GetGuard(fighter)) SetGuard(fighter, state.guard);
                 entry.last_local_health = state.health;
                 entry.host_applied = state.damage_applied;
             }
