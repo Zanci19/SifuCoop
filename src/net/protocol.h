@@ -25,9 +25,11 @@ namespace sifucoop::net {
 
 constexpr std::uint32_t kMagic = 0x53434F50;  // 'SCOP'
 
-// Bumped whenever any struct below changes. Peers refuse to talk across a
-// mismatch rather than misinterpreting each other's bytes.
-constexpr std::uint16_t kProtocolVersion = 11;
+// Bumped whenever any struct below changes -- or, as in v12, whenever a field's
+// MEANING changes: `sequence` is now per packet type rather than one counter for
+// the whole socket, and a v11 peer's numbering would read as constant loss.
+// Peers refuse to talk across a mismatch rather than misinterpreting each other.
+constexpr std::uint16_t kProtocolVersion = 12;
 
 // AUTHENTICATION
 //

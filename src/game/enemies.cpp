@@ -245,6 +245,43 @@ bool ApplyMirroredTarget(Tracked& entry, std::uint8_t flags) {
     return true;
 }
 
+// UAttackComponent::m_Target, an FWeakObjectPtr {int32 ObjectIndex; int32 Serial},
+// offset straight out of Unreal's property table for UAttackComponent. This is
+// who the enemy has actually decided to fight.
+//
+// It replaces BPF_GetTargetForAction as the source of truth for that question.
+// That call answered "nobody" for every enemy in the room, all session, in the
+// same seconds the log recorded those enemies attacking -- so the mod's only
+// instrument for "are enemies fighting my partner" was answering no
+// unconditionally, and every judgement made with it was worthless.
+constexpr std::uintptr_t kAttackComponentTarget = 0x06B4;
+
+// UObjectBase::InternalIndex. Same standing as kClassPrivateOffset in puppet.cpp:
+// the UObjectBase prefix is fixed for every non-editor UE4 build.
+constexpr std::uintptr_t kInternalIndexOffset = 0x0C;
+
+std::int32_t InternalIndexOf(const ue::UObject* object) {
+    if (!object) return -1;
+    std::int32_t index = -1;
+    std::memcpy(&index, reinterpret_cast<const std::uint8_t*>(object) + kInternalIndexOffset,
+                sizeof(index));
+    return index;
+}
+
+// -1 when the enemy has no target. Comparing object indices rather than
+// resolving the weak pointer keeps this reflection-free and safe to run over
+// every enemy every second.
+std::int32_t TargetIndexOf(const ue::UObject* attack_component) {
+    if (!attack_component) return -1;
+    std::int32_t index = -1;
+    std::int32_t serial = 0;
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(attack_component);
+    std::memcpy(&index, bytes + kAttackComponentTarget, sizeof(index));
+    std::memcpy(&serial, bytes + kAttackComponentTarget + 4, sizeof(serial));
+    if (index < 0 || serial == 0) return -1;
+    return index;
+}
+
 bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
     if (!entry.attack_component || !desired || !g_set_attack_target) return false;
     g_set_attack_target(entry.attack_component, desired);
@@ -253,7 +290,10 @@ bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
     } params = {};
     params.current_attacked = desired;
     ue::CallFunction(entry.attack_component, L"BPF_UpdateLockMoveTarget", &params);
-    return true;
+    // This used to return true unconditionally, which made
+    // "FIRST peer hit handed enemy aggro to puppet" a line that proved nothing
+    // -- it was logged whether or not the write took. Read it back instead.
+    return TargetIndexOf(entry.attack_component) == InternalIndexOf(desired);
 }
 // Every fighting character in the level, players included.
 int EnumerateFighters(ue::UObject** out, int max_out) {
@@ -542,11 +582,16 @@ void ApplyPeerDamage() {
 
         const float delta = reports[i].total - *applied;
         if (delta <= 0.01f) continue;
-        *applied = reports[i].total;
 
+        // The ledger is committed only once the hit has actually gone in.
+        // Writing it first meant a body whose health component could not be
+        // resolved that frame recorded the peer's damage as applied and then
+        // silently dropped it: the peer's total never mentions that delta
+        // again, so the hit is gone for good.
         Fighter fighter = ResolveFighter(entry.actor);
         if (!fighter.health) continue;
         ApplyDamage(fighter, delta);
+        *applied = reports[i].total;
 
         // Raw replicated health damage has no instigator, so Sifu perception
         // never learns who hit it. Hand aggro to the host's peer body and keep
@@ -1042,25 +1087,19 @@ void DumpEnemyTargets() {
     int targeting_other = 0;
     int no_target = 0;
 
+    const std::int32_t player_index = InternalIndexOf(player);
+    const std::int32_t second_index = InternalIndexOf(second);
+
     for (int i = 0; i < g_tracked_count; ++i) {
         const Tracked& entry = g_tracked[i];
         if (!entry.active || !entry.attack_component) continue;
 
-        struct Params {
-            std::uint8_t action_type;
-            std::uint8_t force_out_of_date;
-            std::uint8_t pad[6];
-            ue::UObject* ReturnValue;
-        } params = {};
-        if (!ue::CallFunction(entry.attack_component, L"BPF_GetTargetForAction", &params)) {
-            continue;
-        }
-
-        if (!params.ReturnValue) {
+        const std::int32_t target = TargetIndexOf(entry.attack_component);
+        if (target < 0) {
             ++no_target;
-        } else if (params.ReturnValue == player) {
+        } else if (target == player_index) {
             ++targeting_player;
-        } else if (second && params.ReturnValue == second) {
+        } else if (second && target == second_index) {
             ++targeting_second;
         } else {
             ++targeting_other;

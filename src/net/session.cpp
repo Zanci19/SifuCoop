@@ -532,11 +532,25 @@ void SendPacketTo(void* data, int size, const sockaddr_in& to) {
     ++coop::GetStats().packets_sent;
 }
 
+// One counter per packet type, not one for the whole socket.
+//
+// A single shared counter made every non-snapshot packet look like a lost
+// snapshot to the receiver: the snapshot stream's numbers skip by however many
+// pings, enemy sweeps and damage reports went out in between. Today's log shows
+// it exactly -- seqgap tracked (rx - peerpos) x 5 in every heartbeat, reporting
+// ~16% loss on an 18 ms LAN that was not dropping anything. The number you would
+// read to decide the network was at fault was measuring the mod's own traffic
+// mix instead.
+constexpr int kPacketTypeCount = 16;
+std::uint32_t g_send_sequence_by_type[kPacketTypeCount] = {};
+
 void FillHeader(PacketHeader* header, PacketType type) {
     header->magic = kMagic;
     header->version = kProtocolVersion;
     header->type = static_cast<std::uint16_t>(type);
-    header->sequence = ++g_send_sequence;
+    const int slot = static_cast<int>(type);
+    header->sequence = (slot >= 0 && slot < kPacketTypeCount) ? ++g_send_sequence_by_type[slot]
+                                                              : ++g_send_sequence;
     header->send_time_ms = NowMs();
 }
 
@@ -1245,6 +1259,7 @@ bool RestartSession() {
     g_connected = false;
     g_have_peer_addr = false;
     g_send_sequence = 0;
+    for (std::uint32_t& value : g_send_sequence_by_type) value = 0;
     g_last_recv_ms = 0;
     g_last_send_ms = 0;
     g_last_ping_ms = 0;
