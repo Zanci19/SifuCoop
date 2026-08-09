@@ -171,17 +171,9 @@ MenuStatus CopyStatus() {
 
 void DrawLobbyTab(const MenuStatus& status) {
     const coop::Stats& stats = coop::GetStats();
-    const bool native_network = coop::NativeNetworkActive();
     const ImVec4 good(0.45f, 0.90f, 0.45f, 1.f);
     const ImVec4 warn(0.95f, 0.72f, 0.30f, 1.f);
 
-    if (native_network) {
-        const ImVec4 bad(0.95f, 0.35f, 0.35f, 1.f);
-        ImGui::TextColored(bad, "ENGINE NETWORKING - ALL CO-OP SYNC IS OFF");
-        ImGui::TextWrapped("Player and enemy sync, damage and invites are disabled. "
-                           "Set native_network=0 in SifuCoop.ini on both PCs and restart.");
-        ImGui::Separator();
-    }
     ImGui::TextColored(status.connected ? good : warn, "%s",
                        status.connected ? "CONNECTED" : "Waiting for player");
     if (status.connected && stats.rtt_ms >= 0) {
@@ -212,7 +204,7 @@ void DrawLobbyTab(const MenuStatus& status) {
                      ImGuiInputTextFlags_Password);
     ImGui::TextDisabled("Same passphrase on both PCs.");
 
-    if (ImGui::Button(native_network ? "Save connection" : "Save & Connect", ImVec2(180, 0))) {
+    if (ImGui::Button("Save & Connect", ImVec2(180, 0))) {
         MenuRequests r;
         r.apply_network = true;
         r.host_mode = g_field_hosting;
@@ -222,6 +214,18 @@ void DrawLobbyTab(const MenuStatus& status) {
         PostRequests(r);
     }
     ImGui::SameLine();
+    if (ImGui::Button("Restart network")) {
+        MenuRequests r;
+        r.restart_network = true;
+        PostRequests(r);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("End connection")) {
+        MenuRequests r;
+        r.disconnect_network = true;
+        PostRequests(r);
+    }
+
     ImGui::BeginDisabled(!status.connected || !status.hosting);
     if (ImGui::Button("Start co-op here")) {
         MenuRequests r;
@@ -229,19 +233,6 @@ void DrawLobbyTab(const MenuStatus& status) {
         PostRequests(r);
     }
     ImGui::EndDisabled();
-
-    if (native_network) {
-        ImGui::SameLine();
-        if (ImGui::Button(g_field_hosting ? "Start Engine Host" : "Join Engine Host")) {
-            MenuRequests r;
-            r.native_start = true;
-            r.host_mode = g_field_hosting;
-            lstrcpynA(r.address, g_field_address, sizeof(r.address));
-            r.port = g_field_port;
-            PostRequests(r);
-        }
-        ImGui::TextDisabled("Engine mode reloads the level; use it only after restart.");
-    }
 
     // A standing invite from the host. It is deliberately an offer rather than
     // something that just happens: the host loading a level used to drag the
@@ -281,7 +272,12 @@ void DrawLobbyTab(const MenuStatus& status) {
                                                         : "Waiting for host to start co-op.");
     }
     if (stats.packets_rejected > 0) {
-        ImGui::TextColored(warn, "Connection rejected: check the shared passphrase.");
+        if (status.connected) {
+            ImGui::TextColored(warn, "Ignored %u unauthenticated packets; current peer is connected.",
+                               stats.packets_rejected);
+        } else {
+            ImGui::TextColored(warn, "Unauthenticated packets rejected: check the shared passphrase.");
+        }
     }
 }
 
@@ -296,12 +292,14 @@ void DrawDebugTab() {
     ImGui::Checkbox("Detailed enemy log", &config.verbose_enemies);
     ImGui::Checkbox("Detailed combat log", &config.verbose_orders);
     ImGui::Checkbox("Adaptive smoothing", &config.adaptive_interp);
-    ImGui::Checkbox("Partner swings visibly (needs friendly fire confirmed)",
+    ImGui::Checkbox("Partner swings visibly (cosmetic only)",
                     &config.remote_player_attacks);
+    ImGui::Checkbox("Real partner body (enemy aggro)", &config.real_second_player);
+    ImGui::TextDisabled("Created only after host starts co-op in Story.");
     ImGui::Checkbox("Hide partner's health bar", &config.hide_second_player_hud);
     ImGui::Checkbox("Join partner's level without asking", &config.auto_join_level);
 
-    ImGui::Checkbox("Use Unreal engine networking (restart after saving)", &config.native_network);
+    ImGui::TextDisabled("Custom UDP mirror is the supported networking mode.");
     if (ImGui::Button("Save settings")) {
         MenuRequests r;
         r.save_config = true;
@@ -355,7 +353,6 @@ void DrawMenu() {
 LRESULT CALLBACK WndProcHook(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (g_menu_open.load()) {
         ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
-        const ImGuiIO& io = ImGui::GetIO();
         switch (message) {
             case WM_MOUSEMOVE:
             case WM_LBUTTONDOWN:
@@ -372,9 +369,6 @@ LRESULT CALLBACK WndProcHook(HWND window, UINT message, WPARAM wparam, LPARAM lp
             case WM_XBUTTONDBLCLK:
             case WM_MOUSEWHEEL:
             case WM_MOUSEHWHEEL:
-            case WM_INPUT:
-                if (io.WantCaptureMouse) return 0;
-                break;
             case WM_KEYDOWN:
             case WM_KEYUP:
             case WM_SYSKEYDOWN:
@@ -382,8 +376,8 @@ LRESULT CALLBACK WndProcHook(HWND window, UINT message, WPARAM wparam, LPARAM lp
             case WM_CHAR:
             case WM_SYSCHAR:
             case WM_UNICHAR:
-                if (io.WantCaptureKeyboard || io.WantTextInput) return 0;
-                break;
+            case WM_INPUT:
+                return 0;
             default:
                 break;
         }

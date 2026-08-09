@@ -98,6 +98,10 @@ void SetActorPresent(ue::UObject* actor, bool present);
 // This is native engine steering (not a transform write), so movement, collision
 // and locomotion animation stay on the normal Sifu path. A true result means the
 // request was dispatched; callers that need recovery still watch displacement.
+// Publishes presentation velocity to UE's UMovementComponent. Used with the
+// network puppet's transform drive so Sifu's AnimBP sees locomotion even though
+// no physical AddMovementInput chase is running.
+bool SetPresentationVelocity(ue::UObject* actor, const ue::FVector& velocity);
 bool RequestDirectMove(ue::UObject* actor, const ue::FVector& desired_velocity,
                        bool force_max_speed = false);
 

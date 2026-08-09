@@ -115,14 +115,21 @@ ue::UObject* g_primary_controller = nullptr;
 bool g_creating_second_player = false;
 
 void __fastcall SetHudHook(void* self, void* widget) {
-    const bool is_primary = self && self == g_primary_controller;
-    const bool is_second = self && !is_primary &&
-                           (self == g_controller || g_creating_second_player);
+    const bool is_second =
+        self && (self == g_controller ||
+                 (g_creating_second_player && self != g_primary_controller));
     if (is_second && coop::Get().hide_second_player_hud) {
+        // Take it off the screen as well as declining to register it: by the
+        // time the widget announces itself it has usually already been added.
+        if (widget) {
+            struct Empty {
+            } none = {};
+            ue::CallFunction(static_cast<ue::UObject*>(widget), L"RemoveFromParent", &none);
+        }
         static bool logged = false;
         if (!logged) {
             logged = true;
-            SC_LOG("player2: declined the second player's HUD registration");
+            SC_LOG("player2: declined the second player's HUD (it would draw over yours)");
         }
         return;
     }
@@ -164,7 +171,7 @@ bool InPlayableWorld(ue::UObject* world) {
     char level[192] = {};
     if (!ue::GetCurrentLevelPath(level, sizeof(level))) return false;
     static const char* const kNonGameplay[] = {"SelectHideoutLevel", "MainMenu", "Frontend",
-                                               "Startup", "EntryLevel"};
+                                               "Startup", "EntryLevel", "Hideout_0_Main"};
     for (const char* fragment : kNonGameplay) {
         if (strstr(level, fragment) != nullptr) return false;
     }
@@ -594,6 +601,29 @@ void SuppressMenus(ue::UObject* controller) {
 // Applied to whichever pawn currently belongs to the second player. A pawn that
 // the game mode respawns arrives with none of this, so it is re-applied rather
 // than done once at creation.
+// Keep floor/world collision enabled while ignoring only other pawn capsules.
+// Actor-level collision-off also removes the floor; leaving Pawn as Block makes
+// the host and remote bodies push or trap each other after a join.
+bool IgnorePawnCollision(ue::UObject* pawn) {
+    if (!pawn) return false;
+    struct ComponentParams {
+        void* ComponentClass;
+        ue::UObject* ReturnValue;
+    } capsule = {};
+    capsule.ComponentClass = ue::FindObjectByPath(L"/Script/Engine.CapsuleComponent");
+    if (!capsule.ComponentClass ||
+        !ue::CallFunction(pawn, L"GetComponentByClass", &capsule) || !capsule.ReturnValue) {
+        return false;
+    }
+    struct CollisionResponseParams {
+        std::uint8_t Channel;
+        std::uint8_t NewResponse;
+    } response = {};
+    response.Channel = 2;      // ECC_Pawn
+    response.NewResponse = 0;  // ECR_Ignore
+    return ue::CallFunction(capsule.ReturnValue, L"SetCollisionResponseToChannel", &response);
+}
+
 void ConfigurePawn(ue::UObject* pawn) {
     if (!pawn) return;
     ue::UObject* world = ue::GetWorld();
@@ -605,18 +635,21 @@ void ConfigurePawn(ue::UObject* pawn) {
     // player while the two players remain co-operative.
     //
     // The faction is checked again after a respawn or level travel rather than
-    // assumed to be inherited from the previous pawn.    // The remote body is a replicated visual/AI target, not a local physical
-    // obstacle. Leaving its capsule enabled makes K2_TeleportTo refuse a
-    // snapshot whenever the two player capsules overlap, which is the source
-    // of the visible standing-inside-each-other jitter. Enemy targeting remains
-    // explicit through the attack component; damage remains authoritative on
+    // assumed to be inherited from the previous pawn.
+    // The remote body is a replicated visual/AI target, not a local physical
+    // obstacle. World collision remains enabled for the floor, but its capsule
+    // ignores ECC_Pawn so player bodies never block a snapshot teleport. Enemy
+    // targeting remains explicit through the attack component; damage remains
+    // authoritative on
     // the owning peer.
     struct CollisionParams {
         std::uint8_t bNewActorEnableCollision[8];
     } collision = {};
     collision.bNewActorEnableCollision[0] = 1;
     const bool collision_on = ue::CallFunction(pawn, L"SetActorEnableCollision", &collision);
-    SC_LOG("player2: peer body collision %s", collision_on ? "enabled" : "NOT enabled");
+    const bool pawn_ignored = IgnorePawnCollision(pawn);
+    SC_LOG("player2: peer body collision world=%s pawn=%s", collision_on ? "enabled" : "FAILED",
+           pawn_ignored ? "ignored" : "FAILED");
     SetInvincible(pawn, true);
 }
 
@@ -628,10 +661,6 @@ bool SecondPlayerActive() { return g_controller != nullptr; }
 
 ue::UObject* PrimaryPlayerPawn() {
     return PawnOf(PlayerControllerAt(ue::GetWorld(), 0));
-}
-
-ue::UObject* PrimaryPlayerController() {
-    return PlayerControllerAt(ue::GetWorld(), 0);
 }
 
 ue::UObject* GetSecondPlayerPawn() {
@@ -864,21 +893,6 @@ ue::UObject* MaintainSecondPlayer() {
         return CreateSecondPlayer();
     }
 
-    static ue::UObject* known_primary_pawn = nullptr;
-    ue::UObject* primary_now = PawnOf(PlayerControllerAt(world, 0));
-    if (primary_now && primary_now != known_primary_pawn) {
-        if (known_primary_pawn) {
-            SC_LOG("player2: player one respawned (%p -> %p) -- re-asserting camera and "
-                   "splitscreen override", static_cast<void*>(known_primary_pawn),
-                   static_cast<void*>(primary_now));
-            if (coop::Get().second_player_disable_splitscreen) {
-                ForceDisableSplitscreen(world, true);
-            }
-            g_view_reassert_frames = 180;
-        }
-        known_primary_pawn = primary_now;
-    }
-
     if (g_view_reassert_frames > 0) {
         --g_view_reassert_frames;
         RestorePrimaryView();
@@ -902,7 +916,6 @@ ue::UObject* MaintainSecondPlayer() {
     // as a theft; repairing a respawn in progress would hand the human the
     // remote player's character, which is the same bug facing the other way.
     ue::UObject* first_controller = PlayerControllerAt(world, 0);
-    if (first_controller) g_primary_controller = first_controller;
     ue::UObject* first_pawn = PawnOf(first_controller);
     const bool foreign_controller = first_controller && first_controller != g_controller;
 

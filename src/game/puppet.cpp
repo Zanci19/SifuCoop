@@ -1,5 +1,7 @@
 #include "puppet.h"
 
+#include "../../third_party/minhook/include/MinHook.h"
+
 #include <windows.h>
 
 #include <cmath>
@@ -17,7 +19,6 @@
 #include "coop.h"
 #include "enemies.h"
 #include "orders.h"
-#include "native_net.h"
 #include "player2.h"
 
 namespace sifucoop::game {
@@ -41,12 +42,34 @@ using SpawnActorFn = ue::UObject*(__fastcall*)(void* world, void* uclass, const 
 
 SpawnActorFn g_spawn_actor = nullptr;
 
+// UPlayerAnim samples owner velocity here, before Sifu evaluates its locomotion graph.
+using PlayerAnimUpdateFn = void(__fastcall*)(ue::UObject*, float);
+using PlayerAnimSetSpeedStateFn = void(__fastcall*)(ue::UObject*, std::uint8_t);
+using GetTargetableActorComponentFn = ue::UObject*(__fastcall*)(const ue::UObject*);
+using RegisterTargetableActorFn = void(__fastcall*)(ue::UObject*);
+
+PlayerAnimUpdateFn g_original_player_anim_update = nullptr;
+PlayerAnimSetSpeedStateFn g_set_player_anim_speed_state = nullptr;
+GetTargetableActorComponentFn g_get_targetable_actor_component = nullptr;
+RegisterTargetableActorFn g_register_targetable_actor = nullptr;
+std::uintptr_t g_player_anim_update_target = 0;
+ue::UObject* g_puppet_anim_instance = nullptr;
+ue::FVector g_puppet_presentation_velocity = {};
+bool g_have_puppet_presentation_velocity = false;
+
 // Weak: the puppet can be destroyed by the game (level transition, respawn),
 // so this is validated before use rather than trusted.
 ue::UObject* g_puppet = nullptr;
 bool g_coop_started = false;
 char g_announced_level[192] = {};
 bool g_lobby_was_connected = false;
+
+// Orders identify strikes before the animation becomes active. Keep this short
+// window so TickPuppet samples the resulting montage on its next frames and
+// sends it even when it is the same asset as the preceding strike.
+DWORD g_cosmetic_attack_montage_until = 0;
+DWORD g_raw_sequence_restore_at = 0;
+bool g_arrival_teleport_pending = false;
 
 
 // Follow mode: replay the local player's own movement onto the puppet on a
@@ -75,6 +98,85 @@ ue::UObject* g_last_player = nullptr;
 
 ue::FVector g_last_local_location;
 bool g_have_local_velocity = false;
+
+void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_seconds) {
+    // Do not call reflection here: nested ProcessEvent in this traversal-
+    // sensitive update caused the Steam AV. Velocity offsets below came from
+    // Sifu's shipped PDB/reflection tables; derived state uses its native
+    // setter instead of partially rewriting either state/cache struct.
+    const bool inject = anim_instance && anim_instance == g_puppet_anim_instance &&
+                        g_have_puppet_presentation_velocity;
+    auto* bytes = reinterpret_cast<std::uint8_t*>(anim_instance);
+    float speed = 0.f;
+    if (inject) {
+        speed = sqrtf(g_puppet_presentation_velocity.X *
+                          g_puppet_presentation_velocity.X +
+                      g_puppet_presentation_velocity.Y *
+                          g_puppet_presentation_velocity.Y);
+        // Native code consumes these while updating locomotion.
+        std::memcpy(bytes + 0xFB4, &g_puppet_presentation_velocity,
+                    sizeof(g_puppet_presentation_velocity));  // m_vOwnerVelocity
+        std::memcpy(bytes + 0xFC0, &speed, sizeof(speed));     // m_fOwnerVelocityLength
+        std::memcpy(bytes + 0x15E4, &speed, sizeof(speed));    // m_fWantedSpeed
+    }
+    if (g_original_player_anim_update) g_original_player_anim_update(anim_instance, delta_seconds);
+
+    if (!inject) return;
+
+    // The spawned/second-player body has no local locomotion order. Native
+    // update therefore recomputes its derived state as V0/idle even after it
+    // consumed the injected velocity. The AnimBlueprint transition graph reads
+    // these derived fields after NativeUpdateAnimation returns; assert the
+    // matching state here so the graph actually leaves idle.
+    int state = 0;  // V0 idle
+    if (speed > 18.f) {
+        if (speed < 280.f) state = 1;       // V1 walk
+        else if (speed < 600.f) state = 2;  // V2 run
+        else state = 3;                     // V3 sprint
+    }
+
+    // FSpeedState is five bytes: V0..V3 booleans followed by the enum.
+    // The old four-byte write left the enum at V0, so the graph stayed idle.
+    if (g_set_player_anim_speed_state) {
+        g_set_player_anim_speed_state(anim_instance, static_cast<std::uint8_t>(state));
+    } else {
+        std::uint8_t speed_state[5] = {};
+        speed_state[state] = 1;
+        speed_state[4] = static_cast<std::uint8_t>(state);
+        std::memcpy(bytes + 0x1C2D, speed_state, sizeof(speed_state));
+    }
+
+    float speed_alphas[4] = {};
+    speed_alphas[state] = 1.f;
+    std::memcpy(bytes + 0x1C44, speed_alphas, sizeof(speed_alphas));
+
+    // Transition-cache flags are one-shot graph results. Reasserting them each
+    // frame restarted the start-step forever: the raised-leg freeze seen live.
+    // Leave this cache entirely to Sifu's animation state machine.
+
+
+    static bool announced = false;
+    if (!announced && state != 0) {
+        announced = true;
+        SC_LOG("puppet: locomotion graph forced out of idle (V%d, speed %.0f)", state, speed);
+    }
+}
+
+void EnsurePlayerAnimHook() {
+    static bool attempted = false;
+    if (attempted || !IsOrderHookInstalled() || !g_player_anim_update_target) return;
+    attempted = true;
+    if (MH_CreateHook(reinterpret_cast<void*>(g_player_anim_update_target),
+                      reinterpret_cast<void*>(&PlayerAnimUpdateHook),
+                      reinterpret_cast<void**>(&g_original_player_anim_update)) == MH_OK &&
+        MH_EnableHook(reinterpret_cast<void*>(g_player_anim_update_target)) == MH_OK) {
+        SC_LOG("puppet: UPlayerAnim pre-evaluation hook ACTIVE");
+    } else {
+        g_original_player_anim_update = nullptr;
+        SC_LOG("puppet: UPlayerAnim pre-evaluation hook FAILED");
+    }
+}
+
 void ResetSamples() {
     for (Sample& sample : g_samples) sample.valid = false;
     g_sample_head = 0;
@@ -92,27 +194,16 @@ void RecordSample(const ue::FVector& location, const ue::FRotator& rotation) {
 constexpr float kSnapDistance = 600.f;
 constexpr float kVerticalSnap = 250.f;
 
-// Twice corrected. 12 units was too tight -- one frame of movement overshot it
-// and the puppet oscillated. 45 was too loose -- it stopped dead, waited for the
-// target to pull away, then lurched, which read as stop-go motion.
-//
-// The deadzone is now small and the input is proportional with a *low* floor, so
-// movement shrinks smoothly as it closes rather than being cut off at a
-// threshold. A high floor is what forces the overshoot the deadzone then has to
-// absorb; with a low one it converges instead of bouncing.
-constexpr float kArrivedDistance = 8.f;
-constexpr float kSlowdownDistance = 90.f;
-constexpr float kMinimumScale = 0.06f;
 
 // Fraction of the remaining yaw error closed per frame. Low enough to smooth
 // the peer's per-snapshot yaw wobble, high enough that a real turn resolves in
 // a few frames. Applied along the shortest arc in DriveTo.
 constexpr float kYawSmoothing = 0.25f;
 
-// Fraction of the remaining horizontal error closed outright each frame, on top
-// of the movement input. Low enough to stay smooth (it is exponential decay, not
-// a step), high enough that the puppet stops trailing a running peer by
-// hundreds of units and then teleporting.
+// Fraction of remaining horizontal error closed by authoritative transform
+// correction. Low enough to stay smooth (exponential decay, not a step), high
+// enough that a replicated actor does not trail by hundreds of units before
+// snapping.
 constexpr float kPositionCorrection = 0.30f;
 
 // Both smoothing factors above are written as "fraction closed in one frame at
@@ -134,14 +225,10 @@ float FrameRateAdjusted(float fraction_at_60) {
     return alpha;
 }
 
-// Steering rather than teleporting is what produces locomotion animation.
-//
-// Teleporting sets position directly, so the movement component never
-// accumulates velocity, so the anim graph sees speed 0 and plays idle -- the
-// character slid around in a standing pose. AddMovementInput goes through the
-// movement component instead, which produces real velocity and therefore real
-// walking and running animation. It also requires the driven character to have
-// a controller, or the movement component never ticks at all.
+// Position is sender-authoritative and corrected directly. Presentation
+// velocity is restored after each transform so normal animation variables see
+// locomotion. The player clone additionally gets the exact UPlayerAnim speed
+// state in PlayerAnimUpdateHook.
 void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
              const ue::FRotator& rotation, const ue::FVector& reported_velocity, bool is_puppet) {
     // Never share a movement-failure latch between unrelated actors.
@@ -211,79 +298,76 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
         return;
     }
 
-    // Native movement consumes a velocity rather than a controller input. It is
-    // the path Sifu's fighting movement component uses to update AnimBP speed.
-    constexpr float kCatchupSeconds = 0.12f;
-    constexpr float kMaximumDriveSpeed = 1200.f;
-
-    // Keep following the host's real motion even after the positional error is
-    // small. Previously this was initialised to zero and only received the
-    // remote velocity once the error exceeded 8 units. At 60 Hz that threshold
-    // is crossed every few frames, making an otherwise caught-up character
-    // alternately run and idle (the visible "morphing" report).
-    ue::FVector desired_velocity = {reported_velocity.X, reported_velocity.Y, 0.f};
-    if (distance > kArrivedDistance) {
-        desired_velocity.X += dx / kCatchupSeconds;
-        desired_velocity.Y += dy / kCatchupSeconds;
-    }
-    const float desired_speed = sqrtf(desired_velocity.X * desired_velocity.X +
-                                      desired_velocity.Y * desired_velocity.Y);
-    if (desired_speed > kMaximumDriveSpeed) {
-        const float scale = kMaximumDriveSpeed / desired_speed;
-        desired_velocity.X *= scale;
-        desired_velocity.Y *= scale;
-    }
-
-    const bool direct_steering =
-        is_puppet ? false : RequestDirectMove(target_actor, desired_velocity);
-    if (!direct_steering && distance > kArrivedDistance) {
-        struct MoveParams {
-            ue::FVector WorldDirection;
-            float ScaleValue;
-            bool bForce;
-        } move = {};
-        move.WorldDirection = {dx / distance, dy / distance, 0.f};
-        // Proportional approach: full input while far, easing towards a floor
-        // as it arrives. A constant scale is what made it overshoot and bounce.
-        float scale = distance / kSlowdownDistance;
-        if (scale > 1.f) scale = 1.f;
-        if (scale < kMinimumScale) scale = kMinimumScale;
-        move.ScaleValue = scale;
-        move.bForce = true;
-
-        if (!ue::CallFunction(target_actor, L"AddMovementInput", &move) && is_puppet) ++correction_failed;
-
-    }
-
-    // A network player must actually be walked by its movement component.  A
-    // per-frame transform write makes the visual location correct, but resets
-    // the component velocity to zero, which leaves the character gliding in
-    // the idle pose.  AddMovementInput above is therefore the authoritative
-    // movement path for a puppet too; reserve teleports for the large-error
-    // guard above.  Rotation still needs to be applied here because movement
-    // input is in world space and does not turn the actor by itself.
+    // Sifu's spawned clone accepts AddMovementInput, but its player animation
+    // graph never consumes that synthetic controller input. Worse, its movement
+    // component integrates every late correction as physical acceleration. At
+    // normal speed it continually overshoots and reverses; in Focus time the
+    // target moves slowly enough to hide that loop. Drive the already
+    // interpolated network transform directly instead. This keeps the capsule
+    // grounded through K2_TeleportTo while avoiding movement-component chase
+    // oscillation. Animation velocity is handled separately once the exact
+    // player AnimBP input is identified.
     if (is_puppet) {
-        struct RotationParams {
-            ue::FRotator NewRotation;
-            bool bTeleportPhysics;
-            bool ReturnValue;
-        } rot = {};
-        rot.NewRotation = new_rotation;
-        if (!ue::CallFunction(target_actor, L"K2_SetActorRotation", &rot)) ++correction_failed;
+        const float alpha = FrameRateAdjusted(kPositionCorrection);
+        ue::FVector corrected = {current.X + dx * alpha, current.Y + dy * alpha,
+                                 current.Z + dz * alpha};
+        // Animation follows the sender's measured velocity, not the correction
+        // step used to close positional error. The latter spikes on arrival and
+        // falls toward zero as the bodies converge even while the peer keeps
+        // running; the log captured a false 3162-unit sprint from that bug.
+        ue::FVector presentation_velocity = {reported_velocity.X, reported_velocity.Y, 0.f};
+        float presentation_speed = sqrtf(presentation_velocity.X * presentation_velocity.X +
+                                         presentation_velocity.Y * presentation_velocity.Y);
+        constexpr float kMaximumPresentationSpeed = 850.f;
+        if (presentation_speed > kMaximumPresentationSpeed) {
+            const float scale = kMaximumPresentationSpeed / presentation_speed;
+            presentation_velocity.X *= scale;
+            presentation_velocity.Y *= scale;
+        } else if (presentation_speed <= 18.f && distance > 35.f) {
+            // One useful fallback during the first sample after a stall: show
+            // the visible catch-up rather than sliding, but keep it bounded.
+            const float frame_seconds = sifucoop::hooks::FrameDeltaSeconds();
+            if (frame_seconds > 0.001f) {
+                presentation_velocity = {(corrected.X - current.X) / frame_seconds,
+                                         (corrected.Y - current.Y) / frame_seconds, 0.f};
+                presentation_speed = sqrtf(presentation_velocity.X * presentation_velocity.X +
+                                           presentation_velocity.Y * presentation_velocity.Y);
+                if (presentation_speed > kMaximumPresentationSpeed) {
+                    const float scale = kMaximumPresentationSpeed / presentation_speed;
+                    presentation_velocity.X *= scale;
+                    presentation_velocity.Y *= scale;
+                }
+            }
+        }
+        g_puppet_presentation_velocity = presentation_velocity;
+        g_have_puppet_presentation_velocity = true;
+        g_puppet_anim_instance = ue::GetAnimInstance(target_actor);
+        if (!TeleportActor(target_actor, corrected, new_rotation)) ++correction_failed;
+        SetPresentationVelocity(target_actor, presentation_velocity);
+        return;
+    }
+    // Client enemy brains are deliberately stopped, so RequestDirectMove has
+    // no consumer. The old code counted a dispatched request as "driven" even
+    // when the actor never moved. Apply the host transform directly, then
+    // restore root/component velocity after teleport so the AnimBP sees motion.
+    {
+        const float alpha = FrameRateAdjusted(kPositionCorrection);
+        const ue::FVector corrected = {current.X + dx * alpha, current.Y + dy * alpha,
+                                       current.Z + dz * alpha};
+        ue::FVector presentation_velocity = {reported_velocity.X, reported_velocity.Y, 0.f};
+        constexpr float kMaximumEnemyPresentationSpeed = 1200.f;
+        const float speed = sqrtf(presentation_velocity.X * presentation_velocity.X +
+                                  presentation_velocity.Y * presentation_velocity.Y);
+        if (speed > kMaximumEnemyPresentationSpeed) {
+            const float scale = kMaximumEnemyPresentationSpeed / speed;
+            presentation_velocity.X *= scale;
+            presentation_velocity.Y *= scale;
+        }
+        TeleportActor(target_actor, corrected, new_rotation);
+        SetPresentationVelocity(target_actor, presentation_velocity);
         return;
     }
 
-    // Never transform-correct an active enemy here: direct movement preserves
-    // collision sweeps and hit detection. The large-gap guard above is enough.
-
-    // Arrived: hold position, and only keep the facing up to date.
-    struct RotationParams {
-        ue::FRotator NewRotation;
-        bool bTeleportPhysics;
-        bool ReturnValue;
-    } rot = {};
-    rot.NewRotation = new_rotation;
-    ue::CallFunction(target_actor, L"K2_SetActorRotation", &rot);
 }
 
 // Local rehearsal of the network path: replay our own movement on a delay.
@@ -322,6 +406,19 @@ void* GetObjectClass(ue::UObject* object) {
 // makes the level's enemies treat both players as enemies and makes the players
 // unable to hurt each other. The old behaviour -- opposite factions -- is what
 // a versus match wants, and is kept for exactly that.
+// A spawned player blueprint can inherit hidden state from a local-only setup path.
+// The remote clone is never intentionally hidden while connected, so explicitly
+// restore actor visibility after spawn and occasionally while it is driven.
+bool EnsureRemoteVisible(ue::UObject* puppet, bool log_result) {
+    if (!puppet) return false;
+    struct HiddenParams {
+        std::uint8_t bNewHidden[8];
+    } show = {};
+    const bool ok = ue::CallFunction(puppet, L"SetActorHiddenInGame", &show);
+    if (log_result) SC_LOG("puppet: visibility restore %s", ok ? "requested" : "FAILED");
+    return ok;
+}
+
 void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
     const int player_faction = GetFaction(player);
     const bool coop_mode = coop::Get().mode == coop::Mode::Coop;
@@ -338,17 +435,49 @@ void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
         SC_LOG("puppet: could not read your faction -- leaving the puppet's alone");
     }
 
-    // A remote peer can occupy the same world-space point as the local player.
-    // Disable only this cosmetic peer actor's physical blocking so an overlap
-    // cannot make the engine reject its next interpolated teleport. Enemy AI
-    // still receives an actor target and attacks are mirrored explicitly.
+    // The puppet needs normal WORLD collision. Turning collision off also turns
+    // off the floor: gravity then drops the capsule until the vertical snap
+    // guard teleports it back up, producing the visible floor-loop at frame rate.
+    // Friendly faction/invincibility handle player combat; body overlap is the
+    // acceptable trade-off for a grounded, stable remote character.
     struct CollisionParams {
         std::uint8_t bNewActorEnableCollision[8];
     } collision = {};
-    const bool collision_off =
+    collision.bNewActorEnableCollision[0] = 1;
+    const bool collision_on =
         ue::CallFunction(puppet, L"SetActorEnableCollision", &collision);
-    SC_LOG("puppet: peer collision %s", collision_off ? "disabled" : "NOT disabled");
+    SC_LOG("puppet: world collision %s", collision_on ? "enabled" : "FAILED");
+
+    // World collision keeps the floor solid. Pawn collision must be ignored:
+    // two spawned character capsules otherwise block/push each other, freezing
+    // Player 0 and producing the peer's small circular jitter.
+    // ACharacter::GetCapsuleComponent is a native inline getter, not a
+    // reflected UFunction. The old CallFunction attempt therefore always
+    // failed, leaving the two player capsules blocking each other. Resolve the
+    // engine CapsuleComponent class and use AActor::GetComponentByClass instead
+    // (the same reflected route used by GetAnimInstance).
+    struct ComponentParams {
+        void* ComponentClass;
+        ue::UObject* ReturnValue;
+    } capsule_result = {};
+    bool pawn_ignore = false;
+    void* capsule_class = ue::FindObjectByPath(L"/Script/Engine.CapsuleComponent");
+    capsule_result.ComponentClass = capsule_class;
+    if (capsule_class && ue::CallFunction(puppet, L"GetComponentByClass", &capsule_result) &&
+        capsule_result.ReturnValue) {
+        struct CollisionResponseParams {
+            std::uint8_t Channel;
+            std::uint8_t NewResponse;
+        } response = {};
+        response.Channel = 2;      // ECC_Pawn
+        response.NewResponse = 0;  // ECR_Ignore
+        pawn_ignore = ue::CallFunction(capsule_result.ReturnValue,
+                                       L"SetCollisionResponseToChannel", &response);
+    }
+    SC_LOG("puppet: pawn collision %s%s", pawn_ignore ? "ignored" : "FAILED",
+           capsule_class ? "" : " (CapsuleComponent class unavailable)");
     SetInvincible(puppet, true);
+    EnsureRemoteVisible(puppet, true);
 
     // UCharacterMovementComponent::TickComponent bails out early when the pawn
     // has no controller, so an unpossessed puppet never moves under its own
@@ -410,36 +539,10 @@ int ReadRelationship(ue::UObject* from_actor, ue::UObject* to_actor) {
     return params.ReturnValue;
 }
 
-// ERelationshipTypes, recovered from the shipped executable's own generated
-// enumerator-name table (contiguous 0x20-spaced strings at 0x04A420D0, in
-// declaration order):
-//
-//   0 Enemy   1 Fight   2 Object   3 Neutral   4 Coop   5 Ally   6 Count   7 None
-//
-// Both halves of this were confirmed against a live two-machine session before
-// being relied on: sampling two live enemies returned 5 (Ally, which is exactly
-// what two same-faction characters should be), and reading back the relationship
-// between the two players returned 3 (Neutral, which is exactly what two players
-// standing in the hideout should be). A table that predicts both observations is
-// not a guess.
-//
-// The headline is the fourth entry. **Sifu ships a `Coop` relationship type.**
-// The game already has a name for what this mod is trying to express, so that is
-// what gets asked for first -- ahead of Ally, which is merely "these two are on
-// the same side".
-constexpr int kRelationCoop = 4;
-constexpr int kRelationAlly = 5;
-constexpr int kRelationCount = 6;
-
 // Learn the "friendly" enum value from two distinct active enemies. Enemies
 // share the level's hostile faction, so their relationship to each other is the
 // friendly value we want to copy onto the puppet pair. Returns -1 until two
 // enemies can be sampled.
-//
-// Kept as a LAST resort rather than the primary source. It was the primary
-// source, and a live session showed why that was weak: it can only answer while
-// two enemies happen to be active, and what it learns is Ally, not the Coop
-// value the game actually has for this.
 int DiscoverFriendlyRelationValue() {
     EnemyRow rows[64];
     const int count = GetEnemyRows(rows, 64);
@@ -480,38 +583,10 @@ bool SetRelationship(ue::UObject* social, ue::UObject* toward, int value) {
     return ue::CallFunction(social, L"BPF_ServerChangeRelationship", &params);
 }
 
+// Applied once per puppet instance; re-applied if the puppet actor changes.
 ue::UObject* g_friendly_applied_for = nullptr;
 bool g_friendly_verified = false;
-int g_relationship_that_stuck = kRelationUnknown;
-DWORD g_next_relationship_attempt = 0;
 
-// Set both directions to `value` and report whether the game actually kept it.
-bool TrySetRelationshipBothWays(ue::UObject* player, ue::UObject* puppet, int value,
-                                int* out_player, int* out_puppet) {
-    SetRelationship(GetSocialComponent(player), puppet, value);
-    SetRelationship(GetSocialComponent(puppet), player, value);
-    const int back_player = ReadRelationship(player, puppet);
-    const int back_puppet = ReadRelationship(puppet, player);
-    if (out_player) *out_player = back_player;
-    if (out_puppet) *out_puppet = back_puppet;
-    return back_player == value && back_puppet == value;
-}
-
-// Establish -- and KEEP -- a non-hostile relationship between the two players.
-//
-// Rewritten after a live session showed the first version failing silently in a
-// way only a readback could reveal: it set the value sampled from two enemies
-// (5 = Ally), the setter reported success, and reading it back returned 3
-// (Neutral). The write did not take, so remote attacks correctly stayed off --
-// but the reason was invisible until the enum was decoded.
-//
-// Three changes follow from that. Coop is tried FIRST, because the game has a
-// relationship type by that name and it is plainly the one this mod means.
-// Candidates are tried in turn and each is verified, so the value that survives
-// is chosen by the game rather than by us. And it is RE-ASSERTED on a timer
-// rather than applied once: `ABaseCharacter::UpdateRelationshipToOtherCharacters`
-// exists, which means something recomputes these, and a value that holds for one
-// frame is worth nothing to a swing thrown ten seconds later.
 void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
     const coop::Config& config = coop::Get();
     // remote_player_attacks depends on this, so wanting remote attacks is
@@ -519,62 +594,46 @@ void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
     if (!config.friendly_relationship && !config.remote_player_attacks) return;
     if (config.mode != coop::Mode::Coop) return;
     if (!player || !puppet) return;
+    if (g_friendly_applied_for == puppet) return;  // already settled for this body
 
-    if (g_friendly_applied_for != puppet) {
-        g_friendly_applied_for = puppet;
+    const int friendly = DiscoverFriendlyRelationValue();
+    if (friendly == kRelationUnknown) return;  // not enough enemies yet; retry later
+
+    ue::UObject* player_social = GetSocialComponent(player);
+    ue::UObject* puppet_social = GetSocialComponent(puppet);
+    const bool a = SetRelationship(player_social, puppet, friendly);
+    const bool b = SetRelationship(puppet_social, player, friendly);
+
+    if (!a && !b) {
+        SC_LOG("puppet: friendly relationship could not be applied "
+               "(BPF_ServerChangeRelationship unavailable) -- remote attacks stay OFF");
+        g_friendly_applied_for = puppet;  // do not retry every frame if unsupported
         g_friendly_verified = false;
-        g_relationship_that_stuck = kRelationUnknown;
-        g_next_relationship_attempt = 0;
-    }
-
-    const DWORD now = GetTickCount();
-    if (g_next_relationship_attempt != 0 && now < g_next_relationship_attempt) return;
-    // Confirmed pairs are re-checked lazily; unconfirmed ones retry briskly,
-    // because until one sticks the remote player cannot swing at all.
-    g_next_relationship_attempt = now + (g_friendly_verified ? 3000 : 1000);
-
-    int back_player = kRelationUnknown;
-    int back_puppet = kRelationUnknown;
-
-    // Already found one the game keeps: just hold it there.
-    if (g_relationship_that_stuck != kRelationUnknown) {
-        const bool still = TrySetRelationshipBothWays(player, puppet,
-                                                      g_relationship_that_stuck,
-                                                      &back_player, &back_puppet);
-        if (still != g_friendly_verified) {
-            g_friendly_verified = still;
-            SC_LOG("puppet: relationship %d %s (readback %d/%d)", g_relationship_that_stuck,
-                   still ? "re-confirmed" : "STOPPED HOLDING -- searching again",
-                   back_player, back_puppet);
-        }
-        if (!still) g_relationship_that_stuck = kRelationUnknown;
         return;
     }
 
-    const int candidates[] = {kRelationCoop, kRelationAlly, DiscoverFriendlyRelationValue()};
-    for (const int value : candidates) {
-        if (value == kRelationUnknown || value < 0 || value >= kRelationCount) continue;
-        if (!TrySetRelationshipBothWays(player, puppet, value, &back_player, &back_puppet)) {
-            continue;
-        }
-        g_relationship_that_stuck = value;
-        g_friendly_verified = true;
-        SC_LOG("puppet: relationship %d (%s) STUCK -- readback %d/%d, remote attacks may play",
-               value, value == kRelationCoop ? "Coop" : (value == kRelationAlly ? "Ally" : "?"),
-               back_player, back_puppet);
-        return;
-    }
+    // The setter reporting success only means the UFunction was found and
+    // called. Read the relationship back through the game's own getter and
+    // require BOTH directions to actually hold the friendly value.
+    //
+    // This is the difference between "we asked Sifu to make these two allies"
+    // and "Sifu says these two are allies", and it is the whole safety argument
+    // for replaying the peer's attacks at all: a replayed swing is a real
+    // hitbox, so an unconfirmed exemption means the remote player kills their
+    // own co-op partner.
+    const int back_player = ReadRelationship(player, puppet);
+    const int back_puppet = ReadRelationship(puppet, player);
+    g_friendly_verified = (back_player == friendly && back_puppet == friendly);
+    g_friendly_applied_for = puppet;
 
-    // Nothing held. Say so once rather than every second, and say what was
-    // actually read, because that number is the whole diagnosis.
-    static int last_reported = -2;
-    if (last_reported != back_player) {
-        last_reported = back_player;
-        SC_LOG("puppet: no relationship value would stick (last readback %d/%d) -- "
-               "remote attacks stay OFF. 0=Enemy 1=Fight 2=Object 3=Neutral 4=Coop 5=Ally",
-               back_player, back_puppet);
-        coop::ReportProblem("could not turn friendly fire off -- "
-                            "your partner will move but not swing");
+    SC_LOG("puppet: friendly relationship value=%d applied (player<-%s puppet<-%s), "
+           "readback %d/%d -> %s",
+           friendly, a ? "ok" : "FAIL", b ? "ok" : "FAIL", back_player, back_puppet,
+           g_friendly_verified ? "CONFIRMED, remote attacks may play"
+                               : "NOT confirmed, remote attacks stay off");
+    if (!g_friendly_verified) {
+        coop::ReportProblem("could not confirm friendly fire is off -- "
+                            "the remote player will move but not swing");
     }
 }
 
@@ -639,7 +698,28 @@ const char* LevelLeaf(const char* path) {
 // prompt. Keep the peer in its current safe world until the host commits to a
 // real destination, which will then be announced normally.
 bool IsTransientSelectionLevel(const char* path) {
-    return path && strstr(path, "SelectHideoutLevel") != nullptr;
+    if (!path || !path[0]) return true;
+    static const char* const kNonGameplay[] = {"SelectHideoutLevel", "MainMenu", "Frontend",
+                                               "Startup", "EntryLevel", "Hideout_0_Main"};
+    for (const char* fragment : kNonGameplay) {
+        if (strstr(path, fragment) != nullptr) return true;
+    }
+    return false;
+}
+
+// Creating a second local player is observable game input. It may happen only
+// after the host explicitly started co-op and both machines report the same
+// settled Story world. This prevents the host pawn theft/startup-text bug and
+// prevents the joiner creating controller 1 in Hideout 0 while OpenLevel is
+// still pending.
+bool CoopBodiesMayExist() {
+    if (!g_coop_started || !net::IsConnected()) return false;
+    char level[192] = {};
+    if (!ue::GetCurrentLevelPath(level, sizeof(level)) || IsTransientSelectionLevel(level)) {
+        return false;
+    }
+    const char* peer_level = net::GetPeerLevel();
+    return peer_level && peer_level[0] && _stricmp(level, peer_level) == 0;
 }
 
 // The host's most recent standing invite, held until the joining player takes
@@ -647,23 +727,6 @@ bool IsTransientSelectionLevel(const char* path) {
 // host sends and still names a destination when accepted seconds later.
 char g_invite_level[192] = {};
 bool g_have_invite = false;
-
-bool g_clear_menus_after_travel = false;
-int g_clear_menus_delay = 0;
-
-void ClearLingeringMenus() {
-    ue::UObject* world = ue::GetWorld();
-    if (!world) return;
-    ue::UObject* controller = PrimaryPlayerController();
-    if (!controller) return;
-
-    struct Empty {
-    } none = {};
-    const bool cleared = ue::CallFunction(controller, L"BPF_ClearMenuStack", &none);
-    const bool focused = ue::CallFunction(controller, L"GiveFocusToGameViewport", &none);
-    SC_LOG("lobby: dismissed leftover front-end menus (clear=%s focus=%s)",
-           cleared ? "ok" : "unavailable", focused ? "ok" : "unavailable");
-}
 
 void AcceptInvite() {
     if (!g_have_invite || !g_invite_level[0]) {
@@ -673,8 +736,10 @@ void AcceptInvite() {
     }
     g_have_invite = false;
     g_coop_started = true;
-    g_clear_menus_after_travel = true;
-    g_clear_menus_delay = 0;
+    // A level package alone is not enough: Sifu restores the joiner's saved
+    // checkpoint inside that package. Arriving at the host's live transform
+    // makes a previously-cleared local save join the host's current run.
+    g_arrival_teleport_pending = true;
     SC_LOG("lobby: accepted -- travelling to '%s'", g_invite_level);
     ue::OpenLevel(g_invite_level);
 }
@@ -725,36 +790,57 @@ void TeleportToPeer(const char* current_level, bool have_level) {
     if (!ok) coop::ReportProblem("no room to land next to your partner");
 }
 
-bool PeerInSameLevel() {
-    if (!net::IsConnected()) return false;
-    const char* peer = net::GetPeerLevel();
-    char mine[192] = {};
-    const bool have_mine = ue::GetCurrentLevelPath(mine, sizeof(mine));
-    const bool same = have_mine && peer && peer[0] && !IsTransientSelectionLevel(mine) &&
-                      _stricmp(mine, peer) == 0;
-
-    static bool last_state = false;
-    static DWORD last_log = 0;
-    const DWORD now = GetTickCount();
-    if (!same && (last_state || now - last_log > 10000)) {
-        last_log = now;
-        SC_LOG("lobby: holding the remote player back -- you are in '%s', partner reports "
-               "'%s'", have_mine ? LevelLeaf(mine) : "?", (peer && peer[0]) ? LevelLeaf(peer) : "?");
+// The joiner's save can open the correct map at a checkpoint the host has never
+// reached. Once the host snapshot exists, land beside that host exactly once.
+// This deliberately uses the same collision-aware route as the manual Lobby
+// teleport, so failed placement remains a retry rather than a blind transform.
+void ReconcileJoinerArrival(ue::UObject* player) {
+    if (!g_arrival_teleport_pending || !player || !net::IsConnected() ||
+        net::GetRole() != net::Role::Client) {
+        return;
     }
-    last_state = same;
-    return same;
+
+    char current_level[192] = {};
+    if (!ue::GetCurrentLevelPath(current_level, sizeof(current_level)) ||
+        !net::GetPeerLevel()[0] || _stricmp(current_level, net::GetPeerLevel()) != 0) {
+        return;
+    }
+
+    ue::FVector where = {};
+    ue::FRotator facing = {};
+    ue::FVector unused = {};
+    if (!net::GetPeerTransform(&where, &facing, &unused)) return;
+
+    const float yaw_radians = facing.Yaw * 3.14159265f / 180.f;
+    where.X -= 150.f * cosf(yaw_radians);
+    where.Y -= 150.f * sinf(yaw_radians);
+    if (TeleportActor(player, where, facing)) {
+        g_arrival_teleport_pending = false;
+        SC_LOG("lobby: joiner reconciled to host at (%.0f, %.0f, %.0f)", where.X, where.Y,
+               where.Z);
+        return;
+    }
+
+    static DWORD last_refused_log = 0;
+    const DWORD now = GetTickCount();
+    if (now - last_refused_log >= 1000) {
+        last_refused_log = now;
+        SC_LOG("lobby: arrival teleport waiting for clear space near host");
+    }
 }
 
 void InvitePeerHere(const char* current_level, bool have_level) {
+    ue::UObject* world = ue::GetWorld();
+    ue::UObject* player = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
     if (net::GetRole() != net::Role::Host) {
         SC_LOG("lobby: only the host can start (you are joining)");
         coop::ReportProblem("only the host can invite");
     } else if (!net::IsConnected()) {
         SC_LOG("lobby: nobody connected yet");
         coop::ReportProblem("nobody connected yet");
-    } else if (!have_level || IsTransientSelectionLevel(current_level)) {
-        SC_LOG("lobby: not in a level yet -- load one first");
-        coop::ReportProblem("load a level before inviting");
+    } else if (!player || !have_level || IsTransientSelectionLevel(current_level)) {
+        SC_LOG("lobby: no playable pawn/level yet -- press Story -> Continue first");
+        coop::ReportProblem("press Story -> Continue before inviting");
     } else {
         g_coop_started = true;
         lstrcpynA(g_announced_level, current_level, sizeof(g_announced_level));
@@ -824,6 +910,7 @@ void UpdateLobby(ue::UObject* player) {
         // An invite from a session that has ended is not an invite.
         g_have_invite = false;
         g_invite_level[0] = '\0';
+        g_arrival_teleport_pending = false;
     }
     if (have_level && IsTransientSelectionLevel(current_level) && g_coop_started) {
         g_coop_started = false;
@@ -861,7 +948,11 @@ void UpdateLobby(ue::UObject* player) {
         } else if (have_level && _stricmp(invited, current_level) == 0) {
             g_coop_started = true;
             g_have_invite = false;
-            SC_LOG("lobby: already in '%s'", invited);
+            // Same package can still mean a different local checkpoint/run.
+            // Reconcile the joiner to the host's live position once a peer
+            // snapshot is available instead of leaving them in stale save data.
+            g_arrival_teleport_pending = net::GetRole() == net::Role::Client;
+            SC_LOG("lobby: already in '%s' -- arrival reconciliation queued", invited);
         } else {
             lstrcpynA(g_invite_level, invited, sizeof(g_invite_level));
             g_have_invite = true;
@@ -881,7 +972,11 @@ void UpdateLobby(ue::UObject* player) {
     // an actor would race the engine's own use of those systems.
     ui::MenuRequests requests;
     if (ui::TakeMenuRequests(&requests)) {
-        if (requests.apply_network) {
+        if (requests.disconnect_network) {
+            net::DisconnectSession();
+        } else if (requests.restart_network) {
+            net::RestartSession();
+        } else if (requests.apply_network) {
             net::Reconfigure(requests.host_mode, requests.address, requests.port,
                              requests.passphrase);
         }
@@ -893,15 +988,6 @@ void UpdateLobby(ue::UObject* player) {
         if (requests.invite_peer) InvitePeerHere(current_level, have_level);
         if (requests.accept_invite) AcceptInvite();
         if (requests.teleport_to_peer) TeleportToPeer(current_level, have_level);
-        if (requests.native_start) {
-            if (!coop::NativeNetworkActive()) {
-                coop::ReportProblem("enable Engine networking, save, then restart first");
-            } else if (requests.host_mode) {
-                native_net::HostCurrentLevel(requests.port);
-            } else {
-                native_net::JoinHost(requests.address, requests.port);
-            }
-        }
         if (requests.travel && requests.level[0]) {
             g_coop_started = true;
             lstrcpynA(g_announced_level, requests.level, sizeof(g_announced_level));
@@ -1049,8 +1135,26 @@ void UpdateLobby(ue::UObject* player) {
 
 }  // namespace
 
+bool CoopGameplayActive() { return CoopBodiesMayExist(); }
+
 void InitPuppet(std::uintptr_t base) {
     g_spawn_actor = reinterpret_cast<SpawnActorFn>(base + offsets::UWorld_SpawnActor_VecRot);
+    g_player_anim_update_target = base + offsets::UPlayerAnim_NativeUpdateAnimation;
+    g_set_player_anim_speed_state = offsets::UPlayerAnim_BPF_SetSpeedState
+        ? reinterpret_cast<PlayerAnimSetSpeedStateFn>(
+              base + offsets::UPlayerAnim_BPF_SetSpeedState)
+        : nullptr;
+    g_get_targetable_actor_component = offsets::UTargetableActorHelper_GetTargetableActorComponent
+        ? reinterpret_cast<GetTargetableActorComponentFn>(
+              base + offsets::UTargetableActorHelper_GetTargetableActorComponent)
+        : nullptr;
+    g_register_targetable_actor = offsets::USCActorManager_RegisterTargetableActor
+        ? reinterpret_cast<RegisterTargetableActorFn>(
+              base + offsets::USCActorManager_RegisterTargetableActor)
+        : nullptr;
+
+
+
     SC_LOG("puppet: ready (use F1 -> Debug for diagnostics)");
 }
 
@@ -1066,6 +1170,16 @@ ue::UObject* SpawnPlayerClone(const ue::FVector& location, const ue::FRotator& r
 }
 
 bool SpawnPuppet() {
+    if (net::IsConnected() && !g_coop_started) {
+        SC_LOG("puppet: refusing body spawn before host starts co-op in Story");
+        coop::ReportProblem("host must press Story -> Continue, then invite");
+        return false;
+    }
+    if (net::IsConnected() && !CoopBodiesMayExist()) {
+        SC_LOG("puppet: body pending until both players occupy the same Story level");
+        return false;
+    }
+
     // Preferred path when enabled: ask the engine for a REAL second player
     // instead of spawning a clone to puppet. Everything downstream -- the drive,
     // vitals mirroring, level-change handling -- works on an actor pointer and
@@ -1150,6 +1264,18 @@ bool SpawnPuppet() {
            actual.Y, actual.Z);
 
     ConfigureAsRemote(spawned, player);
+    // A spawned clone is not a LocalPlayer and was absent from normal AI
+    // candidate selection in live logs. Register its real target component
+    // with Sifu's actor manager so enemies can acquire it.
+    if (g_get_targetable_actor_component && g_register_targetable_actor) {
+        ue::UObject* targetable = g_get_targetable_actor_component(spawned);
+        if (targetable) {
+            g_register_targetable_actor(targetable);
+            SC_LOG("puppet: targetable component registered for enemy AI");
+        } else {
+            SC_LOG("puppet: targetable component MISSING -- enemy AI cannot select peer");
+        }
+    }
     g_peer_was_down = false;
 
     // Start from a clean buffer so the puppet does not immediately snap to
@@ -1193,37 +1319,28 @@ void DespawnPuppet() {
                static_cast<void*>(g_puppet));
     }
     g_puppet = nullptr;
+    g_puppet_anim_instance = nullptr;
+    g_have_puppet_presentation_velocity = false;
+    g_raw_sequence_restore_at = 0;
+    g_cosmetic_attack_montage_until = 0;
     g_puppet_auto_spawned = false;
     g_friendly_applied_for = nullptr;
     g_friendly_verified = false;
 }
 
+void NotifyLocalAttackForCosmetic() {
+    // Player attacks can cross two game frames before their sequence/montage is
+    // exposed. This remains short enough to avoid replaying stale combat, but
+    // survives the real prepare-to-animation handoff on both storefront builds.
+    g_cosmetic_attack_montage_until = GetTickCount() + 750;
+}
+
 void TickPuppet() {
+    EnsurePlayerAnimHook();
     ue::UObject* world = ue::GetWorld();
     if (!world) return;
     ue::UObject* player = ue::GetPlayerCharacter(world, 0);
     if (!player) return;
-    // Native networking uses real AThePlainesGameMode-spawned pawns. Never
-    // create or drive a local imitation beside them.
-    if (coop::NativeNetworkActive()) {
-        // The overlay runs on the render thread, so requests must still be
-        // consumed here on the game thread. Previously this early return
-        // skipped the queue entirely, leaving the Engine Host/Join buttons
-        // apparently inert.
-        ui::MenuRequests requests;
-        if (ui::TakeMenuRequests(&requests)) {
-            if (requests.save_config) coop::Save();
-            if (requests.native_start) {
-                if (requests.host_mode) {
-                    native_net::HostCurrentLevel(requests.port);
-                } else {
-                    native_net::JoinHost(requests.address, requests.port);
-                }
-            }
-        }
-        native_net::TickNativeCoop();
-        return;
-    }
 
     // The puppet is destroyed along with the level it was spawned into, and
     // nothing tells us -- so the pointer has to be dropped when the world
@@ -1234,17 +1351,13 @@ void TickPuppet() {
     //
     // Deliberately not DespawnPuppet(): there is nothing left to destroy, and
     // calling into the corpse is exactly what we are avoiding.
-    if (g_clear_menus_after_travel && ue::GetPlayerCharacter(world, 0)) {
-        if (++g_clear_menus_delay >= 120) {
-            g_clear_menus_after_travel = false;
-            g_clear_menus_delay = 0;
-            ClearLingeringMenus();
-        }
-    }
-
     static ue::UObject* puppet_world = nullptr;
     if (world != puppet_world) {
         puppet_world = world;
+        g_puppet_anim_instance = nullptr;
+        g_have_puppet_presentation_velocity = false;
+        g_raw_sequence_restore_at = 0;
+        g_cosmetic_attack_montage_until = 0;
         if (g_puppet) {
             SC_LOG("puppet: level changed -- forgetting the old remote character");
             g_puppet = nullptr;
@@ -1256,7 +1369,7 @@ void TickPuppet() {
             g_puppet_auto_spawned = false;
             g_peer_was_down = false;
             g_friendly_applied_for = nullptr;
-    g_friendly_verified = false;
+            g_friendly_verified = false;
         }
     }
 
@@ -1315,42 +1428,72 @@ void TickPuppet() {
     }
     net::TickSession(local);
 
-    // Cosmetic animation mirroring, edge-triggered on montage change.
-    //
-    // Sifu drives combat through Orders and barely uses montages -- measured at
-    // two montage changes across two minutes of fighting -- so this carries
-    // dodges and traversal rather than strikes. It is cheap and additive: when
-    // nothing is playing, nothing is sent.
+    // Cosmetic animation mirroring. Regular changes cover dodges/traversal.
+    // An attack order also arms a short capture window: repeated punches often
+    // reuse one montage asset, so an edge-trigger alone drops every strike after
+    // the first. This only calls UAnimInstance::Montage_Play on the peer's
+    // puppet; no UAttackComponent path is entered.
     if (coop::Get().sync_montages && net::IsConnected()) {
         static ue::UObject* last_sent = nullptr;
+        const DWORD now = GetTickCount();
+        const bool attack_pending = now < g_cosmetic_attack_montage_until;
         ue::AnimState anim = {};
-        if (ue::ReadAnimState(player, &anim) && anim.montage != last_sent) {
+        if (ue::ReadAnimState(player, &anim) && anim.montage &&
+            (anim.montage != last_sent || attack_pending)) {
             last_sent = anim.montage;
-            if (anim.montage) {
-                char path[192] = {};
-                if (ue::GetObjectPathName(anim.montage, path, sizeof(path))) {
-                    net::SendMontageState(path, anim.position);
+            char path[192] = {};
+            if (ue::GetObjectPathName(anim.montage, path, sizeof(path))) {
+                net::SendMontageState(path, anim.position);
+                if (attack_pending) {
+                    g_cosmetic_attack_montage_until = 0;
+                    static unsigned int cosmetic_sent = 0;
+                    if (++cosmetic_sent <= 3 || coop::Get().verbose_orders) {
+                        SC_LOG("attack: cosmetic montage sent");
+                    }
                 }
             }
         }
+        if (g_cosmetic_attack_montage_until && now >= g_cosmetic_attack_montage_until) {
+            g_cosmetic_attack_montage_until = 0;
+            static DWORD last_unavailable_log = 0;
+            if (now - last_unavailable_log >= 5000) {
+                last_unavailable_log = now;
+                SC_LOG("attack: cosmetic montage unavailable for this move");
+            }
+        }
     }
-
     // Apply the peer's animation to their puppet as a PURE VISUAL: it animates
     // the motion without running the attack, so no hitbox is spawned and it
     // cannot damage anyone. Their damage already resolved on their machine.
     if (g_puppet) {
         char path[192] = {};
         float position = 0.f;
-        if (net::PopMontageState(path, sizeof(path), &position)) {
+        bool raw_sequence = false;
+        if (net::PopMontageState(path, sizeof(path), &position, &raw_sequence)) {
             wchar_t wide[192] = {};
             MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, 192);
-            if (ue::UObject* montage = ue::FindObjectByPath(wide)) {
-                ue::AnimState state;
-                state.montage = montage;
-                state.position = position;
-                ue::ApplyAnimState(g_puppet, state);
+            if (ue::UObject* animation = ue::FindObjectByPath(wide)) {
+                if (raw_sequence) {
+                    if (ue::PlayAnimationAsset(g_puppet, animation)) {
+                        const float seconds = ue::GetAnimationAssetLength(animation);
+                        // A bad/missing asset must never leave the puppet's
+                        // AnimBlueprint disabled indefinitely.
+                        g_raw_sequence_restore_at = GetTickCount() +
+                            static_cast<DWORD>((seconds > .05f ? seconds : .5f) * 1000.f);
+                        SC_LOG("attack: cosmetic sequence playing");
+                    }
+                } else {
+                    ue::AnimState state;
+                    state.montage = animation;
+                    state.position = position;
+                    ue::ApplyAnimState(g_puppet, state);
+                }
             }
         }
+    }
+    if (g_puppet && g_raw_sequence_restore_at && GetTickCount() >= g_raw_sequence_restore_at) {
+        ue::RestoreAnimationBlueprint(g_puppet);
+        g_raw_sequence_restore_at = 0;
     }
 
     // Driven by the *current* connection state rather than the one-shot connect
@@ -1363,7 +1506,11 @@ void TickPuppet() {
         DespawnPuppet();
     }
 
-    if (net::IsConnected() && PeerInSameLevel() && !g_puppet) {
+    // A connection is only transport. Do not create a clone/second controller
+    // until the host has explicitly started co-op from a playable Story level.
+    // Creating it in the front end is treated by Sifu as a second pad pressing
+    // Start and can steal/block player one's body.
+    if (CoopBodiesMayExist() && !g_puppet) {
         static DWORD last_attempt = 0;
         const DWORD now = GetTickCount();
         if (now - last_attempt > 1000) {  // retry, but do not spam
@@ -1380,6 +1527,7 @@ void TickPuppet() {
     }
 
     UpdateLobby(player);
+    ReconcileJoinerArrival(player);
 
     // Everything the peer did since the last frame: their own moves onto the
     // puppet, and the host's enemy swings onto our driven enemies.
@@ -1389,7 +1537,11 @@ void TickPuppet() {
     // on every level change, so it is re-resolved here rather than trusted. This
     // also creates the player in the first place once a peer is connected.
     if (coop::Get().real_second_player) {
-        if (SecondPlayerActive() || (net::IsConnected() && PeerInSameLevel())) {
+        // Keep a manual debug body alive, but never revive a retired network
+        // body just because its controller survived a disconnect.
+        const bool maintain_real = CoopBodiesMayExist() ||
+                                   (g_puppet && !g_puppet_auto_spawned);
+        if (maintain_real) {
             ue::UObject* pawn = MaintainSecondPlayer();
             if (pawn && pawn != g_puppet) {
                 g_puppet = pawn;
@@ -1407,6 +1559,16 @@ void TickPuppet() {
 
     if (!g_puppet) return;
 
+    // BP_TPSCharacter has local-only presentation branches. Reasserting once
+    // per second catches a hidden-state change without touching transforms.
+    if (!SecondPlayerActive()) {
+        static DWORD last_visibility_restore = 0;
+        const DWORD now = GetTickCount();
+        if (now - last_visibility_restore >= 1000) {
+            last_visibility_restore = now;
+            EnsureRemoteVisible(g_puppet, false);
+        }
+    }
     net::PeerVitals vitals;
     if (net::GetPeerVitals(&vitals)) ApplyPeerVitals(g_puppet, vitals);
 

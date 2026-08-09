@@ -11,10 +11,5 @@ bool HostCurrentLevel(int port);
 // at a ZeroTier IPv4 endpoint. The address is parsed before it enters a console
 // command, preventing URL/console-option injection from the editable field.
 bool JoinHost(const char* address, int port);
-// Server-only native co-op setup. Once Unreal has completed its own login and
-// spawn sequence this groups the real pawns on the host's faction, letting the
-// engine replicate movement, combat and relationships instead of the legacy
-// UDP puppet layer doing so.
-void TickNativeCoop();
 
 }  // namespace sifucoop::game::native_net

@@ -12,6 +12,8 @@ namespace {
 
 namespace offsets = sifucoop::offsets;
 
+// EFindName::FNAME_Add -- creates the entry if absent, which is harmless and
+// avoids a silent None when a name happens not to be interned yet.
 constexpr int kFNameAdd = 1;
 
 using FNameCtorFn = FName*(__fastcall*)(FName*, const wchar_t*, int);
@@ -25,7 +27,8 @@ using GetPathNameFn = void(__fastcall*)(const UObject* self, const UObject* stop
                                         void* out_string);
 using StaticFindObjectSafeFn = UObject*(__fastcall*)(void* uclass, UObject* outer,
                                                      const wchar_t* name, bool exact_class);
-// void OpenLevel(const UObject*, FName, bool, FString); FName is 8 bytes and it is in a register; FString is 16 and is passed by address
+// void OpenLevel(const UObject*, FName, bool, FString) -- FName is 8 bytes so
+// it travels in a register; FString is 16 and so is passed by address.
 using OpenLevelFn = void(__fastcall*)(const UObject* world_context, FName level,
                                       bool absolute, void* options);
 
@@ -120,13 +123,14 @@ UObject* GetWorld() {
 bool GetObjectPathName(UObject* object, char* out, int out_size) {
     if (!g_get_path_name || !object || out_size <= 0) return false;
 
+    // FString is TArray<TCHAR>: {TCHAR* Data; int32 Num; int32 Max}.
     struct FString {
         wchar_t* data;
         std::int32_t num;
         std::int32_t max;
     } result = {};
 
-    // out-parameter overload: nothing is returned by value
+    // Out-parameter overload: nothing is returned by value.
     g_get_path_name(object, nullptr, &result);
 
     if (!result.data || result.num <= 0) return false;
@@ -150,7 +154,8 @@ bool GetCurrentLevelPath(char* out, int out_size) {
     char full[512] = {};
     if (!GetObjectPathName(world, full, sizeof(full))) return false;
 
-    // A world's path is "/Game/Maps/X/Y.Y"
+    // A world's path is "/Game/Maps/X/Y.Y"; OpenLevel wants the package part,
+    // so drop everything from the object separator onwards.
     char* dot = strrchr(full, '.');
     if (dot) *dot = '\0';
 
@@ -158,44 +163,38 @@ bool GetCurrentLevelPath(char* out, int out_size) {
     return out[0] != '\0';
 }
 
-bool OpenLevelWithOptions(const char* level_path, const char* option_text) {
+bool OpenLevel(const char* level_path) {
     if (!g_ready || !g_open_level || !level_path || !level_path[0]) return false;
 
     UObject* world = GetWorld();
     if (!world) return false;
 
-    wchar_t wide_level[512] = {};
-    if (MultiByteToWideChar(CP_UTF8, 0, level_path, -1, wide_level, 512) <= 0) return false;
-    const FName name = MakeName(wide_level);
+    wchar_t wide[512] = {};
+    MultiByteToWideChar(CP_UTF8, 0, level_path, -1, wide, 512);
 
-    wchar_t wide_options[128] = {};
+    const FName name = MakeName(wide);
+
+    // FString Options, passed by value: 16 bytes, so the ABI passes it by
+    // address. Zeroed is a valid empty FString -- null data, zero length.
     struct FString {
         wchar_t* data;
         std::int32_t num;
         std::int32_t max;
     } options = {};
-    if (option_text && option_text[0]) {
-        const int chars = MultiByteToWideChar(CP_UTF8, 0, option_text, -1, wide_options,
-                                              static_cast<int>(sizeof(wide_options) / sizeof(wide_options[0])));
-        if (chars <= 0) return false;
-        options = {wide_options, chars, chars};
-    }
 
-    SC_LOG("level: opening '%s' options='%s'", level_path,
-           option_text && option_text[0] ? option_text : "");
+    SC_LOG("level: opening '%s'", level_path);
     g_open_level(world, name, false, &options);
     return true;
 }
 
-bool OpenLevel(const char* level_path) {
-    return OpenLevelWithOptions(level_path, nullptr);
-}
 bool ExecuteConsoleCommand(const char* command, UObject* specific_player) {
     if (!command || !command[0]) return false;
     UObject* world = GetWorld();
     UObject* kismet = FindObjectByPath(L"/Script/Engine.Default__KismetSystemLibrary");
     if (!world || !kismet) return false;
 
+    // ProcessEvent borrows this FString for the duration of the call, so the
+    // stack buffer is sufficient and needs no engine allocator/destructor.
     wchar_t wide[512] = {};
     const int chars = MultiByteToWideChar(CP_UTF8, 0, command, -1, wide, 512);
     if (chars <= 0) return false;
@@ -212,24 +211,26 @@ bool ExecuteConsoleCommand(const char* command, UObject* specific_player) {
     return CallFunction(kismet, L"ExecuteConsoleCommand", &params);
 }
 
-UObject* GetAnimInstance(UObject* actor) {
+UObject* GetSkeletalMeshComponent(UObject* actor) {
     if (!g_ready || !actor || !g_skeletal_mesh_class) return nullptr;
-
-    // AActor::GetComponentByClass is BlueprintCallable (sloclap w)
+    // AActor::GetComponentByClass is BlueprintCallable, so this needs no
+    // knowledge of where the mesh pointer lives in ACharacter.
     struct ComponentParams {
         void* ComponentClass;
         UObject* ReturnValue;
-    } component_params = {};
-    component_params.ComponentClass = g_skeletal_mesh_class();
-    if (!CallFunction(actor, L"GetComponentByClass", &component_params)) return nullptr;
-    if (!component_params.ReturnValue) return nullptr;
+    } params = {};
+    params.ComponentClass = g_skeletal_mesh_class();
+    if (!CallFunction(actor, L"GetComponentByClass", &params)) return nullptr;
+    return params.ReturnValue;
+}
 
+UObject* GetAnimInstance(UObject* actor) {
+    UObject* mesh = GetSkeletalMeshComponent(actor);
+    if (!mesh) return nullptr;
     struct AnimParams {
         UObject* ReturnValue;
     } anim_params = {};
-    if (!CallFunction(component_params.ReturnValue, L"GetAnimInstance", &anim_params)) {
-        return nullptr;
-    }
+    if (!CallFunction(mesh, L"GetAnimInstance", &anim_params)) return nullptr;
     return anim_params.ReturnValue;
 }
 
@@ -259,6 +260,42 @@ bool ApplyAnimState(UObject* actor, const AnimState& state) {
     // EMontagePlayReturnType::MontageLength = 0.
     g_montage_play(anim_instance, state.montage, 1.f, 0, state.position, true);
     return true;
+}
+
+bool PlayAnimationAsset(UObject* actor, UObject* animation_asset) {
+    if (!animation_asset) return false;
+    UObject* mesh = GetSkeletalMeshComponent(actor);
+    if (!mesh) return false;
+    // Shipped-PDB SetBit helpers prove these bools are at +8..+11. The old
+    // two-field buffer ended at +9, so ProcessEvent read past it on each strike.
+    struct Params {
+        UObject* NewAnimToPlay;
+        bool bLooping;
+        bool bPreventAnimScriptInstanceClear;
+        bool bPreventAnimScriptInitialization;
+        bool bRecordInReplay;
+    } params = {animation_asset, false, false, false, false};
+    return CallFunction(mesh, L"PlayAnimation", &params);
+}
+
+bool RestoreAnimationBlueprint(UObject* actor) {
+    UObject* mesh = GetSkeletalMeshComponent(actor);
+    if (!mesh) return false;
+    // EAnimationMode::AnimationBlueprint = 0 in UE4.26.
+    struct Params {
+        std::uint8_t InAnimationMode;
+        bool bForceInitAnimScript;
+    } params = {0, true};
+    return CallFunction(mesh, L"SetAnimationMode", &params);
+}
+
+float GetAnimationAssetLength(UObject* animation_asset) {
+    if (!animation_asset) return 0.f;
+    struct Params {
+        float ReturnValue;
+    } params = {};
+    if (!CallFunction(animation_asset, L"GetPlayLength", &params)) return 0.f;
+    return params.ReturnValue;
 }
 
 }  // namespace sifucoop::ue

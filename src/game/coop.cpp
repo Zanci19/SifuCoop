@@ -31,56 +31,6 @@ void WriteInt(const char* key, int value, const char* ini) {
     WritePrivateProfileStringA(kSection, key, text, ini);
 }
 
-bool CreateDirectoryIfMissing(const char* path) {
-    if (CreateDirectoryA(path, nullptr)) return true;
-    return GetLastError() == ERROR_ALREADY_EXISTS;
-}
-
-// Sifu's packaged default is SteamNetDriver. That driver interprets an `open`
-// command through Steam P2P, so a ZeroTier IPv4 connection merely times out.
-// The user config is read before the DLL initializes; write this during the
-// current startup so the following clean restart selects UIpNetDriver.
-void EnsureNativeIpNetDriverConfig() {
-    char local_app_data[MAX_PATH] = {};
-    if (GetEnvironmentVariableA("LOCALAPPDATA", local_app_data,
-                                static_cast<DWORD>(sizeof(local_app_data))) == 0) {
-        SC_LOG("native-net: could not locate LOCALAPPDATA for IP driver config");
-        return;
-    }
-
-    char sifu_dir[MAX_PATH] = {};
-    char saved_dir[MAX_PATH] = {};
-    char config_dir[MAX_PATH] = {};
-    char platform_dir[MAX_PATH] = {};
-    char ini[MAX_PATH] = {};
-    _snprintf(sifu_dir, sizeof(sifu_dir), "%s\\Sifu", local_app_data);
-    _snprintf(saved_dir, sizeof(saved_dir), "%s\\Saved", sifu_dir);
-    _snprintf(config_dir, sizeof(config_dir), "%s\\Config", saved_dir);
-    _snprintf(platform_dir, sizeof(platform_dir), "%s\\WindowsNoEditor", config_dir);
-    _snprintf(ini, sizeof(ini), "%s\\Engine.ini", platform_dir);
-
-    if (!CreateDirectoryIfMissing(sifu_dir) || !CreateDirectoryIfMissing(saved_dir) ||
-        !CreateDirectoryIfMissing(config_dir) || !CreateDirectoryIfMissing(platform_dir)) {
-        SC_LOG("native-net: could not create IP driver config directory (error=%lu)",
-               static_cast<unsigned long>(GetLastError()));
-        return;
-    }
-
-    constexpr const char* kEngineSection = "/Script/Engine.Engine";
-    const bool cleared = WritePrivateProfileStringA(kEngineSection, "!NetDriverDefinitions",
-                                                     "ClearArray", ini) != FALSE;
-    const bool wrote = WritePrivateProfileStringA(
-        kEngineSection, "+NetDriverDefinitions",
-        "(DefName=\"GameNetDriver\",DriverClassName=\"OnlineSubsystemUtils.IpNetDriver\","
-        "DriverClassNameFallback=\"OnlineSubsystemUtils.IpNetDriver\")",
-        ini) != FALSE;
-    if (cleared && wrote) {
-        SC_LOG("native-net: configured UIpNetDriver for ZeroTier in %s; restart once", ini);
-    } else {
-        SC_LOG("native-net: could not write UIpNetDriver config (error=%lu)",
-               static_cast<unsigned long>(GetLastError()));
-    }
-}
 }  // namespace
 
 Config& Get() { return g_config; }
@@ -106,9 +56,11 @@ void Load() {
     g_config.mode = GetPrivateProfileIntA(kSection, "versus", 0, ini) != 0 ? Mode::Versus
                                                                           : Mode::Coop;
     g_config.sync_enemies = ReadBool("sync_enemies", g_config.sync_enemies, ini);
-    g_config.native_network = ReadBool("native_network", g_config.native_network, ini);
-    g_native_network_at_startup = g_config.native_network;
-    if (g_native_network_at_startup) EnsureNativeIpNetDriverConfig();
+    if (ReadBool("native_network", false, ini)) {
+        SC_LOG("coop: native UE4 networking requested by config but disabled; using UDP mirror");
+    }
+    g_config.native_network = false;
+    g_native_network_at_startup = false;
     g_config.suppress_client_ai = ReadBool("suppress_client_ai",
                                            g_config.suppress_client_ai, ini);
     g_config.sync_enemy_vitals = ReadBool("sync_enemy_vitals",
@@ -140,8 +92,6 @@ void Load() {
     g_config.report_damage = ReadBool("report_damage", g_config.report_damage, ini);
     g_config.mirror_peer_vitals = ReadBool("mirror_peer_vitals",
                                            g_config.mirror_peer_vitals, ini);
-    g_config.mirror_hit_reactions = ReadBool("mirror_hit_reactions",
-                                             g_config.mirror_hit_reactions, ini);
     g_config.sync_run_state = ReadBool("sync_run_state", g_config.sync_run_state, ini);
     g_config.fix_room_clear = ReadBool("fix_room_clear", g_config.fix_room_clear, ini);
     g_config.auto_follow_level = ReadBool("auto_follow_level",
@@ -162,18 +112,9 @@ void Load() {
     // catastrophic: 0 Hz stops all sending, and a huge delay looks like a hang.
     if (g_config.interp_delay_ms < 0) g_config.interp_delay_ms = 0;
     if (g_config.interp_delay_ms > 500) g_config.interp_delay_ms = 500;
-    if (g_config.snapshot_hz < 10) g_config.snapshot_hz = 10;
-    if (g_config.snapshot_hz > 120) g_config.snapshot_hz = 120;
-
-    if (g_config.native_network) {
-        SC_LOG("coop: *** native_network=1 -- THE CUSTOM UDP MIRROR IS OFF ***");
-        SC_LOG("coop: player sync, enemy sync, damage reporting and level invites are ALL "
-               "disabled. Joining goes through the UE4 listen server, which is unverified "
-               "and is what leaves the client stuck on the loading screen.");
-        SC_LOG("coop: set native_network=0 in SifuCoop.ini on BOTH machines for the "
-               "working path.");
-        ReportProblem("native_network=1 -- all co-op sync is disabled");
-    }
+    // Below 30 Hz leaves the interpolation buffer starved on ordinary VPN jitter.
+    if (g_config.snapshot_hz < 30) g_config.snapshot_hz = 30;
+    if (g_config.snapshot_hz > 60) g_config.snapshot_hz = 60;
 
     SC_LOG("coop: mode=%s enemies=%d ai_off=%d vitals=%d attacks=%d damage=%d "
            "park=%d follow=%d adaptive=%d",
@@ -189,8 +130,7 @@ void Save() {
     IniPath(ini, sizeof(ini));
     if (!ini[0]) return;
 
-    WriteBool("native_network", g_config.native_network, ini);
-    if (g_config.native_network) EnsureNativeIpNetDriverConfig();
+    WriteBool("native_network", false, ini);
     WriteBool("versus", g_config.mode == Mode::Versus, ini);
     WriteBool("sync_enemies", g_config.sync_enemies, ini);
     WriteBool("suppress_client_ai", g_config.suppress_client_ai, ini);
@@ -209,7 +149,6 @@ void Save() {
     WriteBool("sync_montages", g_config.sync_montages, ini);
     WriteBool("report_damage", g_config.report_damage, ini);
     WriteBool("mirror_peer_vitals", g_config.mirror_peer_vitals, ini);
-    WriteBool("mirror_hit_reactions", g_config.mirror_hit_reactions, ini);
     WriteBool("sync_run_state", g_config.sync_run_state, ini);
     WriteBool("fix_room_clear", g_config.fix_room_clear, ini);
     WriteBool("auto_follow_level", g_config.auto_follow_level, ini);

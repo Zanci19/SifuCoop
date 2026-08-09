@@ -26,11 +26,16 @@ int g_tick_slot = -1;
 std::uintptr_t g_base = 0;
 unsigned long long g_frames = 0;
 
+// Per-frame work runs here. Keep it cheap: this is the game thread.
 void OnFrame() {
     ++g_frames;
-    // this refreshes their position each time
-    // TODO: fix the animations of walking, running, hitting attacks, etc. they might not appear because I keep refreshing ts. consider adding predictions or only read client's buttoms, start and stop walking/running...
-    // u stoopid
+
+    // Enemies first. TickPuppet applies the peer's queued orders, and enemy
+    // orders are addressed by name hash -- so the table those resolve against
+    // must already have been rebuilt for the current level, not still describe
+    // the one we just left.
+    //
+    // Hotkeys are polled inside both, every frame, or presses get missed.
     sifucoop::game::TickEnemies();
     sifucoop::game::TickPuppet();
     sifucoop::game::TickSelfTest();
@@ -43,15 +48,24 @@ void OnFrame() {
     ue::UObject* player = ue::GetPlayerCharacter(world, 0);
     if (!player) return;
 
+    // Slow, informational run-state exchange (age / room-clear / held weapon).
+    // Gated to the 30-frame cadence above; it rate-limits itself further.
     sifucoop::game::TickRunState(player);
 
-    // a memorial of how i thought per-frame logging was a good idea
-    // "yeah per frame, sure why not!" 2 minutes later "why the fuck is my pc hotter than arizona"
-    //                                                                         ~ Zanci19, 6.8.2026
+    // Needs a live character to find the vtable, so it cannot happen at
+    // bootstrap; installed on the first frame one exists.
+    //
+    // The per-frame position logging that used to live here is gone. It was how
+    // the first milestone proved it could read live player state, and it did --
+    // but it wrote a line twice a second for the whole session, which buried
+    // every message that actually mattered. The overlay shows the same state
+    // live now, and the log is for things that happen once.
     if (!sifucoop::game::IsOrderHookInstalled()) {
         sifucoop::game::InstallOrderHook(g_base, player);
 
-        // the bridge between the two
+        // Prove the object-identity bridge both ways once: an object's path
+        // name is the only thing about it that means the same on a peer's
+        // machine, so everything downstream depends on this round-tripping.
         char path[512] = {};
         if (ue::GetObjectPathName(player, path, sizeof(path))) {
             wchar_t wide[512] = {};
@@ -65,6 +79,8 @@ void OnFrame() {
     }
 }
 
+// Clamped when published: a stalled frame (a level load is seconds long) must
+// not arrive at the smoothing code as a single enormous step.
 float g_frame_delta = 1.f / 60.f;
 
 void __fastcall TickHook(void* self, float delta_seconds, bool idle_mode) {
@@ -74,9 +90,12 @@ void __fastcall TickHook(void* self, float delta_seconds, bool idle_mode) {
         g_frame_delta = 1.f / 60.f;
     }
 
+    // Call through first so a fault in our code cannot stall the engine tick
+    // before the game has actually ticked.
     g_original_tick(self, delta_seconds, idle_mode);
 
-    // No SEH, GCC does not implement this __try/__except bullcrap, so we use OnFrame() (every pointer it touches is null-checked)
+    // No SEH here: GCC does not implement __try/__except, so OnFrame() must
+    // stay defensive on its own (every pointer it touches is null-checked).
     OnFrame();
 }
 
@@ -88,7 +107,8 @@ bool InstallTickHook(std::uintptr_t base, void* gengine) {
     const auto target = reinterpret_cast<void*>(base + offsets::UGameEngine_Tick);
     auto** vtable = *reinterpret_cast<void***>(gengine);
 
-    // Locate Tick
+    // Locate Tick by searching GEngine's vtable for the address the PDB gave
+    // us. Deriving the slot index this way means we never hardcode one.
     for (int i = 0; i < 512; ++i) {
         if (IsBadReadPtr(&vtable[i], sizeof(void*))) break;
         if (vtable[i] == target) {

@@ -38,6 +38,9 @@ bool ReadPeIdentity(HMODULE module, PeIdentity* out) {
     return true;
 }
 
+// Offsets were generated against one exact build. Applied to a different one
+// they point into unrelated code, so a mismatch must stop us before we hook
+// anything -- a loud refusal is far better than corrupting the process.
 bool VerifyGameBuild(HMODULE game, uintptr_t base) {
     PeIdentity id = {};
     if (!ReadPeIdentity(game, &id)) {
@@ -48,7 +51,9 @@ bool VerifyGameBuild(HMODULE game, uintptr_t base) {
     SC_LOG("guard: exe TimeDateStamp=0x%08lX SizeOfImage=0x%08lX", id.time_date_stamp,
            id.size_of_image);
 
-    // address table differs per-build (steam vs epic)
+    // Offsets differ per executable, but the protocol does not: Epic and Steam
+    // ship the same game version, so asset paths and combo indices match and
+    // the two stores can play together. Only the address table is per-build.
     const char* build = offsets::SelectBuild(id.time_date_stamp, id.size_of_image);
     if (!build) {
         SC_LOG("guard: UNKNOWN BUILD -- no offsets for this executable.");
@@ -96,6 +101,9 @@ DWORD WINAPI Bootstrap(LPVOID) {
     LogResolved(base, "GEngine", offsets::GEngine);
     LogResolved(base, "GWorld", offsets::GWorld);
 
+    // GEngine is populated during engine init, well after we load. Watching it
+    // flip from null is the cheapest proof that we are reading the right
+    // address and that our view of the process is correct.
     auto** gengine = reinterpret_cast<void**>(base + offsets::GEngine);
     void* engine = nullptr;
     for (int i = 0; i < 600; ++i) {
@@ -113,6 +121,8 @@ DWORD WINAPI Bootstrap(LPVOID) {
         return 0;
     }
 
+    // GEngine exists but the engine is still bringing itself up; give the
+    // vtable a moment to settle before we touch it.
     Sleep(2000);
 
     if (!sifucoop::ue::InitReflection(base)) {
@@ -128,6 +138,12 @@ DWORD WINAPI Bootstrap(LPVOID) {
     sifucoop::game::InstallPlayOrderHook(base);
     sifucoop::game::InitSelfTest();
     sifucoop::net::StartSession();
+    // Prefer drawing inside the game: a window cannot appear over exclusive
+    // fullscreen. The window overlay is only started if the hook fails -- or if
+    // the swap-chain hook has been switched off, which is the escape hatch for
+    // anyone whose driver or overlay stack does not get on with it. Hooking
+    // somebody else's graphics pipeline is the riskiest thing here and the
+    // least essential, so it has to be optional.
     bool in_game = false;
     if (sifucoop::coop::Get().in_game_overlay) {
         in_game = sifucoop::ui::StartInGameOverlay();
@@ -152,12 +168,12 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         DisableThreadLibraryCalls(instance);
         sifucoop::log::Open();
 
-        // Forwarding must be wired up before the game's first dsound call
+        // Forwarding must be wired up before the game's first dsound call.
         if (!sifucoop::proxy::Init()) {
             SC_LOG("proxy: init incomplete -- audio may misbehave");
         }
 
-        // Everything else runs off the loader lock
+        // Everything else runs off the loader lock.
         HANDLE thread = CreateThread(nullptr, 0, Bootstrap, nullptr, 0, nullptr);
         if (thread) CloseHandle(thread);
     } else if (reason == DLL_PROCESS_DETACH) {

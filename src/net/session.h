@@ -19,6 +19,14 @@ bool StartSession();
 // authenticates -- it simply produces a key everybody else also has, which is
 // acceptable on a private VPN and not acceptable on a forwarded port.
 bool Reconfigure(bool host_mode, const char* address, int port, const char* passphrase);
+
+// Reopen this machine's configured socket without closing Sifu. The peer receives
+// a signed disconnect, then its periodic authenticated hello establishes a fresh key.
+bool RestartSession();
+
+// End the current session and leave networking offline until RestartSession or
+// Save & Connect is used. The saved host/join settings remain unchanged.
+void DisconnectSession();
 void StopSession();
 
 Role GetRole();
@@ -96,6 +104,7 @@ const char* GetPeerLevel();
 
 struct EnemyStateOut {
     std::uint32_t name_hash = 0;
+    std::uint32_t source_hash = 0;
     float x = 0.f, y = 0.f, z = 0.f, yaw = 0.f;
     float velocity_x = 0.f, velocity_y = 0.f, velocity_z = 0.f;
     float health = 0.f;
@@ -117,6 +126,11 @@ int GetEnemyStates(EnemyStateOut* out, int max_out);
 // its own -- it means either "the host's fight is over" or "the host has not
 // told us anything yet", and those call for opposite behaviour.
 bool HasEnemySweep();
+
+// A new UWorld owns a different enemy pool even when its package path is the
+// same (restart/checkpoint reload). Drop completed/staging sweeps and damage
+// ledgers before actors from that world are matched against network state.
+void ResetEnemyReplication();
 
 struct DamageReport {
     std::uint32_t name_hash = 0;
@@ -176,10 +190,11 @@ const char* GetPublicAddress();
 // peer's puppet without running the attack, so it cannot spawn a hitbox or
 // damage anyone. Their damage already resolved on their own machine.
 void SendMontageState(const char* montage_path, float position);
+void SendAnimationSequence(const char* asset_path);
 
-// One pending montage from the peer, if any. Returns false when there is
+// One pending animation from the peer, if any. Returns false when there is
 // nothing new -- this is edge-triggered, not a poll of current state.
-bool PopMontageState(char* out_path, int out_size, float* out_position);
+bool PopMontageState(char* out_path, int out_size, float* out_position, bool* out_raw_sequence);
 
 int GetRoundTripMs();
 

@@ -58,8 +58,4 @@ ue::UObject* MaintainSecondPlayer();
 // one's own character, and the mod must refuse to treat that body as remote.
 ue::UObject* PrimaryPlayerPawn();
 
-// PlayerController 0 -- the human at this keyboard -- resolved from the live
-// world.
-ue::UObject* PrimaryPlayerController();
-
 }  // namespace sifucoop::game

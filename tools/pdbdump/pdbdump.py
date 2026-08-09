@@ -118,6 +118,23 @@ WANTED = {
     "UAttackComponent_StaticClass": ["?StaticClass@UAttackComponent@@SA"],
     # The actual "perform this attack" call, downstream of move selection.
     "UAttackComponent_LaunchAttack": ["?LaunchAttack@UAttackComponent@@AEAA"],
+    "OrderAttack_GetAnimPlayed": ["?GetAnimPlayed@OrderAttack@@UEBAPEAVUAnimSequence@@XZ"],
+    "OrderAttack_OnStart": ["?OnStart@OrderAttack@@UEAAXXZ"],
+    "UPlayerAnim_NativeUpdateAnimation": ["?NativeUpdateAnimation@UPlayerAnim@@EEAAXM@Z"],
+    # Exact locomotion-state setter. FSpeedState is five bytes (four booleans
+    # plus ESpeedState); writing only the booleans left the graph's enum at V0.
+    "UPlayerAnim_BPF_SetSpeedState": ["?BPF_SetSpeedState@UPlayerAnim@@QEAAXW4ESpeedState@@@Z"],
+    # A spawned player-class clone runs BeginPlay, but is not guaranteed to be
+    # in Sifu's global target registry. AI selection only considers registered
+    # UTargetableActorComponents.
+    "UTargetableActorHelper_GetTargetableActorComponent": [
+        "?GetTargetableActorComponent@UTargetableActorHelper@@"
+    ],
+    "USCActorManager_RegisterTargetableActor": [
+        "?RegisterTargetableActor@USCActorManager@@SAX"
+    ],
+    # Host-side aggro handoff when damage arrived from the joining player.
+    "UAttackComponent_SetTarget": ["?SetTarget@UAttackComponent@@QEAAXPEAVAActor@@@Z"],
     # THE move selector. Returns the attack id that ends up in the delayed
     # action struct, so overriding its return value is how a specific move is
     # chosen -- the struct itself is downstream and ignores what we write.

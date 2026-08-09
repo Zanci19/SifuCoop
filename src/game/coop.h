@@ -26,10 +26,7 @@ enum class Mode : int {
 struct Config {
     Mode mode = Mode::Coop;
 
-    // Uses Sifu's shipped UE4 IP listen-server path (UIpNetDriver) instead of
-    // the legacy custom UDP mirror. It starts with no synthetic local player,
-    // so the engine owns player possession, combat orders, AI and replication.
-    // It is opt-in until verified live on both supported store builds.
+    // Legacy experimental setting retained for config migration; custom UDP mirror is the supported transport.
     bool native_network = false;
 
     // Phase A -- enemies exist and agree on both screens.
@@ -66,9 +63,9 @@ struct Config {
     // while standing next to it, and watch whether your health drops.
     bool friendly_relationship = false;
 
-    // EXPERIMENTAL, default off. Represent the remote player with a REAL second
-    // player created by the engine (UGameplayStatics::CreatePlayer) instead of a
-    // clone we puppet around.
+    // Use a REAL second player body for the remote peer. This is required for
+    // host AI to select and fight that peer; a spawned clone is not a player to
+    // Sifu's targeting system.
     //
     // The puppet is not a player as far as Sifu is concerned, which is the root
     // of three separate complaints at once: enemies only ever fight the host,
@@ -78,7 +75,7 @@ struct Config {
     // moveset. Sifu ships the whole path -- a community split-screen mod uses
     // the same call -- but whether its game mode will hand out a second player
     // is unknown until it is asked.
-    bool real_second_player = true;
+    bool real_second_player = false;
 
     // Whether to force the viewport out of splitscreen when the second player is
     // created. On paper this is what we want -- the other player is on another
@@ -112,8 +109,6 @@ struct Config {
     bool report_damage = true;        // client tells the host what it hit
     bool mirror_peer_vitals = true;   // the puppet shows the peer's real health
 
-    bool mirror_hit_reactions = false;
-
     // Phase D -- run state, informational by default.
     bool sync_run_state = true;       // exchange age / room-clear / held weapon
     bool fix_room_clear = false;      // nudge the local room-clear % to the host's
@@ -136,7 +131,7 @@ struct Config {
     // does not swing, which is the previous, safe behaviour.
     //
     // echo_player_attacks above is the manual override and ignores the check.
-    bool remote_player_attacks = false;
+    bool remote_player_attacks = true;
 
     // Session flow.
     bool auto_follow_level = true;    // the host keeps pulling the joiner along

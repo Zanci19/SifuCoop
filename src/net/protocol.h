@@ -1,13 +1,12 @@
-// this is all explained by AI. might consider removing this
-
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 // Wire format, shared verbatim with testclient/. Everything is little-endian
 // and fixed-size: both ends are x86-64, so no serialisation layer is needed,
 // but every struct is explicitly packed so an accidental padding change cannot
-// desync the two builds.
+// silently desync the two builds.
 //
 // AUTHORITY MODEL
 //
@@ -28,7 +27,7 @@ constexpr std::uint32_t kMagic = 0x53434F50;  // 'SCOP'
 
 // Bumped whenever any struct below changes. Peers refuse to talk across a
 // mismatch rather than misinterpreting each other's bytes.
-constexpr std::uint16_t kProtocolVersion = 9;
+constexpr std::uint16_t kProtocolVersion = 11;
 
 // AUTHENTICATION
 //
@@ -185,6 +184,10 @@ struct LevelSyncPacket {
 
 struct EnemyEntry {
     std::uint32_t name_hash = 0;
+    // Stable placed-spawner identity. Runtime actor names are process-local,
+    // especially after one player previously cleared the room, but the level
+    // AISpawner path survives on both machines and still owns its pooled body.
+    std::uint32_t source_hash = 0;
     float x = 0.f, y = 0.f, z = 0.f;
     float yaw = 0.f;
     // Position alone makes the receiving movement component stop whenever it
@@ -217,6 +220,11 @@ struct EnemyStatePacket {
     EnemyEntry entries[kMaxEnemiesPerPacket];
 };
 
+constexpr std::size_t EnemyStatePacketSize(std::uint8_t count) {
+    return offsetof(EnemyStatePacket, entries) +
+           static_cast<std::size_t>(count) * sizeof(EnemyEntry);
+}
+
 struct DamageEntry {
     std::uint32_t name_hash = 0;
     // Cumulative since this enemy was last seen alive, not a delta. The host
@@ -233,6 +241,11 @@ struct EnemyDamagePacket {
     std::uint32_t count = 0;
     DamageEntry entries[kMaxDamagePerPacket];
 };
+
+constexpr std::size_t EnemyDamagePacketSize(std::uint32_t count) {
+    return offsetof(EnemyDamagePacket, entries) +
+           static_cast<std::size_t>(count) * sizeof(DamageEntry);
+}
 
 // Round-trip probe. The reply copies `probe_time_ms` back verbatim, so the
 // sender needs no table of outstanding pings and the two clocks never have to
@@ -276,11 +289,14 @@ struct RunStatePacket {
 // own machine, so on yours their attack should only be seen, never re-fought.
 //
 // The montage is addressed by object path, stable across machines exactly like
-// a combo tree or a level package.
+// a combo tree or a level package. `kind` makes UAnimMontage and raw
+// UAnimSequence payloads unambiguous; Sifu attacks use the latter.
 struct MontagePacket {
     PacketHeader header;
     float position = 0.f;              // playback position when captured, for seeking
-    char montage_path[192] = {};       // portable path of the UAnimMontage
+    std::uint8_t kind = 0;             // 0 = UAnimMontage, 1 = raw UAnimationAsset
+    std::uint8_t reserved[3] = {};
+    char montage_path[192] = {};       // portable path of the animation asset
 };
 
 #pragma pack(pop)
@@ -288,7 +304,7 @@ struct MontagePacket {
 static_assert(sizeof(PacketHeader) == 24, "header layout changed");
 static_assert(sizeof(SnapshotPacket) == 24 + 36 + 12 + 4, "snapshot layout changed");
 static_assert(sizeof(OrderEventPacket) == 24 + 16, "order event layout changed");
-static_assert(sizeof(EnemyEntry) == 52, "enemy entry layout changed");
+static_assert(sizeof(EnemyEntry) == 56, "enemy entry layout changed");
 static_assert(sizeof(RunStatePacket) == 24 + 4 + 4 + 4 + 192, "run state layout changed");
 static_assert(sizeof(EnemyStatePacket) <= kMaxPacketSize, "enemy packet exceeds the buffer");
 static_assert(sizeof(EnemyDamagePacket) <= kMaxPacketSize, "damage packet exceeds the buffer");

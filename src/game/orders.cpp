@@ -1,4 +1,4 @@
-﻿#include "orders.h"
+#include "orders.h"
 
 #include <windows.h>
 
@@ -394,6 +394,28 @@ bool g_have_template = false;
 // an enemy's, but an enemy's is far better than none -- see the capture below.
 bool g_template_from_player = false;
 
+// A peer can attack before this process has seen its first local combat action.
+// The delayed-action struct cannot be invented safely, so retain a small,
+// current-level backlog and replay it as soon as the game's own action hook
+// supplies a valid local template. No player punch is required.
+struct DeferredPlayerOrder {
+    std::uint32_t type = 0;
+    std::int32_t index = 0;
+    std::int32_t depth = 0;
+};
+constexpr int kDeferredPlayerOrderCount = 16;
+DeferredPlayerOrder g_deferred_player_orders[kDeferredPlayerOrderCount] = {};
+int g_deferred_player_order_count = 0;
+
+struct DeferredEnemyOrder {
+    std::uint32_t actor_hash = 0;
+    std::uint32_t type = 0;
+    std::int32_t index = 0;
+    std::int32_t depth = 0;
+};
+constexpr int kDeferredEnemyOrderCount = 32;
+DeferredEnemyOrder g_deferred_enemy_orders[kDeferredEnemyOrderCount] = {};
+int g_deferred_enemy_order_count = 0;
 using PrepareAttackFn = unsigned char(__fastcall*)(void* self, const void* delayed_action);
 
 // DelayedActionAttack::ToString was tried and must not be tried again.
@@ -405,29 +427,124 @@ using PrepareAttackFn = unsigned char(__fastcall*)(void* self, const void* delay
 // the answer was never a bigger copy -- it is to stop asking the game to
 // interpret our reconstructions at all.
 
+// Cached native attack-component lookup, declared before the LaunchAttack observer.
+ue::UObject* LocalPlayerAttackComponent();
+
+// LaunchAttack arrives before OrderAttack selected its UAnimSequence. Keep the
+// exact object until OnStart, whose native PDB signature is void(this), then
+// read the finished sequence and transmit only that cosmetic asset.
+using OrderAttackOnStartFn = void(__fastcall*)(void* order);
+OrderAttackOnStartFn g_original_order_attack_on_start = nullptr;
+
+struct PendingCosmeticSequence {
+    const void* order = nullptr;
+    DWORD armed_ms = 0;
+};
+
+constexpr int kPendingCosmeticSequenceCount = 16;
+PendingCosmeticSequence g_pending_cosmetic_sequences[kPendingCosmeticSequenceCount] = {};
+
+// Some player moves on the Steam build reach PrepareToLaunchAttack and OnStart
+// without crossing the observed LaunchAttack entry point. Keep a tiny local-only
+// handoff window so OnStart can still identify that attack's finished sequence.
+// It is cosmetic-only: this path sends an asset name, never replays UAttack.
+DWORD g_local_cosmetic_sequence_until = 0;
+
+void ArmCosmeticSequence(const void* order) {
+    if (!order) return;
+    const DWORD now = GetTickCount();
+    for (PendingCosmeticSequence& pending : g_pending_cosmetic_sequences) {
+        if (pending.order == order || pending.order == nullptr || now - pending.armed_ms > 1000) {
+            pending = {order, now};
+            return;
+        }
+    }
+    g_pending_cosmetic_sequences[0] = {order, now};
+}
+
+void __fastcall OrderAttackOnStartHook(void* order) {
+    g_original_order_attack_on_start(order);
+    if (!order || g_mirroring || !net::IsConnected() || !coop::Get().remote_player_attacks ||
+        offsets::OrderAttack_GetAnimPlayed == 0) {
+        return;
+    }
+
+    bool armed = false;
+    for (PendingCosmeticSequence& pending : g_pending_cosmetic_sequences) {
+        if (pending.order != order) continue;
+        pending = {};
+        armed = true;
+        break;
+    }
+    const DWORD now = GetTickCount();
+    if (!armed && g_local_cosmetic_sequence_until && now < g_local_cosmetic_sequence_until) {
+        // PrepareToLaunchAttack already proved that the local player is the
+        // source. This covers the storefront path whose LaunchAttack observer
+        // does not see the player order, while preserving the exact-order path
+        // above whenever it is available.
+        g_local_cosmetic_sequence_until = 0;
+        armed = true;
+        SC_LOG("attack: cosmetic sequence sourced from local prepare handoff");
+    } else if (g_local_cosmetic_sequence_until && now >= g_local_cosmetic_sequence_until) {
+        g_local_cosmetic_sequence_until = 0;
+    }
+    if (!armed) return;
+
+    using GetAnimPlayedFn = ue::UObject*(__fastcall*)(const void*);
+    auto get_anim =
+        reinterpret_cast<GetAnimPlayedFn>(g_module_base + offsets::OrderAttack_GetAnimPlayed);
+    ue::UObject* sequence = get_anim(order);
+    char path[192] = {};
+    if (!sequence || !ue::GetObjectPathName(sequence, path, sizeof(path))) {
+        SC_LOG("attack: OrderAttack OnStart had no portable sequence");
+        return;
+    }
+    net::SendAnimationSequence(path);
+    SC_LOG("attack: cosmetic sequence sent after OnStart");
+}
+
 // Read-only. The OrderAttack's vtable identifies its concrete type, and any
 // small integers near the front of it are candidate move selectors.
 extern "C" void sifucoop_on_launch_attack(void* self, const void* order_ref,
                                           unsigned int quadrant, unsigned int flag) {
     static unsigned long long count = 0;
-    if (++count > 30 || !order_ref) return;
+    if (!order_ref) return;
+    const bool log_this = ++count <= 30;
 
     // TSharedRef's first word is the object pointer.
     const void* order = *reinterpret_cast<const void* const*>(order_ref);
     if (!order || !RangeReadable(order, 64)) {
-        SC_LOG("launch: #%llu comp=%p quadrant=%u flag=%u (order unreadable)", count, self,
-               quadrant & 0xFF, flag & 0xFF);
+        if (log_this) {
+            SC_LOG("launch: #%llu comp=%p quadrant=%u flag=%u (order unreadable)", count, self,
+                   quadrant & 0xFF, flag & 0xFF);
+        }
         return;
     }
 
     const auto vtable = *reinterpret_cast<const std::uintptr_t*>(order);
     const auto* words = reinterpret_cast<const std::uint32_t*>(order);
 
-    SC_LOG("launch: #%llu quadrant=%u flag=%u vtable_rva=0x%08llX", count, quadrant & 0xFF,
-           flag & 0xFF,
-           static_cast<unsigned long long>(vtable >= g_module_base ? vtable - g_module_base : 0));
-    SC_LOG("launch:   words[2..9] %08X %08X %08X %08X %08X %08X %08X %08X", words[2], words[3],
-           words[4], words[5], words[6], words[7], words[8], words[9]);
+    // This is pre-start, so GetAnimPlayed is expected to be null here. Arm the
+    // object instead; OrderAttack::OnStart sends the sequence after Sifu fills it.
+    const DWORD now = GetTickCount();
+    const bool exact_local_component = self == LocalPlayerAttackComponent();
+    const bool local_prepare_handoff = g_local_cosmetic_sequence_until &&
+                                       now < g_local_cosmetic_sequence_until;
+    if ((exact_local_component || local_prepare_handoff) && net::IsConnected() &&
+        coop::Get().remote_player_attacks) {
+        ArmCosmeticSequence(order);
+        if (!exact_local_component && local_prepare_handoff) {
+            SC_LOG("attack: LaunchAttack source fallback armed");
+        }
+    }
+
+    if (log_this) {
+        SC_LOG("launch: #%llu quadrant=%u flag=%u vtable_rva=0x%08llX", count, quadrant & 0xFF,
+               flag & 0xFF, static_cast<unsigned long long>(
+                   vtable >= g_module_base ? vtable - g_module_base : 0));
+        SC_LOG("launch:   words[2..9] %08X %08X %08X %08X %08X %08X %08X %08X", words[2],
+               words[3], words[4], words[5], words[6], words[7], words[8], words[9]);
+    }
 }
 
 // The local player's UAttackComponent, cached against the pawn pointer. Every
@@ -491,6 +608,13 @@ extern "C" void sifucoop_on_prepare_attack(void* self, const void* delayed_actio
             g_template_from_player = from_local_player;
         }
         if (from_local_player) {
+            if (net::IsConnected() && coop::Get().remote_player_attacks) {
+                // Both raw OrderAttack sequences and regular montages are
+                // possible here. The latter is sampled in TickPuppet; the
+                // former is claimed by OnStart through this local window.
+                g_local_cosmetic_sequence_until = GetTickCount() + 750;
+                NotifyLocalAttackForCosmetic();
+            }
             if (ue::GetObjectPathName(tree, g_last_intent.tree_path,
                                       sizeof(g_last_intent.tree_path))) {
                 g_last_intent.index = index;
@@ -498,6 +622,8 @@ extern "C" void sifucoop_on_prepare_attack(void* self, const void* delayed_actio
                 g_last_intent.valid = true;
             }
             net::SendOrderEvent(0, 0, index, depth);
+            // OnStart sends the finished UAnimSequence; TickPuppet samples a
+            // montage fallback. Neither route invokes a remote attack component.
         } else if (net::GetRole() == net::Role::Host && net::IsConnected() &&
                    coop::Get().echo_enemy_attacks) {
             // An enemy swung. The host owns that decision, so the joiner is
@@ -660,11 +786,15 @@ bool IsOrderHookInstalled() { return g_installed; }
 // respawn would dereference freed objects, so it is dropped whenever the pawn
 // that produced it is replaced.
 void InvalidateAttackTemplate() {
-    if (!g_have_template) return;
+    const bool had_template = g_have_template;
     g_have_template = false;
     g_template_from_player = false;
+    g_deferred_player_order_count = 0;
+    g_deferred_enemy_order_count = 0;
     g_last_intent.valid = false;
-    SC_LOG("order: attack template invalidated (pawn changed)");
+    if (had_template) {
+        SC_LOG("order: attack template invalidated (pawn changed)");
+    }
 }
 
 // Makes `actor` throw the attack the peer reported.
@@ -746,7 +876,14 @@ void ApplyRemoteOrder(std::uint32_t order_type, std::int32_t attack_index,
         WarnNoTemplate();
         return;
     }
-    if (!ApplyAttackTo(GetPuppet(), attack_index, attack_depth)) return;
+    if (!ApplyAttackTo(GetPuppet(), attack_index, attack_depth)) {
+        static unsigned long long rejected = 0;
+        if (++rejected <= 5) {
+            SC_LOG("remote: peer attack could not be replayed (no valid puppet/action)");
+            coop::ReportProblem("remote attack animation could not start");
+        }
+        return;
+    }
 
     static unsigned long long applied = 0;
     if (++applied <= 20) {
@@ -766,11 +903,52 @@ void PumpRemoteOrders() {
     // friendly-fires you, and their damage was already resolved on their own
     // machine, so echo_player_attacks gates it and defaults off.
     const bool versus = coop::Get().mode == coop::Mode::Versus;
+    // Three ways in, in decreasing order of bluntness: Versus (hurting each
+    // other is the point), the manual echo_player_attacks override, or the
+    // guarded path -- remote attacks requested AND Sifu confirming that the two
+    // players are marked friendly to one another.
+    // Co-op player orders are never replayed through UAttackComponent. A
+    // relationship flag does not prove every hitbox branch honors it. Cosmetic
+    // montages are sent at the source; this path stays for Versus or an explicit
+    // diagnostic override only.
     const bool replay_player = versus || coop::Get().echo_player_attacks;
 
+    if (g_have_template && replay_player && g_deferred_player_order_count > 0) {
+        SC_LOG("remote: replaying %d peer attacks held until local template",
+               g_deferred_player_order_count);
+        for (int i = 0; i < g_deferred_player_order_count; ++i) {
+            const DeferredPlayerOrder& deferred = g_deferred_player_orders[i];
+            ApplyRemoteOrder(deferred.type, deferred.index, deferred.depth);
+        }
+        g_deferred_player_order_count = 0;
+    }
+
     while (net::PopOrderEvent(&actor_hash, &order_type, &attack_index, &attack_depth)) {
+    if (g_have_template && g_deferred_enemy_order_count > 0) {
+        SC_LOG("remote: replaying %d enemy attacks held until local template",
+               g_deferred_enemy_order_count);
+        for (int i = 0; i < g_deferred_enemy_order_count; ++i) {
+            const DeferredEnemyOrder& deferred = g_deferred_enemy_orders[i];
+            ue::UObject* enemy = FindEnemyByHash(deferred.actor_hash);
+            if (!enemy) continue;
+            ApplyMirroredEnemyTargetForAttack(deferred.actor_hash);
+            if (ApplyAttackTo(enemy, deferred.index, deferred.depth)) {
+                ++coop::GetStats().attacks_echoed;
+            }
+        }
+        g_deferred_enemy_order_count = 0;
+    }
         if (actor_hash == 0) {
-            if (replay_player) ApplyRemoteOrder(order_type, attack_index, attack_depth);
+            if (replay_player) {
+                if (g_have_template) {
+                    ApplyRemoteOrder(order_type, attack_index, attack_depth);
+                } else if (g_deferred_player_order_count < kDeferredPlayerOrderCount) {
+                    g_deferred_player_orders[g_deferred_player_order_count++] =
+                        {order_type, attack_index, attack_depth};
+                    SC_LOG("remote: peer attack queued until local template (%d/%d)",
+                           g_deferred_player_order_count, kDeferredPlayerOrderCount);
+                }
+            }
             continue;
         }
 
@@ -778,6 +956,10 @@ void PumpRemoteOrders() {
         // receives these -- the host is the one deciding them.
         if (!coop::Get().echo_enemy_attacks) continue;
         if (!g_have_template) {
+            if (g_deferred_enemy_order_count < kDeferredEnemyOrderCount) {
+                g_deferred_enemy_orders[g_deferred_enemy_order_count++] =
+                    {actor_hash, order_type, attack_index, attack_depth};
+            }
             WarnNoTemplate();
             continue;
         }
@@ -924,6 +1106,20 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
         SC_LOG("order: LaunchAttack hook ACTIVE at %p", launch);
     } else {
         SC_LOG("order: LaunchAttack hook FAILED");
+    }
+
+    if (offsets::OrderAttack_OnStart != 0) {
+        auto* on_start = reinterpret_cast<void*>(base + offsets::OrderAttack_OnStart);
+        if (MH_CreateHook(on_start, reinterpret_cast<void*>(&OrderAttackOnStartHook),
+                          reinterpret_cast<void**>(&g_original_order_attack_on_start)) == MH_OK &&
+            MH_EnableHook(on_start) == MH_OK) {
+            SC_LOG("order: OrderAttack::OnStart hook ACTIVE at %p", on_start);
+        } else {
+            g_original_order_attack_on_start = nullptr;
+            SC_LOG("order: OrderAttack::OnStart hook FAILED -- cosmetic attacks unavailable");
+        }
+    } else {
+        SC_LOG("order: OrderAttack::OnStart unavailable on this build");
     }
 
     auto* prepare =

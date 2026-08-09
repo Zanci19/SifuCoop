@@ -1,4 +1,14 @@
-// the gui launcher
+// SifuCoop launcher.
+//
+// Connecting is inherently a pre-launch decision -- you need the peer's address
+// before the game starts -- so the setup UI lives here rather than in-game.
+// Being a separate process, it also cannot crash Sifu.
+//
+// Plain Win32: no dependencies, no runtime to install, builds with the same
+// MinGW toolchain as the mod.
+
+// winsock2.h must precede windows.h, or windows.h pulls in the incompatible
+// winsock 1 headers first.
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -48,6 +58,9 @@ void SetStatus(const wchar_t* text) { SetWindowTextW(g_status, text); }
 
 bool IsHosting() { return SendMessageW(g_host_radio, BM_GETCHECK, 0, 0) == BST_CHECKED; }
 
+// Hosting means telling the peer which address to use, and a machine on a VPN
+// has several. ZeroTier hands out 10.x / 172.16-31.x, so those are flagged --
+// the alternative is the user guessing from ipconfig output.
 void RefreshLocalAddresses() {
     WSADATA wsa = {};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return;
@@ -148,7 +161,8 @@ bool SaveSettings() {
         return true;
     }
 
-    SetStatus(hosting ? L"Saved. Share your ZeroTier address above." : L"Saved. Ready to join your partner.");
+    SetStatus(hosting ? L"Saved. Share your ZeroTier address above."
+                      : L"Saved. Ready to join your partner.");
     return true;
 }
 
@@ -158,6 +172,8 @@ void LaunchGame() {
     wchar_t dir[MAX_PATH] = {};
     GetWindowTextW(g_game_dir, dir, MAX_PATH);
 
+    // Prefer the Epic shim in the install root: launching the shipping exe
+    // directly can bypass Epic's startup and fail on entitlement checks.
     wchar_t root[MAX_PATH] = {};
     wcsncpy(root, dir, MAX_PATH - 1);
     for (int i = 0; i < 2; ++i) {
@@ -229,7 +245,10 @@ void CreateControls(HWND window) {
                                 window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdPortEdit)),
                                 nullptr, nullptr);
 
-    // TODO: fix the empty passphrase not working
+    // Both players must type the same passphrase. It keys the authentication on
+    // every packet, so a mismatch is a silent refusal to connect rather than a
+    // confusing half-working session -- which is exactly why it is on the first
+    // screen rather than buried in the ini.
     MakeLabel(window, L"Shared passphrase:", 16, 154, 300, 18, 0);
     g_passphrase_edit =
         CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 16, 174,
@@ -255,7 +274,7 @@ void CreateControls(HWND window) {
 
     g_status = MakeLabel(window, L"", 16, 366, 420, 40, kIdStatusLabel);
 
-    // Use the system font (default is bitmap)
+    // Use the system UI font; the default is the ancient bitmap one.
     HFONT font = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                              DEFAULT_PITCH | FF_SWISS, L"Segoe UI");

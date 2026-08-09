@@ -226,7 +226,7 @@ echo_enemy_attacks=1
 ; swings kill you. Their damage already resolved on their own machine. Versus
 ; mode replays them regardless (hitting each other is the point there).
 echo_player_attacks=0
-real_second_player=1
+real_second_player=0
 report_damage=1
 mirror_peer_vitals=1
 auto_follow_level=1

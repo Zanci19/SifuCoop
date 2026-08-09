@@ -163,7 +163,8 @@ bool IsDead(const Fighter& fighter) {
 
 void SetDown(const Fighter& fighter, bool down) {
     if (!fighter.health) return;
-    // REMEMBER: The flag alone only records the fact, InternalSetDownState is what makes the character actually fall over, learned when the puppet refused to die (SloClap what the fuck?)
+    // The flag alone only records the fact; InternalSetDownState is what makes
+    // the character actually fall over. Learned when the puppet refused to die.
     if (g_set_is_down) g_set_is_down(fighter.health, down);
     if (g_set_down_state) {
         bool scratch = false;
@@ -211,7 +212,8 @@ bool StopBrain(ue::UObject* actor) {
         return false;
     }
 
-    // FString Reason by value, zeroed is a valid empty string and its destructor on a null pointer is a no-op
+    // FString Reason, by value. Zeroed is a valid empty string and its
+    // destructor on a null pointer is a no-op.
     struct FStringParam {
         void* data;
         std::int32_t num;
@@ -236,9 +238,40 @@ void SetActorPresent(ue::UObject* actor, bool present) {
     ue::CallFunction(actor, L"SetActorEnableCollision", &collision);
 }
 
+// UE 4.26 fields recovered from the shipped PDB. Sifu's locomotion/foot-IK
+// graph reads the root component's ComponentVelocity (not merely the movement
+// component's Velocity), which is why the first direct-drive presentation fix
+// still left legs idle.
+constexpr std::uintptr_t kMovementVelocityOffset = 0xD4;
+constexpr std::uintptr_t kSceneComponentVelocityOffset = 0x150;
+
+bool SetPresentationVelocity(ue::UObject* actor, const ue::FVector& velocity) {
+    if (!actor || !g_get_movement_component) return false;
+    ue::UObject* movement = g_get_movement_component(actor);
+    if (!movement) return false;
+    std::memcpy(reinterpret_cast<std::uint8_t*>(movement) + kMovementVelocityOffset,
+                &velocity, sizeof(velocity));
+
+    // AActor::GetVelocity and Sifu's foot IK observe this root-scene value.
+    // K2_GetRootComponent returns the puppet's capsule; never touch player 0.
+    struct RootParams {
+        ue::UObject* ReturnValue;
+    } root = {};
+    if (!ue::CallFunction(actor, L"K2_GetRootComponent", &root) || !root.ReturnValue) {
+        return false;
+    }
+    std::memcpy(reinterpret_cast<std::uint8_t*>(root.ReturnValue) +
+                    kSceneComponentVelocityOffset,
+                &velocity, sizeof(velocity));
+    return true;
+}
 bool RequestDirectMove(ue::UObject* actor, const ue::FVector& desired_velocity,
                        bool force_max_speed) {
     if (!actor || !g_get_movement_component || !g_request_direct_move) return false;
+
+    // Do not cache this raw pointer. Pawns and their movement components are
+    // rebuilt on respawn, travel and pooling; resolving this lightweight native
+    // getter each tick is safer than ever calling a stale component.
     ue::UObject* component = g_get_movement_component(actor);
     if (!component) return false;
     g_request_direct_move(component, desired_velocity, force_max_speed);
@@ -247,7 +280,8 @@ bool RequestDirectMove(ue::UObject* actor, const ue::FVector& desired_velocity,
 
 bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
                    const ue::FRotator& rotation) {
-    // K2_TeleportTo's parameter block is just (FVector, FRotator, bool), no FHitResult
+    // K2_TeleportTo's parameter block is just (FVector, FRotator, bool) -- no
+    // FHitResult whose layout would have to be guessed.
     struct Params {
         ue::FVector DestLocation;
         ue::FRotator DestRotation;
@@ -255,6 +289,11 @@ bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
     } params = {};
     params.DestLocation = location;
     params.DestRotation = rotation;
+    // Two different questions, and returning the wrong one hid a failure: the
+    // call succeeding means the UFunction was found, while ReturnValue is
+    // whether the actor actually moved. K2_TeleportTo refuses when the
+    // destination would not fit, so a caller that only checked the former
+    // believed it had repositioned something that had not budged.
     if (!ue::CallFunction(actor, L"K2_TeleportTo", &params)) return false;
     return params.ReturnValue;
 }
@@ -287,24 +326,21 @@ std::uint32_t ActorHash(ue::UObject* actor) {
     return HashName(name);
 }
 
-// Some more AI description!!11!
-
-/* UE4 names an actor spawned at runtime `Base_<number>`, where the number comes
-from a per-process counter that walks *down* from MAX_int32. It therefore
-differs on every machine and every launch: the same grunt in the same fight
-was `000_AISpawner_Group015_Grunt_Character_2147475019` on one machine and
-`..._2147473188` on the other.
-
-This is what broke enemy pairing between two real machines. Enemies placed in
-the level's pool are named `..._C_0` and match perfectly, which is why a
-pooled roster of 62 enemies tested clean across launches -- but the enemies
-that actually fight a room are spawned by an AISpawner at runtime, and every
-one of those hashed differently on each side. The receiving machine found no
-enemy for any id the host sent (driven=0, unmatched=every active enemy).
-
-Anything at or above this floor is a runtime counter value rather than a real
-instance index; `..._C_0` and `..._Group015` stay untouched. */
-
+// UE4 names an actor spawned at runtime `Base_<number>`, where the number comes
+// from a per-process counter that walks *down* from MAX_int32. It therefore
+// differs on every machine and every launch: the same grunt in the same fight
+// was `000_AISpawner_Group015_Grunt_Character_2147475019` on one machine and
+// `..._2147473188` on the other.
+//
+// This is what broke enemy pairing between two real machines. Enemies placed in
+// the level's pool are named `..._C_0` and match perfectly, which is why a
+// pooled roster of 62 enemies tested clean across launches -- but the enemies
+// that actually fight a room are spawned by an AISpawner at runtime, and every
+// one of those hashed differently on each side. The receiving machine found no
+// enemy for any id the host sent (driven=0, unmatched=every active enemy).
+//
+// Anything at or above this floor is a runtime counter value rather than a real
+// instance index; `..._C_0` and `..._Group015` stay untouched.
 constexpr std::uint32_t kRuntimeNameFloor = 2000000000u;
 
 bool SplitRuntimeSuffix(char* name, std::uint32_t* number_out) {
@@ -326,6 +362,9 @@ bool SplitRuntimeSuffix(char* name, std::uint32_t* number_out) {
 }
 
 std::uint32_t HashNameWithOrdinal(const char* text, int ordinal) {
+    // Same FNV-1a step as HashName, continued over the ordinal, so two enemies
+    // spawned by one group stay distinct. Only ever applied to names that had a
+    // runtime suffix, so plain pooled names keep the exact hash they always had.
     std::uint32_t hash = HashName(text);
     hash ^= static_cast<std::uint32_t>(ordinal) & 0xFFu;
     hash *= 16777619u;

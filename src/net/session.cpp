@@ -36,16 +36,16 @@ bool g_have_peer_addr = false;
 
 std::uint32_t g_send_sequence = 0;
 std::uint32_t g_last_snapshot_sequence = 0;
-DWORD g_last_snapshot_recv_ms = 0;
 DWORD g_last_recv_ms = 0;
 DWORD g_last_send_ms = 0;
 DWORD g_last_ping_ms = 0;
+DWORD g_last_hello_ms = 0;
 
 // Interpolation buffer. Holding peer state slightly in the past and playing it
 // back smoothly is what hides jitter; rendering the newest packet immediately
 // would snap on every late or reordered datagram.
 constexpr int kBufferSize = 64;
-constexpr DWORD kTimeoutMs = 20000;
+constexpr DWORD kTimeoutMs = 5000;
 
 // A gap between ticks longer than this means the game thread was blocked rather
 // than that time merely passed. Well above any frame, well below a level load.
@@ -548,6 +548,7 @@ void FillHeader(PacketHeader* header, PacketType type) {
 // backlog of stale animations after any stall.
 char g_montage_path[192] = {};
 float g_montage_position = 0.f;
+bool g_montage_is_raw_sequence = false;
 bool g_have_montage = false;
 
 void ResetLevelSyncState();
@@ -557,7 +558,6 @@ void ResetPeerState() {
     for (PeerState& state : g_peer_buffer) state.valid = false;
     g_peer_head = 0;
     g_last_snapshot_sequence = 0;
-    g_last_snapshot_recv_ms = 0;
     g_order_read = g_order_write;
     g_peer_state_valid = false;
     g_peer_vitals = PeerVitals();
@@ -602,7 +602,6 @@ void HandleSnapshot(const SnapshotPacket& packet) {
         if (gap > 1) coop::GetStats().packets_dropped += gap - 1;
     }
     g_last_snapshot_sequence = packet.header.sequence;
-    g_last_snapshot_recv_ms = NowMs();
     // Counted separately from packets_received, which mixes in pings, enemy
     // sweeps and damage reports. This is the number that answers "how often does
     // the peer's position actually update" -- the question the old heartbeat
@@ -762,6 +761,7 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
         }
         EnemyStateOut& out = g_enemies_staging[g_enemy_staging_count++];
         out.name_hash = in.name_hash;
+        out.source_hash = in.source_hash;
         out.x = in.x;
         out.y = in.y;
         out.z = in.z;
@@ -854,6 +854,7 @@ void HandlePong(const PingPacket& packet) {
 void HandleMontage(const MontagePacket& packet) {
     lstrcpynA(g_montage_path, packet.montage_path, sizeof(g_montage_path));
     g_montage_position = packet.position;
+    g_montage_is_raw_sequence = packet.kind == 1;
     g_have_montage = true;
 }
 
@@ -949,14 +950,6 @@ void PumpReceive() {
         g_last_recv_ms = NowMs();
         g_bytes_in += static_cast<std::uint32_t>(received);
         ++coop::GetStats().packets_received;
-
-        if (!g_connected && !handshake && g_have_peer_addr && g_have_session_key &&
-            from.sin_addr.s_addr == g_peer_addr.sin_addr.s_addr &&
-            from.sin_port == g_peer_addr.sin_port) {
-            g_connected = true;
-            g_connected_event = true;
-            SC_LOG("net: peer is still there -- session restored without a new handshake");
-        }
 
         // Anything smaller than the struct it claims to be would read past the
         // end of what actually arrived, so every case checks its own size.
@@ -1069,17 +1062,23 @@ void PumpReceive() {
                 }
                 break;
             case PacketType::EnemyState:
-                if (fits(sizeof(EnemyStatePacket))) {
+                if (fits(offsetof(EnemyStatePacket, entries))) {
                     EnemyStatePacket enemies = {};
-                    memcpy(&enemies, buffer, sizeof(enemies));
-                    HandleEnemyState(enemies);
+                    memcpy(&enemies, buffer, received);
+                    if (enemies.count <= kMaxEnemiesPerPacket &&
+                        received == static_cast<int>(EnemyStatePacketSize(enemies.count))) {
+                        HandleEnemyState(enemies);
+                    }
                 }
                 break;
             case PacketType::EnemyDamage:
-                if (fits(sizeof(EnemyDamagePacket))) {
+                if (fits(offsetof(EnemyDamagePacket, entries))) {
                     EnemyDamagePacket damage = {};
-                    memcpy(&damage, buffer, sizeof(damage));
-                    HandleEnemyDamage(damage);
+                    memcpy(&damage, buffer, received);
+                    if (damage.count <= kMaxDamagePerPacket &&
+                        received == static_cast<int>(EnemyDamagePacketSize(damage.count))) {
+                        HandleEnemyDamage(damage);
+                    }
                 }
                 break;
             case PacketType::Ping:
@@ -1239,6 +1238,36 @@ bool StartSession() {
     return true;
 }
 
+bool RestartSession() {
+    const bool was_connected = g_connected;
+    StopSession();
+    ResetPeerState();
+    g_connected = false;
+    g_have_peer_addr = false;
+    g_send_sequence = 0;
+    g_last_recv_ms = 0;
+    g_last_send_ms = 0;
+    g_last_ping_ms = 0;
+    g_last_hello_ms = 0;
+    if (was_connected) g_disconnected_event = true;
+    SC_LOG("net: restarting configured session");
+    return StartSession();
+}
+
+void DisconnectSession() {
+    const bool was_connected = g_connected;
+    StopSession();
+    ResetPeerState();
+    g_connected = false;
+    g_have_peer_addr = false;
+    g_role = Role::Offline;
+    g_last_recv_ms = 0;
+    g_last_send_ms = 0;
+    g_last_ping_ms = 0;
+    g_last_hello_ms = 0;
+    if (was_connected) g_disconnected_event = true;
+    SC_LOG("net: session ended by user");
+}
 bool Reconfigure(bool host_mode, const char* address, int port, const char* passphrase) {
     if (port < 1 || port > 65535) {
         coop::ReportProblem("port must be between 1 and 65535");
@@ -1261,14 +1290,7 @@ bool Reconfigure(bool host_mode, const char* address, int port, const char* pass
     SC_LOG("net: reconfiguring as %s %s:%d", host_mode ? "HOST" : "CLIENT",
            address ? address : "?", port);
 
-    StopSession();
-    ResetPeerState();
-    g_connected = false;
-    g_have_peer_addr = false;
-    g_send_sequence = 0;
-    g_last_recv_ms = 0;
-    g_last_send_ms = 0;
-    return StartSession();
+    return RestartSession();
 }
 
 void StopSession() {
@@ -1284,9 +1306,7 @@ void StopSession() {
     }
     if (g_connected) {
         PacketHeader goodbye = {};
-        goodbye.magic = kMagic;
-        goodbye.version = kProtocolVersion;
-        goodbye.type = static_cast<std::uint16_t>(PacketType::Goodbye);
+        FillHeader(&goodbye, PacketType::Goodbye);
         SendPacket(&goodbye, sizeof(goodbye));
     }
     closesocket(g_socket);
@@ -1415,6 +1435,7 @@ void SendEnemyStates(const EnemyStateOut* entries, int count) {
             const EnemyStateOut& in = entries[first + i];
             EnemyEntry& out = packet.entries[i];
             out.name_hash = in.name_hash;
+            out.source_hash = in.source_hash;
             out.x = in.x;
             out.y = in.y;
             out.z = in.z;
@@ -1428,7 +1449,7 @@ void SendEnemyStates(const EnemyStateOut* entries, int count) {
             out.damage_applied = in.damage_applied;
             out.flags = in.flags;
         }
-        SendPacket(&packet, sizeof(packet));
+        SendPacket(&packet, EnemyStatePacketSize(packet.count));
     }
 }
 
@@ -1440,6 +1461,17 @@ int GetEnemyStates(EnemyStateOut* out, int max_out) {
 }
 
 bool HasEnemySweep() { return g_enemy_sweep_seen; }
+
+void ResetEnemyReplication() {
+    g_enemy_live_count = 0;
+    g_enemy_staging_count = 0;
+    g_enemy_staging_generation = 0;
+    g_enemy_chunks_seen = 0;
+    g_enemy_chunk_total = 0;
+    g_enemy_sweep_seen = false;
+    g_damage_count = 0;
+    g_damage_sequence = 0;
+}
 
 void SendEnemyDamage(const DamageReport* entries, int count) {
     if (!g_connected || !entries || count <= 0) return;
@@ -1467,7 +1499,7 @@ void SendEnemyDamage(const DamageReport* entries, int count) {
         packet.entries[i].name_hash = entries[i].name_hash;
         packet.entries[i].total = entries[i].total;
     }
-    SendPacket(&packet, sizeof(packet));
+    SendPacket(&packet, EnemyDamagePacketSize(packet.count));
 }
 
 int GetEnemyDamage(DamageReport* out, int max_out) {
@@ -1486,11 +1518,21 @@ void SendMontageState(const char* montage_path, float position) {
     SendPacket(&packet, sizeof(packet));
 }
 
-bool PopMontageState(char* out_path, int out_size, float* out_position) {
+void SendAnimationSequence(const char* asset_path) {
+    if (!g_connected || !asset_path || !asset_path[0]) return;
+    MontagePacket packet = {};
+    FillHeader(&packet.header, PacketType::MontageState);
+    packet.kind = 1;
+    lstrcpynA(packet.montage_path, asset_path, sizeof(packet.montage_path));
+    SendPacket(&packet, sizeof(packet));
+}
+
+bool PopMontageState(char* out_path, int out_size, float* out_position, bool* out_raw_sequence) {
     if (!g_have_montage || !out_path || out_size <= 0) return false;
     g_have_montage = false;
     lstrcpynA(out_path, g_montage_path, out_size);
     if (out_position) *out_position = g_montage_position;
+    if (out_raw_sequence) *out_raw_sequence = g_montage_is_raw_sequence;
     return true;
 }
 
@@ -1585,12 +1627,12 @@ int GetInterpolationDelayMs() {
     // stops an occasional late packet from becoming a visible stutter. Two
     // snapshot intervals on top covers the sampling grid itself.
     int delay = g_rtt_ms / 2 + g_rtt_jitter_ms * 2 + 2000 / kSnapshotHz;
-    // Floor raised from 30 to 50: on localhost RTT is ~0, so the formula lands
-    // near one snapshot interval, leaving only a single sample of buffer. One
-    // late packet then empties it and the puppet stutters. 50 ms holds roughly
-    // three snapshots at 60 Hz -- enough slack to ride out ordinary jitter while
-    // staying well under the perceptible-lag threshold.
-    if (delay < 50) delay = 50;
+    // Floor raised from 30 to 80: observed 30--50 ms snapshot gaps can empty
+    // a 50 ms buffer. 80 ms holds nearly five 60 Hz samples, avoiding repeated
+    // interpolation-to-dead-reckoning flips while retaining low visual latency.
+    //
+    //
+    if (delay < 80) delay = 80;
     if (delay > 250) delay = 250;
     return delay;
 }
@@ -1627,7 +1669,14 @@ void TickSession(const LocalState& local) {
 
     UpdateRates(now);
 
-    if (g_connected && g_last_recv_ms != 0 && now - g_last_recv_ms > kTimeoutMs) {
+    // The host knows when it has just asked the peer to load a level. That load
+    // blocks the peer's game thread/socket pump (5.9s in the captured session),
+    // so the ordinary 5s silence limit retired the real peer body one second
+    // before the joiner arrived. Keep the normal fast timeout everywhere else;
+    // only a still-unacknowledged level invite gets the existing 20s budget.
+    const bool peer_loading = g_role == Role::Host && g_active_level_request[0] != '\0';
+    const DWORD timeout_ms = peer_loading ? kLevelRetryTimeoutMs : kTimeoutMs;
+    if (g_connected && g_last_recv_ms != 0 && now - g_last_recv_ms > timeout_ms) {
         SC_LOG("net: peer timed out after %lums", now - g_last_recv_ms);
         coop::ReportProblem("peer timed out (no packets for %lums)", now - g_last_recv_ms);
         g_disconnected_event = true;
@@ -1656,39 +1705,27 @@ void TickSession(const LocalState& local) {
         g_have_session_key = had_session;
     }
 
-    // Clients keep saying hello until accepted. Signed with the base key: the
-    // session key does not exist until the host has seen this nonce.
-    if (!g_connected && g_role == Role::Client && now - g_last_send_ms > 500) {
-        g_last_send_ms = now;
-        HelloPacket hello = {};
-        FillHeader(&hello.header, PacketType::Hello);
-        lstrcpynA(hello.name, "sifu-peer", sizeof(hello.name));
-        memcpy(hello.nonce, g_local_nonce, kSessionNonceSize);
-        g_have_session_key = false;
-        SendPacket(&hello, sizeof(hello));
-        return;
-    }
-
-    if (!g_connected) return;
-
-    static DWORD last_snapshot_ms = 0;
-    static DWORD last_rehello_ms = 0;
-    if (g_last_snapshot_sequence != 0) last_snapshot_ms = g_last_snapshot_recv_ms;
-    if (g_role == Role::Client && last_snapshot_ms != 0 &&
-        now - last_snapshot_ms > 4000 && now - last_rehello_ms > 2000) {
-        last_rehello_ms = now;
-        SC_LOG("net: no position from the host for %lums while the link is up -- "
-               "re-announcing ourselves", now - last_snapshot_ms);
+    // A client renews its base-key handshake while connected. UDP Goodbyes can
+    // be lost, so this is also how it recovers quickly when the host restarts:
+    // the host accepts the Hello, sends a base-key Welcome, and both sides
+    // derive the same fresh session key without closing either game.
+    constexpr DWORD kHelloRenewMs = 2000;
+    if (g_role == Role::Client &&
+        ((!g_connected && now - g_last_hello_ms > 500) ||
+         (g_connected && now - g_last_hello_ms >= kHelloRenewMs))) {
+        g_last_hello_ms = now;
         HelloPacket hello = {};
         FillHeader(&hello.header, PacketType::Hello);
         lstrcpynA(hello.name, "sifu-peer", sizeof(hello.name));
         memcpy(hello.nonce, g_local_nonce, kSessionNonceSize);
         const bool had_session = g_have_session_key;
-        g_have_session_key = false;
+        g_have_session_key = false;  // Hello always uses the base key.
         SendPacket(&hello, sizeof(hello));
         g_have_session_key = had_session;
+        if (!g_connected) return;
     }
 
+    if (!g_connected) return;
     if (g_role == Role::Host && g_active_level_request[0]) {
         if (_stricmp(g_peer_level, g_active_level_request) == 0) {
             SC_LOG("net: level invite acknowledged by peer");
@@ -1717,7 +1754,8 @@ void TickSession(const LocalState& local) {
     }
 
     int hz = coop::Get().snapshot_hz;
-    if (hz < 10) hz = 10;
+    if (hz < 30) hz = 30;
+    if (hz > 60) hz = 60;
     if (now - g_last_send_ms < static_cast<DWORD>(1000 / hz)) return;
     g_last_send_ms = now;
 

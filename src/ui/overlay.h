@@ -49,7 +49,8 @@ struct MenuRequests {
     bool accept_invite = false;   // joiner: take the host up on their standing invite
     bool teleport_to_peer = false;  // stand where the other player is standing
     bool save_config = false;     // persist the toggles to SifuCoop.ini
-    bool native_start = false;    // explicit UE4 listen host / direct-IP join
+    bool restart_network = false; // restart the configured UDP session
+    bool disconnect_network = false; // leave networking offline
     bool log_roster = false;      // dump every tracked character to the log
 };
 

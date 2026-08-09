@@ -12,7 +12,8 @@ HANDLE g_file = INVALID_HANDLE_VALUE;
 CRITICAL_SECTION g_lock;
 bool g_lock_ready = false;
 
-// %LOCALAPPDATA%\Sifu\Saved\Logs\SifuCoop.log
+// %LOCALAPPDATA%\Sifu\Saved\Logs\SifuCoop.log -- sits beside the game's own
+// logs so everything relevant is in one place when diagnosing a crash.
 void BuildLogPath(char* out, DWORD size) {
     char local[MAX_PATH] = {};
     DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", local, MAX_PATH);
@@ -55,7 +56,8 @@ void Write(const char* fmt, ...) {
 
     char line[2048];
 
-    // stamps measured in ms
+    // Millisecond stamps: without them, "why did this take 10 seconds" is not
+    // an answerable question from a log file.
     SYSTEMTIME st = {};
     GetLocalTime(&st);
     int n = snprintf(line, sizeof(line) - 2, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute,

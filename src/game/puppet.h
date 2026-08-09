@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 
@@ -17,6 +17,16 @@ void DespawnPuppet();
 
 // Called each frame; handles the debug hotkeys.
 void TickPuppet();
+
+// True only after the lobby has explicitly started co-op and both peers are in
+// the same non-frontend Story world. Enemy replication uses the same gate as
+// remote-body creation so connecting in a menu cannot mutate either save.
+bool CoopGameplayActive();
+
+// Marks a local attack as needing one immediate, cosmetic montage sample. The
+// sample is played on the peer's puppet only; it never invokes Sifu's attack
+// component, so it cannot create a hitbox or apply damage.
+void NotifyLocalAttackForCosmetic();
 
 // Steers an actor toward a target using the game's movement component, so it
 // produces real locomotion animation. Shared with enemy replication -- an
