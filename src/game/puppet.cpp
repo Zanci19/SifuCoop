@@ -57,6 +57,10 @@ ue::UObject* g_puppet_anim_instance = nullptr;
 ue::FVector g_puppet_presentation_velocity = {};
 bool g_have_puppet_presentation_velocity = false;
 
+// Resolved on the game thread in DriveTo and consumed inside the animation
+// update, which may not call reflection. Cleared whenever the puppet changes.
+PresentationTargets g_puppet_presentation_targets;
+
 // Weak: the puppet can be destroyed by the game (level transition, respawn),
 // so this is validated before use rather than trusted.
 ue::UObject* g_puppet = nullptr;
@@ -99,11 +103,52 @@ ue::UObject* g_last_player = nullptr;
 ue::FVector g_last_local_location;
 bool g_have_local_velocity = false;
 
+// UPlayerAnim member offsets, all straight out of Unreal's generated property
+// tables (tools/pdbdump/structdump.py UPlayerAnim). Named here rather than
+// spelled inline so the reader can check them against that dump.
+constexpr std::uintptr_t kAnimOwnerVelocity = 0x0FB4;        // m_vOwnerVelocity
+constexpr std::uintptr_t kAnimOwnerVelocityLength = 0x0FC0;  // m_fOwnerVelocityLength
+constexpr std::uintptr_t kAnimVelocityMaxV0 = 0x0FC4;        // m_fOwnerVelocityMaxForV0Anim
+constexpr std::uintptr_t kAnimVelocityMaxV1 = 0x0FC8;        // ...V1Anim
+constexpr std::uintptr_t kAnimVelocityMaxV2 = 0x0FCC;        // ...V2Anim
+constexpr std::uintptr_t kAnimBlendspaceAngle = 0x0FD4;      // m_fBlendspaceAngle
+constexpr std::uintptr_t kAnimWantedSpeed = 0x15E4;          // m_fWantedSpeed
+constexpr std::uintptr_t kAnimMoveStatus = 0x1C29;           // m_MoveStatus
+constexpr std::uintptr_t kAnimSpeedState = 0x1C2D;           // m_SpeedState
+constexpr std::uintptr_t kAnimSpeedStateAlphaV0 = 0x1C44;    // m_fSpeedStateAlphaV0..V3
+
+float ReadFloatAt(const std::uint8_t* bytes, std::uintptr_t offset) {
+    float value = 0.f;
+    std::memcpy(&value, bytes + offset, sizeof(value));
+    return value;
+}
+
+// Which locomotion band a speed falls in, using Sifu's OWN thresholds.
+//
+// These were hardcoded as 18/280/600. Those numbers were measured off one
+// character and the anim instance carries the real ones three floats after the
+// velocity length, so read them: a build change or a different player state
+// moves the boundaries, and picking a different band than the rest of the graph
+// expects is exactly how you get a transition that starts and never finishes.
+int SpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
+    float v0 = ReadFloatAt(bytes, kAnimVelocityMaxV0);
+    float v1 = ReadFloatAt(bytes, kAnimVelocityMaxV1);
+    float v2 = ReadFloatAt(bytes, kAnimVelocityMaxV2);
+    if (!(v0 > 0.f && v1 > v0 && v2 > v1)) {
+        v0 = 18.f;
+        v1 = 280.f;
+        v2 = 600.f;
+    }
+    if (speed <= v0) return 0;
+    if (speed < v1) return 1;
+    if (speed < v2) return 2;
+    return 3;
+}
+
 void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_seconds) {
     // Do not call reflection here: nested ProcessEvent in this traversal-
-    // sensitive update caused the Steam AV. Velocity offsets below came from
-    // Sifu's shipped PDB/reflection tables; derived state uses its native
-    // setter instead of partially rewriting either state/cache struct.
+    // sensitive update caused the Steam AV. Everything below is either a memcpy
+    // at a reflected offset or a native setter.
     const bool inject = anim_instance && anim_instance == g_puppet_anim_instance &&
                         g_have_puppet_presentation_velocity;
     auto* bytes = reinterpret_cast<std::uint8_t*>(anim_instance);
@@ -113,27 +158,81 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
                           g_puppet_presentation_velocity.X +
                       g_puppet_presentation_velocity.Y *
                           g_puppet_presentation_velocity.Y);
-        // Native code consumes these while updating locomotion.
-        std::memcpy(bytes + 0xFB4, &g_puppet_presentation_velocity,
-                    sizeof(g_puppet_presentation_velocity));  // m_vOwnerVelocity
-        std::memcpy(bytes + 0xFC0, &speed, sizeof(speed));     // m_fOwnerVelocityLength
-        std::memcpy(bytes + 0x15E4, &speed, sizeof(speed));    // m_fWantedSpeed
+
+        // THE fix for "the remote player never plays a walk cycle".
+        //
+        // Presentation velocity was being published in DriveTo, during the game
+        // tick. The character movement component then ticks, and a walking
+        // character with no input has braking friction applied to it -- so by
+        // the time the animation graph ran, the velocity it reads had already
+        // been decelerated back to zero and the graph saw a standing character.
+        // Everything after this point was compensation for that: force the
+        // derived speed state, force the blend alphas, and hope the state
+        // machine agrees. It half-worked, which is what "lifts a leg and stops"
+        // looks like -- the start-step transition fires and then its own
+        // conditions are false.
+        //
+        // NativeUpdateAnimation is the last point before the graph samples the
+        // owner, so publish here instead. Sifu then computes velocity length,
+        // speed band, blendspace angle, move status and every transition
+        // condition itself, from consistent inputs, exactly as it does for a
+        // real player.
+        WritePresentationVelocity(g_puppet_presentation_targets,
+                                  g_puppet_presentation_velocity);
+
+        std::memcpy(bytes + kAnimOwnerVelocity, &g_puppet_presentation_velocity,
+                    sizeof(g_puppet_presentation_velocity));
+        std::memcpy(bytes + kAnimOwnerVelocityLength, &speed, sizeof(speed));
+        std::memcpy(bytes + kAnimWantedSpeed, &speed, sizeof(speed));
     }
     if (g_original_player_anim_update) g_original_player_anim_update(anim_instance, delta_seconds);
 
     if (!inject) return;
 
-    // The spawned/second-player body has no local locomotion order. Native
-    // update therefore recomputes its derived state as V0/idle even after it
-    // consumed the injected velocity. The AnimBlueprint transition graph reads
-    // these derived fields after NativeUpdateAnimation returns; assert the
-    // matching state here so the graph actually leaves idle.
-    int state = 0;  // V0 idle
-    if (speed > 18.f) {
-        if (speed < 280.f) state = 1;       // V1 walk
-        else if (speed < 600.f) state = 2;  // V2 run
-        else state = 3;                     // V3 sprint
+    // Did Sifu's own update agree with the velocity we published? If it did,
+    // every derived field below it is now correct and forcing them can only
+    // fight the state machine. If it did not, the old forcing is still the best
+    // available fallback -- so keep it, but say which mode is running, because
+    // that one line answers "is the locomotion fix working" without guesswork.
+    const float native_speed = ReadFloatAt(bytes, kAnimOwnerVelocityLength);
+    const float tolerance = speed * 0.25f > 8.f ? speed * 0.25f : 8.f;
+    const bool native_agrees = fabsf(native_speed - speed) <= tolerance;
+
+    static int last_mode = -1;
+    const int mode = native_agrees ? 1 : 0;
+    if (mode != last_mode) {
+        last_mode = mode;
+        SC_LOG("puppet: locomotion is %s (ours %.0f, Sifu's %.0f)",
+               native_agrees ? "DRIVEN BY SIFU -- derived state left alone"
+                             : "forced -- Sifu recomputed idle from the owner",
+               speed, native_speed);
     }
+
+    // Periodic read-out of what the graph actually holds. This is the
+    // instrument that was missing: every previous locomotion fix was judged by
+    // watching the character, which cannot distinguish "wrong speed band" from
+    // "right band, transition never completed".
+    static DWORD last_dump = 0;
+    const DWORD now = GetTickCount();
+    if (speed > 18.f && now - last_dump >= 2000) {
+        last_dump = now;
+        const std::uint8_t* state_bytes = bytes + kAnimSpeedState;
+        SC_LOG("puppet: anim speed=%.0f native=%.0f band=V%d state=%02X%02X%02X%02X%02X "
+               "alphas %.2f/%.2f/%.2f/%.2f angle=%.0f movestatus=%02X%02X%02X%02X",
+               speed, native_speed, SpeedStateForSpeed(bytes, speed), state_bytes[0],
+               state_bytes[1], state_bytes[2], state_bytes[3], state_bytes[4],
+               ReadFloatAt(bytes, kAnimSpeedStateAlphaV0),
+               ReadFloatAt(bytes, kAnimSpeedStateAlphaV0 + 4),
+               ReadFloatAt(bytes, kAnimSpeedStateAlphaV0 + 8),
+               ReadFloatAt(bytes, kAnimSpeedStateAlphaV0 + 12),
+               ReadFloatAt(bytes, kAnimBlendspaceAngle), bytes[kAnimMoveStatus],
+               bytes[kAnimMoveStatus + 1], bytes[kAnimMoveStatus + 2],
+               bytes[kAnimMoveStatus + 3]);
+    }
+
+    if (native_agrees) return;  // Sifu is driving it; do not fight the graph.
+
+    const int state = SpeedStateForSpeed(bytes, speed);
 
     // FSpeedState is five bytes: V0..V3 booleans followed by the enum.
     // The old four-byte write left the enum at V0, so the graph stayed idle.
@@ -143,23 +242,16 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
         std::uint8_t speed_state[5] = {};
         speed_state[state] = 1;
         speed_state[4] = static_cast<std::uint8_t>(state);
-        std::memcpy(bytes + 0x1C2D, speed_state, sizeof(speed_state));
+        std::memcpy(bytes + kAnimSpeedState, speed_state, sizeof(speed_state));
     }
 
     float speed_alphas[4] = {};
     speed_alphas[state] = 1.f;
-    std::memcpy(bytes + 0x1C44, speed_alphas, sizeof(speed_alphas));
+    std::memcpy(bytes + kAnimSpeedStateAlphaV0, speed_alphas, sizeof(speed_alphas));
 
     // Transition-cache flags are one-shot graph results. Reasserting them each
     // frame restarted the start-step forever: the raised-leg freeze seen live.
     // Leave this cache entirely to Sifu's animation state machine.
-
-
-    static bool announced = false;
-    if (!announced && state != 0) {
-        announced = true;
-        SC_LOG("puppet: locomotion graph forced out of idle (V%d, speed %.0f)", state, speed);
-    }
 }
 
 void EnsurePlayerAnimHook() {
@@ -265,10 +357,20 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
     if (distance > distance_peak) distance_peak = distance;
     ++distance_samples;
     if (stats_now - stats_since >= 5000) {
+        // The fallback counters are process-wide (driven enemies use the same
+        // path), so they are printed as a delta over this window.
+        std::uint32_t fallbacks = 0;
+        std::uint32_t hard = 0;
+        GetTeleportFallbackCounts(&fallbacks, &hard);
+        static std::uint32_t last_fallbacks = 0;
+        static std::uint32_t last_hard = 0;
         SC_LOG("puppet: chase lag avg=%.0f peak=%.0f units over %d frames, %d snaps, "
-               "%d corrections refused",
+               "%d corrections refused (%u swept aside, %u genuinely stuck)",
                distance_sum / (distance_samples > 0 ? distance_samples : 1), distance_peak,
-               distance_samples, snap_count, correction_failed);
+               distance_samples, snap_count, correction_failed, fallbacks - last_fallbacks,
+               hard - last_hard);
+        last_fallbacks = fallbacks;
+        last_hard = hard;
         stats_since = stats_now;
         distance_sum = 0.0;
         distance_peak = 0.f;
@@ -342,8 +444,15 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
         g_puppet_presentation_velocity = presentation_velocity;
         g_have_puppet_presentation_velocity = true;
         g_puppet_anim_instance = ue::GetAnimInstance(target_actor);
+        // Re-resolved whenever the driven body changes. Both components are
+        // rebuilt on respawn and travel, so this is never held across one.
+        static ue::UObject* resolved_for = nullptr;
+        if (resolved_for != target_actor) {
+            resolved_for = target_actor;
+            g_puppet_presentation_targets = ResolvePresentationTargets(target_actor);
+        }
         if (!TeleportActor(target_actor, corrected, new_rotation)) ++correction_failed;
-        SetPresentationVelocity(target_actor, presentation_velocity);
+        WritePresentationVelocity(g_puppet_presentation_targets, presentation_velocity);
         return;
     }
     // Client enemy brains are deliberately stopped, so RequestDirectMove has
@@ -1321,6 +1430,7 @@ void DespawnPuppet() {
     g_puppet = nullptr;
     g_puppet_anim_instance = nullptr;
     g_have_puppet_presentation_velocity = false;
+    g_puppet_presentation_targets = {};
     g_raw_sequence_restore_at = 0;
     g_cosmetic_attack_montage_until = 0;
     g_puppet_auto_spawned = false;
@@ -1356,6 +1466,7 @@ void TickPuppet() {
         puppet_world = world;
         g_puppet_anim_instance = nullptr;
         g_have_puppet_presentation_velocity = false;
+        g_puppet_presentation_targets = {};
         g_raw_sequence_restore_at = 0;
         g_cosmetic_attack_montage_until = 0;
         if (g_puppet) {

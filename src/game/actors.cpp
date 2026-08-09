@@ -245,25 +245,36 @@ void SetActorPresent(ue::UObject* actor, bool present) {
 constexpr std::uintptr_t kMovementVelocityOffset = 0xD4;
 constexpr std::uintptr_t kSceneComponentVelocityOffset = 0x150;
 
-bool SetPresentationVelocity(ue::UObject* actor, const ue::FVector& velocity) {
-    if (!actor || !g_get_movement_component) return false;
-    ue::UObject* movement = g_get_movement_component(actor);
-    if (!movement) return false;
-    std::memcpy(reinterpret_cast<std::uint8_t*>(movement) + kMovementVelocityOffset,
-                &velocity, sizeof(velocity));
+PresentationTargets ResolvePresentationTargets(ue::UObject* actor) {
+    PresentationTargets targets;
+    if (!actor || !g_get_movement_component) return targets;
+    targets.movement = g_get_movement_component(actor);
 
     // AActor::GetVelocity and Sifu's foot IK observe this root-scene value.
     // K2_GetRootComponent returns the puppet's capsule; never touch player 0.
     struct RootParams {
         ue::UObject* ReturnValue;
     } root = {};
-    if (!ue::CallFunction(actor, L"K2_GetRootComponent", &root) || !root.ReturnValue) {
-        return false;
+    if (ue::CallFunction(actor, L"K2_GetRootComponent", &root)) targets.root = root.ReturnValue;
+    return targets;
+}
+
+void WritePresentationVelocity(const PresentationTargets& targets,
+                               const ue::FVector& velocity) {
+    if (targets.movement) {
+        std::memcpy(reinterpret_cast<std::uint8_t*>(targets.movement) + kMovementVelocityOffset,
+                    &velocity, sizeof(velocity));
     }
-    std::memcpy(reinterpret_cast<std::uint8_t*>(root.ReturnValue) +
-                    kSceneComponentVelocityOffset,
-                &velocity, sizeof(velocity));
-    return true;
+    if (targets.root) {
+        std::memcpy(reinterpret_cast<std::uint8_t*>(targets.root) + kSceneComponentVelocityOffset,
+                    &velocity, sizeof(velocity));
+    }
+}
+
+bool SetPresentationVelocity(ue::UObject* actor, const ue::FVector& velocity) {
+    const PresentationTargets targets = ResolvePresentationTargets(actor);
+    WritePresentationVelocity(targets, velocity);
+    return targets.valid();
 }
 bool RequestDirectMove(ue::UObject* actor, const ue::FVector& desired_velocity,
                        bool force_max_speed) {
@@ -276,6 +287,38 @@ bool RequestDirectMove(ue::UObject* actor, const ue::FVector& desired_velocity,
     if (!component) return false;
     g_request_direct_move(component, desired_velocity, force_max_speed);
     return true;  // dispatched; a caller may still watch actual displacement
+}
+
+// How often the sweep-free fallback below was needed, and how often even that
+// left the actor somewhere other than where it was told to go.
+std::uint32_t g_teleport_fallbacks = 0;
+std::uint32_t g_teleport_hard_failures = 0;
+
+// Move without the encroachment test.
+//
+// K2_SetActorLocation's parameter block contains an FHitResult whose exact
+// layout is not worth recovering, so the buffer is generously oversized and
+// zeroed: ProcessEvent copies each parameter at the offset the UFunction says,
+// and everything we do not fill stays zero. Only the first two parameters
+// matter and both sit at offsets that cannot move -- NewLocation at 0x00,
+// bSweep at 0x0C. bTeleport is left false, which is correct for a body that is
+// not simulating physics.
+bool SetLocationNoSweep(ue::UObject* actor, const ue::FVector& location) {
+    std::uint8_t params[512] = {};
+    std::memcpy(params + 0x00, &location, sizeof(location));
+    params[0x0C] = 0;  // bSweep
+    return ue::CallFunction(actor, L"K2_SetActorLocation", params);
+}
+
+bool SetRotationDirect(ue::UObject* actor, const ue::FRotator& rotation) {
+    struct Params {
+        ue::FRotator NewRotation;
+        bool bTeleportPhysics;
+        bool ReturnValue;
+    } params = {};
+    params.NewRotation = rotation;
+    params.bTeleportPhysics = true;
+    return ue::CallFunction(actor, L"K2_SetActorRotation", &params);
 }
 
 bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
@@ -295,7 +338,36 @@ bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
     // destination would not fit, so a caller that only checked the former
     // believed it had repositioned something that had not budged.
     if (!ue::CallFunction(actor, L"K2_TeleportTo", &params)) return false;
-    return params.ReturnValue;
+    if (params.ReturnValue) return true;
+
+    // Refused. Until now that was the end of it: the puppet simply was not
+    // moved, and the live log showed 798 of 823 consecutive frames refused
+    // while it sat 70 units behind the peer. It was not lagging, it was being
+    // left where it was -- and driven enemies went through the same path with
+    // the result discarded entirely, so they stood still on the joining side.
+    //
+    // A replicated body is not a physical object arriving somewhere; it is a
+    // picture of where someone else already is. If the capsule does not fit,
+    // the answer is to put it there anyway, not to stay behind.
+    ++g_teleport_fallbacks;
+    SetLocationNoSweep(actor, location);
+    SetRotationDirect(actor, rotation);
+
+    // Trust nothing: confirm it actually landed. Anything that still cannot be
+    // moved is a genuinely stuck body and worth knowing about.
+    ue::FVector now = {};
+    if (!ue::GetActorLocation(actor, &now)) return false;
+    const float dx = now.X - location.X;
+    const float dy = now.Y - location.Y;
+    const float dz = now.Z - location.Z;
+    const bool landed = (dx * dx + dy * dy + dz * dz) < (4.f * 4.f);
+    if (!landed) ++g_teleport_hard_failures;
+    return landed;
+}
+
+void GetTeleportFallbackCounts(std::uint32_t* fallbacks, std::uint32_t* hard_failures) {
+    if (fallbacks) *fallbacks = g_teleport_fallbacks;
+    if (hard_failures) *hard_failures = g_teleport_hard_failures;
 }
 
 bool IsPooled(const ue::FVector& location) { return location.Z < kPooledZ; }

@@ -102,12 +102,42 @@ void SetActorPresent(ue::UObject* actor, bool present);
 // network puppet's transform drive so Sifu's AnimBP sees locomotion even though
 // no physical AddMovementInput chase is running.
 bool SetPresentationVelocity(ue::UObject* actor, const ue::FVector& velocity);
+
+// The two components SetPresentationVelocity writes through, resolved once.
+//
+// Resolving them costs a reflection call (K2_GetRootComponent), and there is
+// one place that must publish velocity and cannot afford reflection: inside
+// UPlayerAnim's native update, where a nested ProcessEvent crashed the game.
+// Resolve on the game thread, write from wherever.
+struct PresentationTargets {
+    ue::UObject* movement = nullptr;
+    ue::UObject* root = nullptr;
+
+    bool valid() const { return movement != nullptr && root != nullptr; }
+};
+
+PresentationTargets ResolvePresentationTargets(ue::UObject* actor);
+
+// Pure memcpy into the two fields. No reflection, no allocation, safe to call
+// from an engine callback.
+void WritePresentationVelocity(const PresentationTargets& targets,
+                               const ue::FVector& velocity);
 bool RequestDirectMove(ue::UObject* actor, const ue::FVector& desired_velocity,
                        bool force_max_speed = false);
 
 // Hard reposition, for corrections too large to walk off.
+//
+// Tries K2_TeleportTo first, which refuses when the destination would not fit,
+// and falls back to a sweep-free move when it does. A replicated body is a
+// picture of where someone else already is, so "it would not fit" is not a
+// reason to leave it behind. The result is verified by reading the actor's
+// position back, so a true return means it really is there.
 bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
                    const ue::FRotator& rotation);
+
+// Running totals: how often the fallback was needed, and how often even that
+// failed to move the body. Both are reported in the heartbeat.
+void GetTeleportFallbackCounts(std::uint32_t* fallbacks, std::uint32_t* hard_failures);
 
 // --- Pool ------------------------------------------------------------------
 //
