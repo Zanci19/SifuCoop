@@ -143,6 +143,22 @@ struct Config {
     // one is not worth attacking. Turning this off costs nothing on this
     // machine -- the peer's health is still mirrored from their own game -- so
     // it is safe to try.
+    // Call UAIFightingComponent::BPF_ForceEnemy to push the remote player into
+    // Sifu's combat-role ticket system.
+    //
+    // DEFAULT OFF BECAUSE IT CRASHES THE GAME. It does work -- with it on, the
+    // roles readout went from all-zero to `fighting your partner direct=1`, so
+    // the diagnosis is right and this is the correct entry point. But a spawned
+    // player clone is not a candidate the director can survive unregistering:
+    // when anything dies, AAIDirectorActor::OnDeathDetected ->
+    // RemoveActorFromSystems -> FAICombatRoleTicketManager::AddRemoveCandidate
+    // dereferences a null. It also parked four of five enemies as NonOpponent,
+    // taking them out of the fight with the host as well.
+    //
+    // Kept as a switch so the finding is not lost. Do not turn it on except to
+    // study that crash.
+    bool force_enemy_engage = false;
+
     bool puppet_invincible = true;
     // The puppet ignores pawn collision so two player capsules do not shove
     // each other around. If an enemy's attack-reach test traces against pawn

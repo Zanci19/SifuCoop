@@ -274,7 +274,14 @@ bool PlayAnimationAsset(UObject* actor, UObject* animation_asset) {
         bool bPreventAnimScriptInstanceClear;
         bool bPreventAnimScriptInitialization;
         bool bRecordInReplay;
-    } params = {animation_asset, false, false, false, false};
+        // bPreventAnimScriptInstanceClear. PlayAnimation puts the mesh into
+        // single-node mode, and by default that DESTROYS the AnimBlueprint
+        // instance -- so every replayed strike tore down the puppet's animation
+        // graph, took the locomotion state with it, and invalidated the anim
+        // instance pointer the speed-state injection writes through. Keeping the
+        // instance means the graph is still there to return to, and our pointer
+        // stays valid across the strike.
+    } params = {animation_asset, false, true, false, false};
     return CallFunction(mesh, L"PlayAnimation", &params);
 }
 

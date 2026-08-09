@@ -130,19 +130,67 @@ float ReadFloatAt(const std::uint8_t* bytes, std::uintptr_t offset) {
 // velocity length, so read them: a build change or a different player state
 // moves the boundaries, and picking a different band than the rest of the graph
 // expects is exactly how you get a transition that starts and never finishes.
-int SpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
+int RawSpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
     float v0 = ReadFloatAt(bytes, kAnimVelocityMaxV0);
     float v1 = ReadFloatAt(bytes, kAnimVelocityMaxV1);
     float v2 = ReadFloatAt(bytes, kAnimVelocityMaxV2);
     if (!(v0 > 0.f && v1 > v0 && v2 > v1)) {
-        v0 = 18.f;
-        v1 = 280.f;
-        v2 = 600.f;
+        // Sifu's own free-move speeds, read out of
+        // Content/DB/Movement/BaseMovementDB: V1 100-130, V2 350, V3 600. The
+        // old fallback was 18/280/600, measured off one character, which put
+        // the V1/V2 boundary 70 units below where the game puts it.
+        v0 = 20.f;
+        v1 = 240.f;
+        v2 = 475.f;
     }
     if (speed <= v0) return 0;
     if (speed < v1) return 1;
     if (speed < v2) return 2;
     return 3;
+}
+
+// The band, held steady enough for a blend to finish.
+//
+// BaseMovementDB gives these transitions real time: V0->V1 0.3 s, V1->V2 0.7 s,
+// V0->V2 and V0->V3 a full second each. A band recomputed from an instantaneous
+// speed every frame can change far faster than that, and each change restarts a
+// blend from wherever the last one had reached -- so the character sits at the
+// start of a transition indefinitely, which is what "lifts a leg and stops"
+// looks like. Two guards: a band must be wanted continuously for a short while
+// before it is adopted, and once adopted it is held for at least the blend it
+// was given.
+int SpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
+    static int held = 0;
+    static int candidate = 0;
+    static DWORD candidate_since = 0;
+    static DWORD held_since = 0;
+
+    const int raw = RawSpeedStateForSpeed(bytes, speed);
+    const DWORD now = GetTickCount();
+    if (held_since == 0) held_since = now;
+
+    if (raw == held) {
+        candidate = held;
+        candidate_since = 0;
+        return held;
+    }
+    if (raw != candidate) {
+        candidate = raw;
+        candidate_since = now;
+        return held;
+    }
+    // Rising to a faster band is what the player sees first, so let it through
+    // quickly; settling back down waits longer, because a momentary dip to zero
+    // between two real samples is the exact failure this exists to absorb.
+    const DWORD confirm_ms = raw > held ? 60u : 180u;
+    const DWORD minimum_hold_ms = 150u;
+    if (now - candidate_since < confirm_ms) return held;
+    if (now - held_since < minimum_hold_ms) return held;
+
+    held = candidate;
+    held_since = now;
+    candidate_since = 0;
+    return held;
 }
 
 void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_seconds) {
@@ -1580,16 +1628,36 @@ void TickPuppet() {
         return;
     }
     RecordSample(location, rotation);
+    // Ask the movement component what our velocity is instead of inferring it
+    // from how far the actor moved since the last frame.
+    //
+    // The inference is what put a strobing speed on the wire: the transform only
+    // changes on frames where movement actually integrated, so at 165 fps
+    // against a 60 Hz movement update roughly two frames in three repeat the
+    // previous position and difference to exactly zero. The peer then receives
+    // full speed, nothing, full speed, nothing -- and since BaseMovementDB gives
+    // the V0->V1 blend 0.3 s and V0->V3 a full second, every flip restarts a
+    // blend that never completes. The character never leaves the pose it started
+    // in. It also explains why this looked one-directional: it depends on the
+    // sender's frame rate against its movement tick, so the machine running
+    // faster is the one whose character will not animate on the other screen.
     ue::FVector local_velocity = {};
     const float frame_seconds = sifucoop::hooks::FrameDeltaSeconds();
-    if (g_have_local_velocity && frame_seconds > 0.001f && frame_seconds < 0.25f) {
-        const float vx = (location.X - g_last_local_location.X) / frame_seconds;
-        const float vy = (location.Y - g_last_local_location.Y) / frame_seconds;
-        const float vz = (location.Z - g_last_local_location.Z) / frame_seconds;
-        const float speed = sqrtf(vx * vx + vy * vy + vz * vz);
-        // A spawn/travel correction is not a movement velocity. Do not turn it
-        // into a multi-frame sprint on the peer's character.
-        if (speed <= 3000.f) local_velocity = {vx, vy, vz};
+    const auto finite3 = [](const ue::FVector& v) {
+        return std::isfinite(v.X) && std::isfinite(v.Y) && std::isfinite(v.Z);
+    };
+    if (!GetActorVelocity(player, &local_velocity) || !finite3(local_velocity)) {
+        local_velocity = {};
+        // Fallback for a build where the movement component is unavailable.
+        if (g_have_local_velocity && frame_seconds > 0.001f && frame_seconds < 0.25f) {
+            const float vx = (location.X - g_last_local_location.X) / frame_seconds;
+            const float vy = (location.Y - g_last_local_location.Y) / frame_seconds;
+            const float vz = (location.Z - g_last_local_location.Z) / frame_seconds;
+            const float speed = sqrtf(vx * vx + vy * vy + vz * vz);
+            // A spawn/travel correction is not a movement velocity. Do not turn
+            // it into a multi-frame sprint on the peer's character.
+            if (speed <= 3000.f) local_velocity = {vx, vy, vz};
+        }
     }
     g_last_local_location = location;
     g_have_local_velocity = true;
@@ -1660,7 +1728,26 @@ void TickPuppet() {
             wchar_t wide[192] = {};
             MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, 192);
             if (ue::UObject* animation = ue::FindObjectByPath(wide)) {
-                if (raw_sequence) {
+                // A raw sequence takes the whole body, so it cannot share the
+                // character with a run cycle. Sifu's player AnimBlueprint has no
+                // montage slot to play it through -- the exported graph has none
+                // -- so the only two options are "replace the animation graph"
+                // or "do not play it", and replacing it while the peer is
+                // sprinting is what made their character stop dead mid-stride.
+                // Standing and walking strikes still play, which is nearly all
+                // of them.
+                const float peer_speed =
+                    sqrtf(g_puppet_presentation_velocity.X * g_puppet_presentation_velocity.X +
+                          g_puppet_presentation_velocity.Y * g_puppet_presentation_velocity.Y);
+                if (raw_sequence && peer_speed >= 475.f) {
+                    static DWORD last_skip_log = 0;
+                    const DWORD skip_now = GetTickCount();
+                    if (skip_now - last_skip_log >= 5000) {
+                        last_skip_log = skip_now;
+                        SC_LOG("attack: skipped a cosmetic sequence at speed %.0f -- it would "
+                               "replace the run cycle", peer_speed);
+                    }
+                } else if (raw_sequence) {
                     if (ue::PlayAnimationAsset(g_puppet, animation)) {
                         const float seconds = ue::GetAnimationAssetLength(animation);
                         // A bad/missing asset must never leave the puppet's

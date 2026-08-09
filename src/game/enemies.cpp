@@ -470,19 +470,33 @@ void MaintainPeerHostility(ue::UObject* peer) {
 bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
     if (!entry.attack_component || !desired || !g_set_attack_target) return false;
 
-    // Disposition, targeting and PERMISSION are three different things, and
-    // until now the mod only ever bought the first two. Writing the attack
-    // component's target says who this enemy is looking at; it creates no
-    // combat-role ticket, so the director never promotes anyone to
-    // DirectOpponent and nobody is allowed to swing. That is the whole of
-    // "they engage him, deflect everything, and never attack".
+    // BPF_ForceEnemy WAS called here, and it is disabled deliberately.
     //
-    // BPF_ForceEnemy is the game's own engage call and does create the ticket.
-    // Deliberately only here: this function runs when the peer's damage lands
-    // and for the eight seconds after, so it makes the enemies your partner is
-    // ALREADY fighting fight back. Doing it to every enemy would simply move
-    // the whole room onto him and take them off you.
-    if (entry.ai_fighting && ReadAIEnemy(entry.ai_fighting) != desired) {
+    // It worked, in the narrow sense: the roles line went from all-zero to
+    // `fighting your partner direct=1`, so the combat-role ticket theory is
+    // right and the call does reach the director. Two things came with it.
+    //
+    // It crashes. Registering the puppet as a ticket target means the director
+    // tries to unregister it when anything dies, and that path dereferences
+    // through a null:
+    //   FAICombatRoleTicketManager::AddRemoveCandidate  AICombatRolesTicketManager.cpp:428
+    //   AAIDirectorActor::RemoveActorFromSystems        AIDirectorActor.cpp:813
+    //   AAIDirectorActor::OnDeathDetected               AIDirectorActor.cpp:719
+    // reading address 0x108. A spawned player clone is not a candidate the
+    // director's bookkeeping can survive removing.
+    //
+    // And it made the fight worse: with the puppet registered, the same reading
+    // showed the host at `direct=0 non=3` -- four of five enemies parked as
+    // NonOpponent, fighting nobody at all. Granting a ticket to a body the
+    // director cannot fully account for takes the room out of combat rather
+    // than sharing it.
+    //
+    // Left in the file behind force_enemy_engage (default 0) because the finding
+    // is real and the roles line is what proved it. The right form of this needs
+    // the puppet to be a legitimate director candidate first, not a ticket
+    // forced onto one.
+    if (coop::Get().force_enemy_engage && entry.ai_fighting &&
+        ReadAIEnemy(entry.ai_fighting) != desired) {
         ForceEnemy(entry.ai_fighting, desired, kBehaviorAlerted);
     }
 
@@ -914,7 +928,22 @@ void PublishEnemies() {
         state.y = location.Y;
         state.z = location.Z;
         state.yaw = rotation.Yaw;
-        if (entry.have_host_motion) {
+        // Same correction as the player snapshot: ask the movement component
+        // rather than differencing the transform. GetTickCount only advances
+        // every ~15.6 ms, so on a fast machine several sweeps in a row see the
+        // same timestamp AND the same position, and publish a velocity of zero
+        // between real samples. The joiner's locomotion band then flips faster
+        // than BaseMovementDB's blends can resolve and the enemy slides.
+        ue::FVector measured = {};
+        if (GetActorVelocity(entry.actor, &measured)) {
+            const float speed = sqrtf(measured.X * measured.X + measured.Y * measured.Y +
+                                      measured.Z * measured.Z);
+            if (std::isfinite(speed) && speed <= 3000.f) {
+                state.velocity_x = measured.X;
+                state.velocity_y = measured.Y;
+                state.velocity_z = measured.Z;
+            }
+        } else if (entry.have_host_motion) {
             const DWORD elapsed_ms = now - entry.last_host_motion_ms;
             if (elapsed_ms > 0 && elapsed_ms <= 250) {
                 const float seconds = static_cast<float>(elapsed_ms) / 1000.f;

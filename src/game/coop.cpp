@@ -85,6 +85,8 @@ void Load() {
                  g_config.second_player_in_gameplay_only, ini);
     g_config.remote_player_attacks =
         ReadBool("remote_player_attacks", g_config.remote_player_attacks, ini);
+    g_config.force_enemy_engage =
+        ReadBool("force_enemy_engage", g_config.force_enemy_engage, ini);
     g_config.puppet_invincible =
         ReadBool("puppet_invincible", g_config.puppet_invincible, ini);
     g_config.puppet_ignores_pawn_collision = ReadBool(
@@ -150,6 +152,7 @@ void Save() {
     WriteBool("second_player_in_gameplay_only",
               g_config.second_player_in_gameplay_only, ini);
     WriteBool("remote_player_attacks", g_config.remote_player_attacks, ini);
+    WriteBool("force_enemy_engage", g_config.force_enemy_engage, ini);
     WriteBool("puppet_invincible", g_config.puppet_invincible, ini);
     WriteBool("puppet_ignores_pawn_collision", g_config.puppet_ignores_pawn_collision, ini);
     WriteBool("sync_montages", g_config.sync_montages, ini);

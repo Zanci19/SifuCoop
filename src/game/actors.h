@@ -118,6 +118,16 @@ struct PresentationTargets {
 
 PresentationTargets ResolvePresentationTargets(ue::UObject* actor);
 
+// The character's real velocity, off its movement component.
+//
+// Use this rather than differencing the actor's position between frames. The
+// transform only changes on frames where movement integrated, so at a high
+// frame rate against a lower movement update most frames repeat the previous
+// position and the difference is exactly zero. On the wire that becomes a speed
+// that alternates between the true value and nothing, which flips the receiver's
+// locomotion band faster than BaseMovementDB's 0.3--1.0 s blends can finish.
+bool GetActorVelocity(ue::UObject* actor, ue::FVector* out);
+
 // Pure memcpy into the two fields. No reflection, no allocation, safe to call
 // from an engine callback.
 void WritePresentationVelocity(const PresentationTargets& targets,

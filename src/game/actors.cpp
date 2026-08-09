@@ -248,12 +248,36 @@ void SetActorPresent(ue::UObject* actor, bool present) {
     ue::CallFunction(actor, L"SetActorEnableCollision", &collision);
 }
 
+
 // UE 4.26 fields recovered from the shipped PDB. Sifu's locomotion/foot-IK
 // graph reads the root component's ComponentVelocity (not merely the movement
 // component's Velocity), which is why the first direct-drive presentation fix
 // still left legs idle.
 constexpr std::uintptr_t kMovementVelocityOffset = 0xD4;
 constexpr std::uintptr_t kSceneComponentVelocityOffset = 0x150;
+
+// The character's real velocity, straight off its movement component.
+//
+// This replaces differencing the actor's position between frames, which is how
+// the mod used to produce the velocity it puts on the wire. That looked
+// equivalent and is not: the transform only changes on frames where movement
+// actually integrated, and at 165 fps against a 60 Hz movement update most
+// frames repeat the previous position. The derived velocity was therefore the
+// true speed on some frames and exactly zero on the rest.
+//
+// Downstream that strobe is fatal rather than merely noisy. BaseMovementDB
+// gives the V0->V1 blend 0.3 s and V0->V3 a full second, so a speed band that
+// flips several times a second restarts a blend that never completes, and the
+// character stays in the pose it started from. That is "the remote player lifts
+// a leg and stops".
+bool GetActorVelocity(ue::UObject* actor, ue::FVector* out) {
+    if (!actor || !out || !g_get_movement_component) return false;
+    ue::UObject* movement = g_get_movement_component(actor);
+    if (!movement) return false;
+    std::memcpy(out, reinterpret_cast<const std::uint8_t*>(movement) + kMovementVelocityOffset,
+                sizeof(*out));
+    return true;
+}
 
 PresentationTargets ResolvePresentationTargets(ue::UObject* actor) {
     PresentationTargets targets;
