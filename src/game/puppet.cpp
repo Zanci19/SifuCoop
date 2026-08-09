@@ -180,6 +180,17 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
         WritePresentationVelocity(g_puppet_presentation_targets,
                                   g_puppet_presentation_velocity);
 
+        // ...and the locomotion band, at ITS source.
+        //
+        // Injecting velocity was necessary but not sufficient: Sifu agreed about
+        // the speed (the log read `ours 850, Sifu's 850`) and still played the
+        // idle state, because the band is not derived from velocity by the
+        // graph. It belongs to the movement component, and m_SpeedState below is
+        // a copy NativeUpdateAnimation refreshes from there every frame. Writing
+        // the copy was writing a mirror; this writes the thing being mirrored.
+        SetMovementSpeedState(g_puppet_presentation_targets.movement,
+                              SpeedStateForSpeed(bytes, speed));
+
         std::memcpy(bytes + kAnimOwnerVelocity, &g_puppet_presentation_velocity,
                     sizeof(g_puppet_presentation_velocity));
         std::memcpy(bytes + kAnimOwnerVelocityLength, &speed, sizeof(speed));
@@ -189,23 +200,30 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
 
     if (!inject) return;
 
-    // Did Sifu's own update agree with the velocity we published? If it did,
-    // every derived field below it is now correct and forcing them can only
-    // fight the state machine. If it did not, the old forcing is still the best
-    // available fallback -- so keep it, but say which mode is running, because
-    // that one line answers "is the locomotion fix working" without guesswork.
+    // Two separate questions now, and conflating them is what made the last
+    // round look like no progress at all. Does Sifu agree about the SPEED, and
+    // does the graph hold the right BAND? The first was already fixed by
+    // publishing velocity here; the second is what left a character sprinting
+    // at 850 units/s playing the idle state.
     const float native_speed = ReadFloatAt(bytes, kAnimOwnerVelocityLength);
     const float tolerance = speed * 0.25f > 8.f ? speed * 0.25f : 8.f;
     const bool native_agrees = fabsf(native_speed - speed) <= tolerance;
 
+    const int wanted = SpeedStateForSpeed(bytes, speed);
+    // FSpeedState is five bytes: a V0..V3 bitfield at +1 and ESpeedState at +4
+    // (structdump.py FSpeedState). The enum is the one the graph switches on.
+    const int graph_band = bytes[kAnimSpeedState + 4];
+    const bool band_accepted = graph_band == wanted;
+
     static int last_mode = -1;
-    const int mode = native_agrees ? 1 : 0;
+    const int mode = (native_agrees ? 1 : 0) | (band_accepted ? 2 : 0);
     if (mode != last_mode) {
         last_mode = mode;
-        SC_LOG("puppet: locomotion is %s (ours %.0f, Sifu's %.0f)",
-               native_agrees ? "DRIVEN BY SIFU -- derived state left alone"
-                             : "forced -- Sifu recomputed idle from the owner",
-               speed, native_speed);
+        SC_LOG("puppet: locomotion speed %s, band %s (ours %.0f/V%d, Sifu's %.0f/V%d)",
+               native_agrees ? "agreed" : "RECOMPUTED IDLE",
+               band_accepted ? "held by the movement component"
+                             : "REJECTED -- forcing the anim copy",
+               speed, wanted, native_speed, graph_band);
     }
 
     // Periodic read-out of what the graph actually holds. This is the
@@ -219,8 +237,8 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
         const std::uint8_t* state_bytes = bytes + kAnimSpeedState;
         SC_LOG("puppet: anim speed=%.0f native=%.0f band=V%d state=%02X%02X%02X%02X%02X "
                "alphas %.2f/%.2f/%.2f/%.2f angle=%.0f movestatus=%02X%02X%02X%02X",
-               speed, native_speed, SpeedStateForSpeed(bytes, speed), state_bytes[0],
-               state_bytes[1], state_bytes[2], state_bytes[3], state_bytes[4],
+               speed, native_speed, wanted, state_bytes[0], state_bytes[1], state_bytes[2],
+               state_bytes[3], state_bytes[4],
                ReadFloatAt(bytes, kAnimSpeedStateAlphaV0),
                ReadFloatAt(bytes, kAnimSpeedStateAlphaV0 + 4),
                ReadFloatAt(bytes, kAnimSpeedStateAlphaV0 + 8),
@@ -230,17 +248,18 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
                bytes[kAnimMoveStatus + 3]);
     }
 
-    if (native_agrees) return;  // Sifu is driving it; do not fight the graph.
+    // The movement component now owns this, so normally there is nothing to do.
+    // Forcing the copy is kept only for the case where the band did not take --
+    // a mirror write is better than idle, and it is what shipped before.
+    if (band_accepted) return;
 
-    const int state = SpeedStateForSpeed(bytes, speed);
+    const int state = wanted;
 
-    // FSpeedState is five bytes: V0..V3 booleans followed by the enum.
-    // The old four-byte write left the enum at V0, so the graph stayed idle.
     if (g_set_player_anim_speed_state) {
         g_set_player_anim_speed_state(anim_instance, static_cast<std::uint8_t>(state));
     } else {
         std::uint8_t speed_state[5] = {};
-        speed_state[state] = 1;
+        speed_state[1] = static_cast<std::uint8_t>(1u << state);  // m_bV0..m_bV3 bitfield
         speed_state[4] = static_cast<std::uint8_t>(state);
         std::memcpy(bytes + kAnimSpeedState, speed_state, sizeof(speed_state));
     }
@@ -474,6 +493,20 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
         }
         TeleportActor(target_actor, corrected, new_rotation);
         SetPresentationVelocity(target_actor, presentation_velocity);
+
+        // Driven enemies need the locomotion band for exactly the same reason
+        // the puppet does -- a body with no input computes V0 and slides -- but
+        // they are not player characters, so they never reach the UPlayerAnim
+        // hook where the puppet's is set. Set it here instead. An enemy gliding
+        // around the room without a walk cycle is a large part of what reads as
+        // "the enemies are not synced".
+        //
+        // No thresholds are available from an AI anim instance, so the player's
+        // measured bands are used; the exact boundary matters far less than not
+        // being pinned at idle.
+        int band = 0;
+        if (speed > 18.f) band = speed < 280.f ? 1 : (speed < 600.f ? 2 : 3);
+        SetActorSpeedState(target_actor, band);
         return;
     }
 
@@ -570,9 +603,11 @@ void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
         ue::UObject* ReturnValue;
     } capsule_result = {};
     bool pawn_ignore = false;
+    const bool want_pawn_ignore = coop::Get().puppet_ignores_pawn_collision;
     void* capsule_class = ue::FindObjectByPath(L"/Script/Engine.CapsuleComponent");
     capsule_result.ComponentClass = capsule_class;
-    if (capsule_class && ue::CallFunction(puppet, L"GetComponentByClass", &capsule_result) &&
+    if (want_pawn_ignore && capsule_class &&
+        ue::CallFunction(puppet, L"GetComponentByClass", &capsule_result) &&
         capsule_result.ReturnValue) {
         struct CollisionResponseParams {
             std::uint8_t Channel;
@@ -583,9 +618,19 @@ void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
         pawn_ignore = ue::CallFunction(capsule_result.ReturnValue,
                                        L"SetCollisionResponseToChannel", &response);
     }
-    SC_LOG("puppet: pawn collision %s%s", pawn_ignore ? "ignored" : "FAILED",
-           capsule_class ? "" : " (CapsuleComponent class unavailable)");
-    SetInvincible(puppet, true);
+    SC_LOG("puppet: pawn collision %s%s",
+           !want_pawn_ignore ? "left BLOCKING (puppet_ignores_pawn_collision=0)"
+                             : (pawn_ignore ? "ignored" : "FAILED"),
+           capsule_class || !want_pawn_ignore ? "" : " (CapsuleComponent class unavailable)");
+    // Invincibility is normally correct -- only the machine that owns a player
+    // decides whether they died -- but it is a switch now because an enemy may
+    // decline to attack a target it cannot damage. See coop.h.
+    const bool invincible = coop::Get().puppet_invincible;
+    SetInvincible(puppet, invincible);
+    if (!invincible) {
+        SC_LOG("puppet: invincibility OFF (puppet_invincible=0) -- their own game still "
+               "decides their health; this is only to see whether enemies will commit");
+    }
     EnsureRemoteVisible(puppet, true);
 
     // UCharacterMovementComponent::TickComponent bails out early when the pawn

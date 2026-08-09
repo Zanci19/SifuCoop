@@ -65,6 +65,10 @@ struct Tracked {
     std::uint32_t source_hash = 0;
     ue::UObject* actor = nullptr;
     ue::UObject* attack_component = nullptr;
+    // The AI's own fighting component: BPF_ForceEnemy / BPF_GetCurrentCombatRole
+    // live here. Resolved once per table rebuild because GetComponentByClass is
+    // a full ProcessEvent.
+    ue::UObject* ai_fighting = nullptr;
 
     // Wide enough for the longest name Sifu actually produces, with room to
     // spare. This was char[40], which is exactly the length of
@@ -286,6 +290,92 @@ std::int32_t TargetIndexOf(const ue::UObject* attack_component) {
     return index;
 }
 
+// --- Sifu's combat-role ticket system ---------------------------------------
+//
+// The right to attack is allocated centrally, per target: AAIDirectorActor runs
+// a FAICombatRoleTicketManager for each thing being fought, and hands out roles
+// from ESCAICombatRoles -- 0 None, 1 DirectOpponent, 2 IndirectOpponent,
+// 3 NonOpponent (recovered from the exe's enumerator strings at 0x4A679E0).
+// This is the machinery behind "only one or two enemies swing at you at a time".
+//
+// Only a DirectOpponent attacks. An IndirectOpponent closes, circles, pressures
+// and defends -- which is an exact description of the reported symptom: enemies
+// that engage the remote player, deflect everything, and never once swing back.
+// Writing the attack component's target field, which is all the mod ever did, is
+// downstream of this and creates no ticket.
+//
+// Every call below is Blueprint-exposed, so none of it depends on guessing an
+// ABI. EGlobalBehaviors (0x49BBC70): 0 Idle, 1 Suspicious, 2 Surprised,
+// 3 Alerted, 4 Abandoning, 5 Friendly, 6 Count, 7 None.
+namespace combat_role {
+constexpr int kNone = 0;
+constexpr int kDirectOpponent = 1;
+constexpr int kIndirectOpponent = 2;
+constexpr int kNonOpponent = 3;
+constexpr int kCount = 4;
+const char* Name(int value) {
+    switch (value) {
+        case kDirectOpponent: return "DirectOpponent";
+        case kIndirectOpponent: return "IndirectOpponent";
+        case kNonOpponent: return "NonOpponent";
+        default: return "None";
+    }
+}
+}  // namespace combat_role
+
+constexpr std::uint8_t kBehaviorAlerted = 3;
+
+StaticClassFn g_ai_fighting_class = nullptr;
+
+// GetComponentByClass is a full ProcessEvent, so this is called once per enemy
+// per table rebuild and cached on Tracked, never per frame.
+ue::UObject* GetAIFightingComponent(ue::UObject* actor) {
+    if (!actor || !g_ai_fighting_class) return nullptr;
+    struct Params {
+        void* ComponentClass;
+        ue::UObject* ReturnValue;
+    } params = {};
+    params.ComponentClass = g_ai_fighting_class();
+    if (!ue::CallFunction(actor, L"GetComponentByClass", &params)) return nullptr;
+    return params.ReturnValue;
+}
+
+// UAIFightingComponent::BPF_GetCurrentCombatRole() -> ESCAICombatRoles.
+int ReadCombatRole(ue::UObject* ai_fighting) {
+    if (!ai_fighting) return -1;
+    struct Params {
+        std::uint8_t ReturnValue;
+    } params = {};
+    if (!ue::CallFunction(ai_fighting, L"BPF_GetCurrentCombatRole", &params)) return -1;
+    return params.ReturnValue;
+}
+
+// UAIFightingComponent::BPF_GetEnemy() -> AActor*.
+ue::UObject* ReadAIEnemy(ue::UObject* ai_fighting) {
+    if (!ai_fighting) return nullptr;
+    struct Params {
+        ue::UObject* ReturnValue;
+    } params = {};
+    if (!ue::CallFunction(ai_fighting, L"BPF_GetEnemy", &params)) return nullptr;
+    return params.ReturnValue;
+}
+
+// UAIFightingComponent::BPF_ForceEnemy(AActor*, EGlobalBehaviors).
+//
+// The game's own "engage this actor" entry point. This is what should put the
+// remote player into the director's ticket manager and let somebody be promoted
+// to DirectOpponent -- the thing a raw target write never did.
+bool ForceEnemy(ue::UObject* ai_fighting, ue::UObject* target, std::uint8_t behavior) {
+    if (!ai_fighting || !target) return false;
+    struct Params {
+        ue::UObject* Actor;
+        std::uint8_t eBehavior;
+    } params = {};
+    params.Actor = target;
+    params.eBehavior = behavior;
+    return ue::CallFunction(ai_fighting, L"BPF_ForceEnemy", &params);
+}
+
 // --- Making the remote player somebody worth attacking ----------------------
 //
 // The reported symptom is precise: enemies do not fight the remote player, and
@@ -379,6 +469,23 @@ void MaintainPeerHostility(ue::UObject* peer) {
 
 bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
     if (!entry.attack_component || !desired || !g_set_attack_target) return false;
+
+    // Disposition, targeting and PERMISSION are three different things, and
+    // until now the mod only ever bought the first two. Writing the attack
+    // component's target says who this enemy is looking at; it creates no
+    // combat-role ticket, so the director never promotes anyone to
+    // DirectOpponent and nobody is allowed to swing. That is the whole of
+    // "they engage him, deflect everything, and never attack".
+    //
+    // BPF_ForceEnemy is the game's own engage call and does create the ticket.
+    // Deliberately only here: this function runs when the peer's damage lands
+    // and for the eight seconds after, so it makes the enemies your partner is
+    // ALREADY fighting fight back. Doing it to every enemy would simply move
+    // the whole room onto him and take them off you.
+    if (entry.ai_fighting && ReadAIEnemy(entry.ai_fighting) != desired) {
+        ForceEnemy(entry.ai_fighting, desired, kBehaviorAlerted);
+    }
+
     g_set_attack_target(entry.attack_component, desired);
     struct Params {
         ue::UObject* current_attacked;
@@ -561,6 +668,7 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
         entry = Tracked();
         entry.actor = actor;
         entry.attack_component = ResolveFighter(actor).attack;
+        entry.ai_fighting = GetAIFightingComponent(actor);
         entry.source_hash = SourceHashForActor(actor, source_links, source_count);
         // Strips UE4's per-process instance number, which is what stopped two
         // machines agreeing on any runtime-spawned enemy.
@@ -705,7 +813,13 @@ void ApplyPeerDamage() {
             entry.peer_aggro_until = GetTickCount() + 8000;
             entry.last_peer_target_ms = GetTickCount();
             static bool first_aggro = true;
-            if (first_aggro) SC_LOG("targets: FIRST peer hit handed enemy aggro to puppet");
+            if (first_aggro) {
+                // The role is the part that matters: aggro without a
+                // DirectOpponent ticket is an enemy that will follow your
+                // partner around deflecting and never swing.
+                SC_LOG("targets: FIRST peer hit handed %s aggro to puppet -- role is now %s",
+                       entry.name, combat_role::Name(ReadCombatRole(entry.ai_fighting)));
+            }
             first_aggro = false;
         }
 
@@ -1220,6 +1334,36 @@ void DumpEnemyTargets() {
     SC_LOG("targets: %d enemies on YOU, %d on the second player, %d elsewhere, %d idle%s",
            targeting_player, targeting_second, targeting_other, no_target,
            second ? "" : "  (no second player present)");
+
+    // Targeting is not permission. Sifu decides separately WHO MAY SWING, by
+    // handing out combat roles per target, and only a DirectOpponent attacks.
+    // This line is the difference between "they ignore my partner" and "they
+    // engage my partner and are not allowed to hit him" -- two complaints that
+    // look identical on screen and have nothing in common underneath.
+    int roles_on_player[combat_role::kCount] = {};
+    int roles_on_second[combat_role::kCount] = {};
+    const std::int32_t player_idx = InternalIndexOf(player);
+    const std::int32_t second_idx = InternalIndexOf(second);
+    for (int i = 0; i < g_tracked_count; ++i) {
+        const Tracked& entry = g_tracked[i];
+        if (!entry.active || !entry.ai_fighting) continue;
+        const int role = ReadCombatRole(entry.ai_fighting);
+        if (role < 0 || role >= combat_role::kCount) continue;
+        const std::int32_t enemy_of = InternalIndexOf(ReadAIEnemy(entry.ai_fighting));
+        if (enemy_of == player_idx) {
+            ++roles_on_player[role];
+        } else if (second && enemy_of == second_idx) {
+            ++roles_on_second[role];
+        }
+    }
+    SC_LOG("roles: fighting YOU direct=%d indirect=%d non=%d none=%d | "
+           "fighting your partner direct=%d indirect=%d non=%d none=%d",
+           roles_on_player[combat_role::kDirectOpponent],
+           roles_on_player[combat_role::kIndirectOpponent],
+           roles_on_player[combat_role::kNonOpponent], roles_on_player[combat_role::kNone],
+           roles_on_second[combat_role::kDirectOpponent],
+           roles_on_second[combat_role::kIndirectOpponent],
+           roles_on_second[combat_role::kNonOpponent], roles_on_second[combat_role::kNone]);
 }
 
 void DumpRoster() {
@@ -1263,6 +1407,10 @@ void InitEnemies(std::uintptr_t base) {
     g_set_attack_target = offsets::UAttackComponent_SetTarget
         ? reinterpret_cast<SetAttackTargetFn>(base + offsets::UAttackComponent_SetTarget)
         : nullptr;
+    g_ai_fighting_class =
+        offsets::UAIFightingComponent_StaticClass
+            ? reinterpret_cast<StaticClassFn>(base + offsets::UAIFightingComponent_StaticClass)
+            : nullptr;
 }
 
 ue::UObject* FindEnemyByHash(std::uint32_t hash) {

@@ -122,6 +122,19 @@ PresentationTargets ResolvePresentationTargets(ue::UObject* actor);
 // from an engine callback.
 void WritePresentationVelocity(const PresentationTargets& targets,
                                const ue::FVector& velocity);
+
+// The locomotion band (ESpeedState: 0=V0 idle, 1=V1 walk, 2=V2 run, 3=V3 sprint).
+//
+// This is the SOURCE of the value. UPlayerAnim::m_SpeedState is only a copy that
+// NativeUpdateAnimation refreshes from the movement component every frame, so
+// writing the anim instance -- which the mod did for weeks -- changes nothing.
+// A replicated body has no input, so the movement component computes V0 at every
+// speed unless it is told otherwise. Native call, safe from an engine callback.
+bool SetMovementSpeedState(ue::UObject* movement_component, int state);
+
+// Same, resolving the movement component first (one native call). For driven
+// enemies, which never pass through the player animation hook.
+bool SetActorSpeedState(ue::UObject* actor, int state);
 bool RequestDirectMove(ue::UObject* actor, const ue::FVector& desired_velocity,
                        bool force_max_speed = false);
 

@@ -43,6 +43,11 @@ SetInvincibilityFn g_set_invincibility = nullptr;
 BrainClassFn g_brain_class = nullptr;
 GetMovementComponentFn g_get_movement_component = nullptr;
 RequestDirectMoveFn g_request_direct_move = nullptr;
+// UFightingMovementComponent::SetSpeedState(ESpeedState). See the note on
+// SetMovementSpeedState below for why this, and not the anim instance, is the
+// thing that has to be written.
+using SetSpeedStateFn = void(__fastcall*)(ue::UObject*, std::uint8_t);
+SetSpeedStateFn g_set_movement_speed_state = nullptr;
 
 bool g_ready = false;
 
@@ -92,6 +97,11 @@ void InitActors(std::uintptr_t base) {
                                    : nullptr;
     g_request_direct_move = offsets::UCharacterMovementComponent_RequestDirectMove
                                  ? reinterpret_cast<RequestDirectMoveFn>(base + offsets::UCharacterMovementComponent_RequestDirectMove) : nullptr;
+    g_set_movement_speed_state =
+        offsets::UFightingMovementComponent_SetSpeedState
+            ? reinterpret_cast<SetSpeedStateFn>(
+                  base + offsets::UFightingMovementComponent_SetSpeedState)
+            : nullptr;
 
     // Only the offsets that would silently corrupt a read are treated as
     // mandatory; the rest degrade to "that feature is off".
@@ -269,6 +279,31 @@ void WritePresentationVelocity(const PresentationTargets& targets,
         std::memcpy(reinterpret_cast<std::uint8_t*>(targets.root) + kSceneComponentVelocityOffset,
                     &velocity, sizeof(velocity));
     }
+}
+
+// Where the locomotion band actually lives.
+//
+// UPlayerAnim::m_SpeedState is a COPY. The value belongs to the movement
+// component, which computes it during its own tick from input a replicated body
+// does not have -- so for the puppet and for every driven enemy it read V0 at
+// every speed, and the graph faithfully played the idle state at 850 units/s.
+// Writing the anim instance's copy, which is what the mod did for weeks, is
+// writing a mirror: NativeUpdateAnimation refreshes it from here on the next
+// frame regardless.
+//
+// Order matters as much as the value. Written from inside the animation update,
+// after the movement component has ticked and before the graph samples it --
+// the same placement that made the velocity injection work.
+bool SetMovementSpeedState(ue::UObject* movement_component, int state) {
+    if (!movement_component || !g_set_movement_speed_state) return false;
+    if (state < 0 || state > 3) return false;  // ESpeedState V0..V3
+    g_set_movement_speed_state(movement_component, static_cast<std::uint8_t>(state));
+    return true;
+}
+
+bool SetActorSpeedState(ue::UObject* actor, int state) {
+    if (!actor || !g_get_movement_component) return false;
+    return SetMovementSpeedState(g_get_movement_component(actor), state);
 }
 
 bool SetPresentationVelocity(ue::UObject* actor, const ue::FVector& velocity) {

@@ -124,6 +124,19 @@ WANTED = {
     # Exact locomotion-state setter. FSpeedState is five bytes (four booleans
     # plus ESpeedState); writing only the booleans left the graph's enum at V0.
     "UPlayerAnim_BPF_SetSpeedState": ["?BPF_SetSpeedState@UPlayerAnim@@QEAAXW4ESpeedState@@@Z"],
+    # ...but the anim instance only holds a COPY. The speed state belongs to the
+    # movement component, which computes it during its own tick from input a
+    # replicated body does not have -- so it read V0 at every speed, and writing
+    # the anim's copy was writing a mirror. This is the source of the value.
+    "UFightingMovementComponent_SetSpeedState": [
+        "?SetSpeedState@UFightingMovementComponent@@UEAAXE@Z"
+    ],
+    # Sifu allocates the RIGHT to attack centrally, per target, through combat
+    # role tickets -- which is why only one or two enemies swing at you at a
+    # time. An actor with no ticket manager gets only IndirectOpponents, who
+    # circle and deflect and never commit. Needed to reach the AI's own
+    # BPF_ForceEnemy / BPF_GetCurrentCombatRole via GetComponentByClass.
+    "UAIFightingComponent_StaticClass": ["?StaticClass@UAIFightingComponent@@SA"],
     # A spawned player-class clone runs BeginPlay, but is not guaranteed to be
     # in Sifu's global target registry. AI selection only considers registered
     # UTargetableActorComponents.

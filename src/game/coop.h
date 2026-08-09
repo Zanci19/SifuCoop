@@ -133,6 +133,23 @@ struct Config {
     // echo_player_attacks above is the manual override and ignores the check.
     bool remote_player_attacks = true;
 
+    // Two rule-outs for "enemies engage the remote player but never swing at
+    // him". Both are switches rather than fixes because each is a guess that one
+    // run settles, and each has a real cost if it turns out to be wrong.
+    //
+    // The puppet is invincible because the machine that owns that player is the
+    // only thing allowed to decide whether they died. But if Sifu's attack
+    // selection asks whether a target can actually be damaged, an invincible
+    // one is not worth attacking. Turning this off costs nothing on this
+    // machine -- the peer's health is still mirrored from their own game -- so
+    // it is safe to try.
+    bool puppet_invincible = true;
+    // The puppet ignores pawn collision so two player capsules do not shove
+    // each other around. If an enemy's attack-reach test traces against pawn
+    // collision, it can never confirm it can reach him and will not commit.
+    // Turning this off may bring back the pushing, so try it second.
+    bool puppet_ignores_pawn_collision = true;
+
     // Session flow.
     bool auto_follow_level = true;    // the host keeps pulling the joiner along
     // Whether the JOINER acts on a level invite without being asked.

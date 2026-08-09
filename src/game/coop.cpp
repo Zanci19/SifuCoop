@@ -85,6 +85,10 @@ void Load() {
                  g_config.second_player_in_gameplay_only, ini);
     g_config.remote_player_attacks =
         ReadBool("remote_player_attacks", g_config.remote_player_attacks, ini);
+    g_config.puppet_invincible =
+        ReadBool("puppet_invincible", g_config.puppet_invincible, ini);
+    g_config.puppet_ignores_pawn_collision = ReadBool(
+        "puppet_ignores_pawn_collision", g_config.puppet_ignores_pawn_collision, ini);
     // Was declared, documented and switchable in the overlay, but never read
     // from or written to the ini -- so the one thing that carries the peer's
     // dodges and traversal animations could not actually be configured.
@@ -146,6 +150,8 @@ void Save() {
     WriteBool("second_player_in_gameplay_only",
               g_config.second_player_in_gameplay_only, ini);
     WriteBool("remote_player_attacks", g_config.remote_player_attacks, ini);
+    WriteBool("puppet_invincible", g_config.puppet_invincible, ini);
+    WriteBool("puppet_ignores_pawn_collision", g_config.puppet_ignores_pawn_collision, ini);
     WriteBool("sync_montages", g_config.sync_montages, ini);
     WriteBool("report_damage", g_config.report_damage, ini);
     WriteBool("mirror_peer_vitals", g_config.mirror_peer_vitals, ini);
