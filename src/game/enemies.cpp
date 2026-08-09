@@ -136,6 +136,10 @@ struct Tracked {
     DWORD last_target_sample_ms = 0;
     DWORD peer_aggro_until = 0;
     DWORD last_peer_target_ms = 0;
+    // Whether this enemy has been told the remote player is hostile, and when
+    // to tell it again. See MaintainPeerHostility.
+    DWORD next_hostility_ms = 0;
+    bool hostile_confirmed = false;
 };
 
 Tracked g_tracked[net::kMaxTrackedEnemies];
@@ -280,6 +284,97 @@ std::int32_t TargetIndexOf(const ue::UObject* attack_component) {
     std::memcpy(&serial, bytes + kAttackComponentTarget + 4, sizeof(serial));
     if (index < 0 || serial == 0) return -1;
     return index;
+}
+
+// --- Making the remote player somebody worth attacking ----------------------
+//
+// The reported symptom is precise: enemies do not fight the remote player, and
+// if the remote player fights them they only block and parry, never swing back.
+// That is not a targeting failure -- they can see the puppet, it is registered
+// with the targetable actor manager -- it is a disposition failure. Nothing in
+// this mod has ever told an enemy that the puppet is hostile. Every relationship
+// call it makes sets the two PLAYERS friendly to each other. An actor Sifu has
+// no relationship entry for reads back as Neutral, and Neutral is exactly a
+// character that will defend itself and never start anything.
+//
+// So say it. ERelationshipTypes has two hostile values and it is not obvious
+// from the outside which one the combat code consults, so try `Fight` (being in
+// a fight right now) before `Enemy` (a standing disposition), keep whichever the
+// game actually stores, and re-asserts on a timer because something in Sifu
+// recomputes these.
+int g_hostile_value = relationship::kUnknown;
+int g_hostility_attempts = 0;
+bool g_hostility_hopeless = false;
+
+bool AssertHostileToward(Tracked& entry, ue::UObject* peer) {
+    ue::UObject* social = GetSocialComponent(entry.actor);
+    if (!social) return false;
+
+    if (g_hostile_value != relationship::kUnknown) {
+        WriteRelationship(social, peer, g_hostile_value);
+        return ReadRelationship(entry.actor, peer) == g_hostile_value;
+    }
+
+    const int candidates[] = {relationship::kFight, relationship::kEnemy};
+    for (const int value : candidates) {
+        WriteRelationship(social, peer, value);
+        if (ReadRelationship(entry.actor, peer) != value) continue;
+        g_hostile_value = value;
+        SC_LOG("targets: enemies will hold '%s' toward your partner", relationship::Name(value));
+        return true;
+    }
+    return false;
+}
+
+// Reflection is not free -- this is a ProcessEvent per enemy -- so only a few
+// enemies are handled per tick and each is left alone for seconds afterwards.
+void MaintainPeerHostility(ue::UObject* peer) {
+    if (!peer || g_hostility_hopeless) return;
+    if (coop::Get().mode != coop::Mode::Coop) return;
+
+    const DWORD now = GetTickCount();
+    int budget = 4;
+    for (int i = 0; i < g_tracked_count && budget > 0; ++i) {
+        Tracked& entry = g_tracked[i];
+        if (!entry.active || !entry.actor) continue;
+        if (entry.next_hostility_ms != 0 && static_cast<LONG>(entry.next_hostility_ms - now) > 0) {
+            continue;
+        }
+        --budget;
+        const bool held = AssertHostileToward(entry, peer);
+        entry.next_hostility_ms = now + (held ? 5000 : 1000);
+        if (held == entry.hostile_confirmed) continue;
+        entry.hostile_confirmed = held;
+    }
+
+    // If nothing at all will hold after a fair number of tries, stop burning
+    // reflection calls on it every second and say so once. The same setter is
+    // what the player-side friendly relationship depends on, so this is one
+    // fact about the build, not two separate mysteries.
+    if (g_hostile_value == relationship::kUnknown && ++g_hostility_attempts > 200) {
+        g_hostility_hopeless = true;
+        SC_LOG("targets: no hostile relationship value would stick on any enemy -- "
+               "BPF_ServerChangeRelationship does not appear to work on this build, so "
+               "enemies will keep ignoring your partner until they are hit");
+        coop::ReportProblem("enemies cannot be told your partner is an enemy");
+    }
+
+    // A rolling count, because "did this work" is otherwise invisible.
+    static DWORD last_summary = 0;
+    if (g_hostile_value != relationship::kUnknown && now - last_summary >= 10000) {
+        last_summary = now;
+        int confirmed = 0;
+        int active = 0;
+        for (int i = 0; i < g_tracked_count; ++i) {
+            if (!g_tracked[i].active) continue;
+            ++active;
+            if (g_tracked[i].hostile_confirmed) ++confirmed;
+        }
+        if (active > 0) {
+            SC_LOG("targets: %d of %d active enemies hold '%s' toward your partner", confirmed,
+                   active, relationship::Name(g_hostile_value));
+        }
+    }
 }
 
 bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
@@ -519,9 +614,18 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
             entry.last_host_motion_ms = previous[k].last_host_motion_ms;
             entry.have_host_motion = previous[k].have_host_motion;
             entry.ever_seen_from_host = previous[k].ever_seen_from_host;
-            break;
+            // These two were written AFTER the break, so they never ran. The
+            // table is rebuilt whenever any enemy goes unmatched, which is
+            // routine mid-fight -- and every rebuild silently threw away the
+            // eight-second window in which an enemy is held on the remote
+            // player after their damage lands, along with the timestamp that
+            // paces the re-assertion. The aggro handoff was being cancelled
+            // almost as fast as it was granted.
             entry.peer_aggro_until = previous[k].peer_aggro_until;
             entry.last_peer_target_ms = previous[k].last_peer_target_ms;
+            entry.next_hostility_ms = previous[k].next_hostility_ms;
+            entry.hostile_confirmed = previous[k].hostile_confirmed;
+            break;
         }
     }
 
@@ -627,6 +731,13 @@ void PublishEnemies() {
     ue::UObject* host_player = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
     ue::UObject* peer_player = GetPuppet();
     const DWORD now = GetTickCount();
+
+    // Before publishing anything: make sure the level's enemies have been told
+    // the remote player is an enemy. Without this they are Neutral toward the
+    // puppet, which is a character they will defend themselves against and
+    // never attack.
+    MaintainPeerHostility(peer_player);
+
     net::EnemyStateOut out[net::kMaxTrackedEnemies];
     int count = 0;
     int active = 0;

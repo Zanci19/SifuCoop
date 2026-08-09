@@ -633,25 +633,14 @@ void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
 // friendly value), which is exact and survives any enum-ordering change. Until
 // two enemies are in the scene to sample, application is simply deferred.
 
-// BPF_GetRelationship(AActor* Actor) -> ERelationshipTypes (returned as a byte).
-constexpr int kRelationUnknown = -1;
-int ReadRelationship(ue::UObject* from_actor, ue::UObject* to_actor) {
-    if (!from_actor || !to_actor) return kRelationUnknown;
-    struct Params {
-        ue::UObject* Actor;
-        std::uint8_t ReturnValue;
-    } params = {};
-    params.Actor = to_actor;
-    if (!ue::CallFunction(from_actor, L"BPF_GetRelationship", &params)) {
-        return kRelationUnknown;
-    }
-    return params.ReturnValue;
-}
+// The friendly enum value is not hardcoded, and it is not assumed to stick.
+// Candidates are tried in turn and each is read back, so the value that
+// survives is chosen by the game rather than by us.
+namespace rel = sifucoop::game::relationship;
 
-// Learn the "friendly" enum value from two distinct active enemies. Enemies
-// share the level's hostile faction, so their relationship to each other is the
-// friendly value we want to copy onto the puppet pair. Returns -1 until two
-// enemies can be sampled.
+// Learn a friendly value from two distinct active enemies. Enemies share the
+// level's hostile faction, so their relationship to each other is a value the
+// game itself considers non-hostile. Returns kUnknown until two can be sampled.
 int DiscoverFriendlyRelationValue() {
     EnemyRow rows[64];
     const int count = GetEnemyRows(rows, 64);
@@ -665,37 +654,64 @@ int DiscoverFriendlyRelationValue() {
             continue;
         }
         const int value = ReadRelationship(first, actor);
-        if (value != kRelationUnknown) return value;
+        if (value != rel::kUnknown) return value;
     }
-    return kRelationUnknown;
+    return rel::kUnknown;
 }
 
-// USocialComponent* ABaseCharacter::BPF_GetSocialComponent().
-ue::UObject* GetSocialComponent(ue::UObject* character) {
-    if (!character) return nullptr;
-    struct Params {
-        ue::UObject* ReturnValue;
-    } params = {};
-    if (!ue::CallFunction(character, L"BPF_GetSocialComponent", &params)) return nullptr;
-    return params.ReturnValue;
-}
-
-// USocialComponent::BPF_ServerChangeRelationship(AActor* Actor, ERelationshipTypes).
-bool SetRelationship(ue::UObject* social, ue::UObject* toward, int value) {
-    if (!social || !toward || value < 0) return false;
-    struct Params {
-        ue::UObject* Actor;
-        std::uint8_t eRelation;
-    } params = {};
-    params.Actor = toward;
-    params.eRelation = static_cast<std::uint8_t>(value);
-    return ue::CallFunction(social, L"BPF_ServerChangeRelationship", &params);
-}
-
-// Applied once per puppet instance; re-applied if the puppet actor changes.
 ue::UObject* g_friendly_applied_for = nullptr;
 bool g_friendly_verified = false;
+int g_relationship_that_stuck = rel::kUnknown;
+DWORD g_next_relationship_attempt = 0;
+bool g_relationship_writes_land = false;
 
+// Set both directions and report whether the game actually kept it.
+bool TrySetRelationshipBothWays(ue::UObject* player, ue::UObject* puppet, int value,
+                                int* out_player, int* out_puppet) {
+    ue::UObject* player_social = GetSocialComponent(player);
+    ue::UObject* puppet_social = GetSocialComponent(puppet);
+
+    // Evidence, gathered once: if a write neither changes the readback nor
+    // grows the relationship map, BPF_ServerChangeRelationship is a no-op on
+    // this build and every retry below is wasted. Saying so in the log is worth
+    // more than another silent failure -- this exact write has been reported as
+    // succeeding, and read back as Neutral, in every session so far.
+    const int before = RelationshipMapSize(player_social);
+    WriteRelationship(player_social, puppet, value);
+    WriteRelationship(puppet_social, player, value);
+    const int after = RelationshipMapSize(player_social);
+
+    const int back_player = ReadRelationship(player, puppet);
+    const int back_puppet = ReadRelationship(puppet, player);
+    if (out_player) *out_player = back_player;
+    if (out_puppet) *out_puppet = back_puppet;
+
+    const bool held = back_player == value && back_puppet == value;
+    if (held || (before >= 0 && after > before)) g_relationship_writes_land = true;
+
+    static bool reported = false;
+    if (!reported && !held && before >= 0) {
+        reported = true;
+        SC_LOG("puppet: relationship write %s -- map %d -> %d entries, readback %d/%d "
+               "(asked for %d %s)",
+               after > before ? "reached the map but the getter disagrees"
+                              : "did NOT reach the map: the setter is a no-op here",
+               before, after, back_player, back_puppet, value, rel::Name(value));
+    }
+    return held;
+}
+
+// Establish -- and KEEP -- a non-hostile relationship between the two players.
+//
+// Three things follow from a live session in which the setter reported success
+// and the readback returned Neutral. Coop is tried FIRST, because Sifu ships a
+// relationship type by that name and it is plainly the one this mod means.
+// Every candidate is verified, so the value that survives is the game's choice.
+// And it is RE-ASSERTED on a timer rather than applied once: something in the
+// game recomputes these (ABaseCharacter::UpdateRelationshipToOtherCharacters
+// exists), and a value that holds for one frame is worth nothing to a swing
+// thrown ten seconds later. The old code set an "already applied" flag on its
+// single attempt whether or not it worked, so it never tried again at all.
 void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
     const coop::Config& config = coop::Get();
     // remote_player_attacks depends on this, so wanting remote attacks is
@@ -703,46 +719,61 @@ void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
     if (!config.friendly_relationship && !config.remote_player_attacks) return;
     if (config.mode != coop::Mode::Coop) return;
     if (!player || !puppet) return;
-    if (g_friendly_applied_for == puppet) return;  // already settled for this body
 
-    const int friendly = DiscoverFriendlyRelationValue();
-    if (friendly == kRelationUnknown) return;  // not enough enemies yet; retry later
-
-    ue::UObject* player_social = GetSocialComponent(player);
-    ue::UObject* puppet_social = GetSocialComponent(puppet);
-    const bool a = SetRelationship(player_social, puppet, friendly);
-    const bool b = SetRelationship(puppet_social, player, friendly);
-
-    if (!a && !b) {
-        SC_LOG("puppet: friendly relationship could not be applied "
-               "(BPF_ServerChangeRelationship unavailable) -- remote attacks stay OFF");
-        g_friendly_applied_for = puppet;  // do not retry every frame if unsupported
+    if (g_friendly_applied_for != puppet) {
+        g_friendly_applied_for = puppet;
         g_friendly_verified = false;
+        g_relationship_that_stuck = rel::kUnknown;
+        g_next_relationship_attempt = 0;
+    }
+
+    const DWORD now = GetTickCount();
+    if (g_next_relationship_attempt != 0 && now < g_next_relationship_attempt) return;
+    // Confirmed pairs are re-checked lazily; unconfirmed ones retry briskly,
+    // because until one sticks the remote player cannot swing at all.
+    g_next_relationship_attempt = now + (g_friendly_verified ? 3000 : 1000);
+
+    int back_player = rel::kUnknown;
+    int back_puppet = rel::kUnknown;
+
+    // Already found one the game keeps: just hold it there.
+    if (g_relationship_that_stuck != rel::kUnknown) {
+        const bool still = TrySetRelationshipBothWays(player, puppet, g_relationship_that_stuck,
+                                                      &back_player, &back_puppet);
+        if (still != g_friendly_verified) {
+            g_friendly_verified = still;
+            SC_LOG("puppet: relationship %s %s (readback %d/%d)",
+                   rel::Name(g_relationship_that_stuck),
+                   still ? "re-confirmed" : "STOPPED HOLDING -- searching again", back_player,
+                   back_puppet);
+        }
+        if (!still) g_relationship_that_stuck = rel::kUnknown;
         return;
     }
 
-    // The setter reporting success only means the UFunction was found and
-    // called. Read the relationship back through the game's own getter and
-    // require BOTH directions to actually hold the friendly value.
-    //
-    // This is the difference between "we asked Sifu to make these two allies"
-    // and "Sifu says these two are allies", and it is the whole safety argument
-    // for replaying the peer's attacks at all: a replayed swing is a real
-    // hitbox, so an unconfirmed exemption means the remote player kills their
-    // own co-op partner.
-    const int back_player = ReadRelationship(player, puppet);
-    const int back_puppet = ReadRelationship(puppet, player);
-    g_friendly_verified = (back_player == friendly && back_puppet == friendly);
-    g_friendly_applied_for = puppet;
+    const int candidates[] = {rel::kCoop, rel::kAlly, DiscoverFriendlyRelationValue()};
+    for (const int value : candidates) {
+        if (value == rel::kUnknown || value < 0 || value >= rel::kCount) continue;
+        if (!TrySetRelationshipBothWays(player, puppet, value, &back_player, &back_puppet)) {
+            continue;
+        }
+        g_relationship_that_stuck = value;
+        g_friendly_verified = true;
+        SC_LOG("puppet: relationship %s STUCK -- readback %d/%d, remote attacks may play",
+               rel::Name(value), back_player, back_puppet);
+        return;
+    }
 
-    SC_LOG("puppet: friendly relationship value=%d applied (player<-%s puppet<-%s), "
-           "readback %d/%d -> %s",
-           friendly, a ? "ok" : "FAIL", b ? "ok" : "FAIL", back_player, back_puppet,
-           g_friendly_verified ? "CONFIRMED, remote attacks may play"
-                               : "NOT confirmed, remote attacks stay off");
-    if (!g_friendly_verified) {
-        coop::ReportProblem("could not confirm friendly fire is off -- "
-                            "the remote player will move but not swing");
+    // Nothing held. Say so once rather than every second, and say what was
+    // actually read, because that number is the whole diagnosis.
+    static int last_reported = -2;
+    if (last_reported != back_player) {
+        last_reported = back_player;
+        SC_LOG("puppet: no relationship value would stick (last readback %d/%d) -- "
+               "remote attacks stay OFF. 0=Enemy 1=Fight 2=Object 3=Neutral 4=Coop 5=Ally",
+               back_player, back_puppet);
+        coop::ReportProblem("could not turn friendly fire off -- "
+                            "your partner will move but not swing");
     }
 }
 

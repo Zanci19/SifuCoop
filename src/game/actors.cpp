@@ -370,6 +370,70 @@ void GetTeleportFallbackCounts(std::uint32_t* fallbacks, std::uint32_t* hard_fai
     if (hard_failures) *hard_failures = g_teleport_hard_failures;
 }
 
+namespace relationship {
+const char* Name(int value) {
+    switch (value) {
+        case kEnemy: return "Enemy";
+        case kFight: return "Fight";
+        case kObject: return "Object";
+        case kNeutral: return "Neutral";
+        case kCoop: return "Coop";
+        case kAlly: return "Ally";
+        default: return "?";
+    }
+}
+}  // namespace relationship
+
+ue::UObject* GetSocialComponent(ue::UObject* character) {
+    if (!character) return nullptr;
+    struct Params {
+        ue::UObject* ReturnValue;
+    } params = {};
+    if (!ue::CallFunction(character, L"BPF_GetSocialComponent", &params)) return nullptr;
+    return params.ReturnValue;
+}
+
+int ReadRelationship(ue::UObject* from_actor, ue::UObject* to_actor) {
+    if (!from_actor || !to_actor) return relationship::kUnknown;
+    struct Params {
+        ue::UObject* Actor;
+        std::uint8_t ReturnValue;
+    } params = {};
+    params.Actor = to_actor;
+    if (!ue::CallFunction(from_actor, L"BPF_GetRelationship", &params)) {
+        return relationship::kUnknown;
+    }
+    return params.ReturnValue;
+}
+
+bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
+    if (!social || !toward || value < 0) return false;
+    struct Params {
+        ue::UObject* Actor;
+        std::uint8_t eRelation;
+    } params = {};
+    params.Actor = toward;
+    params.eRelation = static_cast<std::uint8_t>(value);
+    return ue::CallFunction(social, L"BPF_ServerChangeRelationship", &params);
+}
+
+// USocialComponent::m_Relationships, offset from Unreal's property table for
+// USocialComponent. A TMap is a TSet of pairs, whose first member is the
+// sparse array's TArray {void* Data; int32 Num; int32 Max} -- so the element
+// count sits 8 bytes in. Read-only, and only ever used as evidence about
+// whether a write landed.
+constexpr std::uintptr_t kSocialRelationshipsMap = 0x0318;
+
+int RelationshipMapSize(ue::UObject* social) {
+    if (!social) return -1;
+    std::int32_t num = 0;
+    std::memcpy(&num,
+                reinterpret_cast<const std::uint8_t*>(social) + kSocialRelationshipsMap + 8,
+                sizeof(num));
+    if (num < 0 || num > 4096) return -1;  // implausible: do not report a guess
+    return num;
+}
+
 bool IsPooled(const ue::FVector& location) { return location.Z < kPooledZ; }
 
 std::uint32_t HashName(const char* text) {

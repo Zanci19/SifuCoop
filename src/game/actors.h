@@ -139,6 +139,46 @@ bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
 // failed to move the body. Both are reported in the heartbeat.
 void GetTeleportFallbackCounts(std::uint32_t* fallbacks, std::uint32_t* hard_failures);
 
+// --- Relationships ----------------------------------------------------------
+//
+// Sifu keeps a per-actor relationship map, USocialComponent::m_Relationships,
+// a TMap<AActor*, ERelationshipTypes>. This is how the game knows one grunt
+// must not punch another, and it is the only per-instigator switch the mod has
+// found for who may fight whom.
+//
+// The enum was recovered from the generated enumerator-name table in the exe,
+// in declaration order. Note that there are two distinct hostile values --
+// `Enemy` is a standing disposition, `Fight` is being in a fight right now --
+// and that Sifu ships a `Coop` type, which is exactly what this mod is doing.
+namespace relationship {
+constexpr int kUnknown = -1;
+constexpr int kEnemy = 0;
+constexpr int kFight = 1;
+constexpr int kObject = 2;
+constexpr int kNeutral = 3;
+constexpr int kCoop = 4;
+constexpr int kAlly = 5;
+constexpr int kCount = 6;
+const char* Name(int value);
+}  // namespace relationship
+
+ue::UObject* GetSocialComponent(ue::UObject* character);
+
+// ABaseCharacter::BPF_GetRelationship. kUnknown when it cannot be asked;
+// kNeutral is a real answer and is also what the game returns for a pair it has
+// never heard of, so a readback of Neutral after writing something else means
+// the write did not land.
+int ReadRelationship(ue::UObject* from_actor, ue::UObject* to_actor);
+
+// USocialComponent::BPF_ServerChangeRelationship. Returns whether the call was
+// dispatched -- NOT whether it took effect. Always read it back.
+bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value);
+
+// Number of element slots in the relationship map. Used only as evidence:
+// if a write neither changes the readback nor grows the map, the setter is a
+// no-op and no amount of retrying will help.
+int RelationshipMapSize(ue::UObject* social);
+
 // --- Pool ------------------------------------------------------------------
 //
 // Sifu pre-spawns every enemy far below the level and lifts them in as needed,
