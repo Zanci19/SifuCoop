@@ -73,6 +73,9 @@ bool g_lobby_was_connected = false;
 // sends it even when it is the same asset as the preceding strike.
 DWORD g_cosmetic_attack_montage_until = 0;
 DWORD g_raw_sequence_restore_at = 0;
+// The puppet's animation blueprint class, captured while it still has one.
+// Single-node attack playback clears the instance; this is what names it back.
+void* g_puppet_anim_class = nullptr;
 bool g_arrival_teleport_pending = false;
 
 
@@ -511,6 +514,11 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
         g_puppet_presentation_velocity = presentation_velocity;
         g_have_puppet_presentation_velocity = true;
         g_puppet_anim_instance = ue::GetAnimInstance(target_actor);
+        // Remembered while a graph still exists, because after a strike there
+        // is nothing left to read it from.
+        if (g_puppet_anim_instance && !g_puppet_anim_class) {
+            g_puppet_anim_class = ue::GetAnimInstanceClass(target_actor);
+        }
         // Re-resolved whenever the driven body changes. Both components are
         // rebuilt on respawn and travel, so this is never held across one.
         static ue::UObject* resolved_for = nullptr;
@@ -1570,6 +1578,7 @@ void DespawnPuppet() {
     g_puppet_anim_instance = nullptr;
     g_have_puppet_presentation_velocity = false;
     g_puppet_presentation_targets = {};
+    g_puppet_anim_class = nullptr;
     g_raw_sequence_restore_at = 0;
     g_cosmetic_attack_montage_until = 0;
     g_puppet_auto_spawned = false;
@@ -1606,6 +1615,7 @@ void TickPuppet() {
         g_puppet_anim_instance = nullptr;
         g_have_puppet_presentation_velocity = false;
         g_puppet_presentation_targets = {};
+        g_puppet_anim_class = nullptr;
         g_raw_sequence_restore_at = 0;
         g_cosmetic_attack_montage_until = 0;
         if (g_puppet) {
@@ -1781,8 +1791,18 @@ void TickPuppet() {
         }
     }
     if (g_puppet && g_raw_sequence_restore_at && GetTickCount() >= g_raw_sequence_restore_at) {
-        ue::RestoreAnimationBlueprint(g_puppet);
+        const bool back = ue::RestoreAnimationBlueprint(g_puppet, g_puppet_anim_class);
         g_raw_sequence_restore_at = 0;
+        // The cached instance belonged to the graph that was just torn down.
+        // Clearing it makes the drive re-resolve, which is what re-arms the
+        // velocity and speed-state injection for the new one.
+        g_puppet_anim_instance = nullptr;
+        static bool warned = false;
+        if (!back && !warned) {
+            warned = true;
+            SC_LOG("puppet: animation blueprint did NOT come back after a cosmetic "
+                   "sequence -- the body will stay in its bind pose");
+        }
     }
 
     // Driven by the *current* connection state rather than the one-shot connect

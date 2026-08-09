@@ -111,6 +111,19 @@ struct Config {
 
     // Phase D -- run state, informational by default.
     bool sync_run_state = true;       // exchange age / room-clear / held weapon
+    // Wake a driven enemy's perception when the host's damage lands on it, so
+    // it registers being attacked instead of only losing health.
+    //
+    // This does NOT reproduce Sifu's hit reaction animation, and the ini key
+    // pretended otherwise for a long time -- it was written to the file and
+    // read by nothing at all. A real reaction needs UHitComponent::
+    // BPF_GenerateFakeImpact, whose FHitRequest reaches FHitBox ->
+    // FHitboxDataRow -> TSet; the order work already established that those
+    // cannot be rebuilt from outside the process that owns them. Until the
+    // reaction is carried as an Order, this is the honest half: the enemy
+    // notices.
+    bool mirror_hit_reactions = true;
+
     bool fix_room_clear = false;      // nudge the local room-clear % to the host's
     // fix_room_clear is a real (if optional) mutation of the joiner's own game
     // state, so it is off until a player asks for it -- singleplayer behaviour

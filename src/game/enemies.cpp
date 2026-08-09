@@ -365,6 +365,31 @@ ue::UObject* ReadAIEnemy(ue::UObject* ai_fighting) {
 // The game's own "engage this actor" entry point. This is what should put the
 // remote player into the director's ticket manager and let somebody be promoted
 // to DirectOpponent -- the thing a raw target write never did.
+// UAIFightingComponent::ActivateEnemyDetectionTimer() and
+// BPF_ForceEnemyReactionBehavior(EGlobalBehaviors).
+//
+// Being hostile to somebody is not the same as having noticed them. The
+// relationship work made enemies willing to fight the remote player; nothing
+// ever told their perception he was there, so the first blow he landed
+// registered as an ambush and they spent the fight on the back foot -- guarding
+// against an opponent they had never registered engaging.
+//
+// Neither of these registers an actor anywhere, which is the whole reason they
+// are used instead of BPF_ForceEnemy: no ticket manager entry is created, so
+// there is nothing for the director to trip over when the body is destroyed.
+// One takes no arguments at all and the other a single enum.
+void WakeEnemyPerception(ue::UObject* ai_fighting) {
+    if (!ai_fighting) return;
+    struct Empty {
+    } none = {};
+    ue::CallFunction(ai_fighting, L"ActivateEnemyDetectionTimer", &none);
+    struct Params {
+        std::uint8_t eBehavior;
+    } params = {};
+    params.eBehavior = kBehaviorAlerted;
+    ue::CallFunction(ai_fighting, L"BPF_ForceEnemyReactionBehavior", &params);
+}
+
 bool ForceEnemy(ue::UObject* ai_fighting, ue::UObject* target, std::uint8_t behavior) {
     if (!ai_fighting || !target) return false;
     struct Params {
@@ -503,6 +528,11 @@ bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
         ReadAIEnemy(entry.ai_fighting) != desired) {
         ForceEnemy(entry.ai_fighting, desired, kBehaviorAlerted);
     }
+
+    // Safe half of the same idea: wake the enemy's perception so the remote
+    // player is somebody it has noticed rather than somebody who keeps
+    // appearing out of nowhere.
+    WakeEnemyPerception(entry.ai_fighting);
 
     g_set_attack_target(entry.attack_component, desired);
     struct Params {
@@ -1177,6 +1207,13 @@ void ApplyRemoteEnemies() {
                 // or a stale client copy).
                 if (state.health + 0.05f < local_health) {
                     ApplyDamage(fighter, local_health - state.health);
+                    // BPF_ApplyDamage is a health path, not an impact, so the
+                    // body loses health without ever registering that something
+                    // hit it. Sifu's real reaction comes from
+                    // UHitComponent::ApplyImpact, and the FHitRequest it needs
+                    // reaches a TSet that cannot be rebuilt from outside -- so
+                    // this is the reachable half: the enemy at least notices.
+                    if (config.mirror_hit_reactions) WakeEnemyPerception(entry.ai_fighting);
                     if (GetHealth(fighter) > state.health + 0.5f) {
                         SetHealth(fighter, state.health);  // guarded fallback
                     }
@@ -1232,7 +1269,22 @@ void ApplyRemoteEnemies() {
             SC_LOG("enemies: revived %s from the joiner's stale save", entry.name);
         } else if (entry.was_down != dead) {
             entry.was_down = dead;
-            SetDown(fighter, dead);
+            // A death is not a knockdown, and InternalSetDownState only knows
+            // how to do the second one. Forcing it from outside puts the body
+            // in the down state without any of Sifu's death sequence, so the
+            // enemy simply stopped where it was -- standing, upright, dead.
+            //
+            // Let the body die of its injuries instead: run its own health path
+            // past zero and the game plays the fall it would have played if the
+            // killing blow had landed here. Only when it is not already dead
+            // locally, because a corpse must not be killed twice.
+            if (dead && fighter.health && GetHealth(fighter) > 0.5f) {
+                ApplyDamage(fighter, GetHealth(fighter) + 1.f);
+            }
+            // Still asserted afterwards: if the health path did not take the
+            // body down (an archetype that survives zero, a pooled body with no
+            // health component) the down state is better than a live corpse.
+            if (!dead || GetHealth(fighter) > 0.5f) SetDown(fighter, dead);
             if (config.verbose_enemies) {
                 SC_LOG("enemies: %s %s", entry.name, dead ? "DIED" : "recycled alive");
             }

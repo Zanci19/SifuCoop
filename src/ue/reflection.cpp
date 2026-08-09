@@ -266,43 +266,58 @@ bool PlayAnimationAsset(UObject* actor, UObject* animation_asset) {
     if (!animation_asset) return false;
     UObject* mesh = GetSkeletalMeshComponent(actor);
     if (!mesh) return false;
-    // Shipped-PDB SetBit helpers prove these bools are at +8..+11. The old
-    // two-field buffer ended at +9, so ProcessEvent read past it on each strike.
+    // USkeletalMeshComponent::PlayAnimation(UAnimationAsset*, bool bLooping).
+    // Two parameters, and that is all -- the three extra bools this struct used
+    // to carry do not exist on this function in UE 4.26, so setting
+    // "bPreventAnimScriptInstanceClear" was writing into space the engine never
+    // reads. It did not prevent anything: single-node mode clears the animation
+    // blueprint instance every time, which is why the graph has to be put back
+    // deliberately afterwards. See RestoreAnimationBlueprint.
     struct Params {
         UObject* NewAnimToPlay;
         bool bLooping;
-        bool bPreventAnimScriptInstanceClear;
-        bool bPreventAnimScriptInitialization;
-        bool bRecordInReplay;
-        // bPreventAnimScriptInstanceClear. PlayAnimation puts the mesh into
-        // single-node mode, and by default that DESTROYS the AnimBlueprint
-        // instance -- so every replayed strike tore down the puppet's animation
-        // graph, took the locomotion state with it, and invalidated the anim
-        // instance pointer the speed-state injection writes through. Keeping the
-        // instance means the graph is still there to return to, and our pointer
-        // stays valid across the strike.
-    } params = {animation_asset, false, true, false, false};
+    } params = {animation_asset, false};
     return CallFunction(mesh, L"PlayAnimation", &params);
 }
 
-bool RestoreAnimationBlueprint(UObject* actor) {
+void* GetAnimInstanceClass(UObject* actor) {
+    UObject* instance = GetAnimInstance(actor);
+    if (!instance) return nullptr;
+    // UObjectBase::ClassPrivate, the one fixed offset this codebase takes on
+    // faith everywhere else too.
+    return *reinterpret_cast<void**>(reinterpret_cast<std::uintptr_t>(instance) + 0x10);
+}
+
+// Put the animation blueprint back after single-node playback.
+//
+// Both previous attempts at this were wrong in the same way -- they assumed an
+// instance survived the strike. It does not: PlayAnimation clears it. Asking
+// for mode AnimationBlueprint without forcing initialisation then left the mesh
+// with no graph at all, which is a T-pose; forcing initialisation rebuilt one
+// that never left idle. The reliable form is to name the class explicitly and
+// check afterwards that an instance actually exists, falling back to setting
+// the class outright when it does not.
+bool RestoreAnimationBlueprint(UObject* actor, void* anim_class) {
     UObject* mesh = GetSkeletalMeshComponent(actor);
     if (!mesh) return false;
     // EAnimationMode::AnimationBlueprint = 0 in UE4.26.
-    //
-    // bForceInitAnimScript stays FALSE. It used to be true, which re-ran the
-    // animation blueprint's initialisation -- and on a spawned clone with no
-    // controller and no order source that produced a graph which never left
-    // idle again. The symptom was exact: the remote player animates until the
-    // first strike, then moves for the rest of the session without ever
-    // animating. PlayAnimationAsset is asked not to clear the instance, so
-    // there is a correctly initialised graph still sitting there; returning to
-    // it is all that is wanted here, not building a new one.
-    struct Params {
+    struct ModeParams {
         std::uint8_t InAnimationMode;
         bool bForceInitAnimScript;
-    } params = {0, false};
-    return CallFunction(mesh, L"SetAnimationMode", &params);
+    } mode = {0, true};
+    CallFunction(mesh, L"SetAnimationMode", &mode);
+
+    if (GetAnimInstance(actor)) return true;
+
+    // No graph came back. Name the class the puppet had before the strike and
+    // let the engine build one; without this the character stays in the bind
+    // pose for the rest of the session.
+    if (!anim_class) return false;
+    struct ClassParams {
+        void* NewClass;
+    } klass = {anim_class};
+    if (!CallFunction(mesh, L"SetAnimInstanceClass", &klass)) return false;
+    return GetAnimInstance(actor) != nullptr;
 }
 
 bool IsValidObject(UObject* object) {

@@ -66,7 +66,15 @@ bool PlayAnimationAsset(UObject* actor, UObject* animation_asset);
 
 // Restores the mesh to its AnimBlueprint after PlayAnimationAsset. UE switches
 // the component to single-node mode while a raw sequence is playing.
-bool RestoreAnimationBlueprint(UObject* actor);
+// The animation blueprint class an actor is currently running, so it can be
+// named again after single-node playback has cleared the instance.
+void* GetAnimInstanceClass(UObject* actor);
+
+// Put the animation blueprint back after PlayAnimationAsset. Pass the class
+// captured before playback; it is the fallback for when asking for
+// AnimationBlueprint mode alone does not produce an instance, which is the
+// difference between the character animating again and standing in a T-pose.
+bool RestoreAnimationBlueprint(UObject* actor, void* anim_class);
 
 // UKismetSystemLibrary::IsValid -- false for null and for anything already
 // marked pending kill. Worth a ProcessEvent only where handing a dead actor to
