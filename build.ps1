@@ -1,4 +1,4 @@
-﻿<#
+<#
     Builds dsound.dll (the SifuCoop proxy) and optionally deploys it.
 
     Usage:
@@ -83,8 +83,10 @@ $sources = @(
     "src\game\actors.cpp"
     "src\game\coop.cpp"
     "src\game\selftest.cpp"
+    "src\game\native_net.cpp"
     "src\game\puppet.cpp"
     "src\game\runstate.cpp"
+    "src\game\player2.cpp"
     "src\net\crypto.cpp"
     "src\net\session.cpp"
     "src\\game\\orders.cpp"
@@ -224,6 +226,7 @@ echo_enemy_attacks=1
 ; swings kill you. Their damage already resolved on their own machine. Versus
 ; mode replays them regardless (hitting each other is the point there).
 echo_player_attacks=0
+real_second_player=1
 report_damage=1
 mirror_peer_vitals=1
 auto_follow_level=1

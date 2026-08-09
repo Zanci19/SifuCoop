@@ -22,8 +22,40 @@ from pdbfile import PdbFile, S_PUB32
 # MSVC mangling keeps identifiers readable, so substring matching is reliable.
 WANTED = {
     "UGameEngine_Tick": ["?Tick@UGameEngine@@"],
+    # This is the real physical-input boundary. Filtering controller 1 here
+    # prevents one keyboard/gamepad from driving both local players without
+    # blocking direct network movement on the remote-player actor.
+    "APlayerController_InputKey": ["?InputKey@APlayerController@@"],
+    # Sifu's targeting-reticle widget component. Creating a second local player
+    # crashes inside this during the new controller's BeginPlay: it tries to add
+    # a HUD widget to a player screen that the second player does not have, and
+    # dereferences null. It is suppressed for the duration of the CreatePlayer
+    # call -- a remote player has no use for a reticle on this machine's HUD.
+    # Sifu's own player controller. Its BeginPlay is deferred while a second
+    # player is being created -- see player2.cpp for why the engine runs it too
+    # early to be survivable.
+    "ASCPlayerController_BeginPlay": ["?BeginPlay@ASCPlayerController@@"],
+    "UWidgetPoolComponent_BeginPlay": ["?BeginPlay@UWidgetPoolComponent@@"],
+    # Sifu's HUD widget registers itself with the controller through this
+    # virtual. Declining it for the SECOND player's controller is what stops the
+    # remote player's health bar being drawn over the local player's own, which
+    # is unavoidable once splitscreen is force-disabled and both local players
+    # share one full-screen viewport.
+    "AFightingPlayerController_BPF_SetHUD": ["?BPF_SetHUD@AFightingPlayerController@@UEAA"],
+    "UTargetableWidgetUpdaterComponent_BeginPlay": [
+        "?BeginPlay@UTargetableWidgetUpdaterComponent@@"
+    ],
     "UWorld_SpawnActor": ["?SpawnActor@UWorld@@"],
     "AActor_SetActorLocationAndRotation": ["?SetActorLocationAndRotation@AActor@@"],
+    # Native steering route for replicated characters. Sifu's synthetic second
+    # player accepts AddMovementInput but does not consume it; direct movement
+    # is consumed by the character movement component and drives locomotion.
+    "ACharacter_GetMovementComponent": [
+        "?GetMovementComponent@ACharacter@@UEBAPEAVUPawnMovementComponent@@XZ"
+    ],
+    "UCharacterMovementComponent_RequestDirectMove": [
+        "?RequestDirectMove@UCharacterMovementComponent@@UEAAXAEBUFVector@@_N@Z"
+    ],
     "AActor_K2_DestroyActor": ["?K2_DestroyActor@AActor@@"],
     "UEngine_GetWorldFromContextObject": ["?GetWorldFromContextObject@UEngine@@"],
     "GEngine": ["?GEngine@@"],

@@ -389,6 +389,10 @@ AttackIntent g_last_intent;
 // not: every pointer in it is already valid in this process.
 std::uint8_t g_attack_template[kDelayedActionSize] = {};
 bool g_have_template = false;
+// Whether the template we hold came from the local PLAYER's attack or from some
+// other character's. A player-sourced one is preferred and is never replaced by
+// an enemy's, but an enemy's is far better than none -- see the capture below.
+bool g_template_from_player = false;
 
 using PrepareAttackFn = unsigned char(__fastcall*)(void* self, const void* delayed_action);
 
@@ -467,18 +471,31 @@ extern "C" void sifucoop_on_prepare_attack(void* self, const void* delayed_actio
     // this guard the echo would feed itself and every replayed swing would be
     // rebroadcast as if it had originated here.
     if (!g_mirroring && LooksLikeUObject(tree)) {
+        // Capture a replay template from ANY local character, not only from our
+        // own player.
+        //
+        // Every remote animation -- the peer's swings and, on the joining side,
+        // every enemy swing the host echoes -- is rebuilt on top of a locally
+        // produced FDelayedActionAttack. Requiring that template to come from
+        // the local player meant the joining player had to throw a punch before
+        // a single enemy would visibly attack, and the template is discarded on
+        // every respawn and level change, so the dead spell came back after each
+        // one. Enemies swing constantly, so taking one from them primes the path
+        // immediately. The template only supplies a valid same-process skeleton;
+        // ApplyAttackTo overwrites the combo tree from the TARGET's own
+        // component and the index/depth from the wire, so whose attack it was
+        // originally does not leak into the replay.
+        if (from_local_player || !g_have_template) {
+            std::memcpy(g_attack_template, bytes, kDelayedActionSize);
+            g_have_template = true;
+            g_template_from_player = from_local_player;
+        }
         if (from_local_player) {
-            // The template is a locally produced FDelayedActionAttack: every
-            // pointer in it is valid in *this* process, which is precisely why
-            // rebuilding on top of one works where shipping the peer's bytes
-            // could never have.
             if (ue::GetObjectPathName(tree, g_last_intent.tree_path,
                                       sizeof(g_last_intent.tree_path))) {
                 g_last_intent.index = index;
                 g_last_intent.depth = depth;
                 g_last_intent.valid = true;
-                std::memcpy(g_attack_template, bytes, kDelayedActionSize);
-                g_have_template = true;
             }
             net::SendOrderEvent(0, 0, index, depth);
         } else if (net::GetRole() == net::Role::Host && net::IsConnected() &&
@@ -561,7 +578,15 @@ void __fastcall OnLocalPlayOrderHook(void* self, void* shared_ptr) {
         return;
     }
 
-    SC_LOG("order: #%llu order=%p", g_order_count, order);
+    // Gated. This used to log every single order the local player issued,
+    // unconditionally and regardless of verbose_orders -- and the log writes
+    // straight to disk, so each line is a blocking write on the game thread.
+    // Sifu issues orders continuously (a held charge is a stream of
+    // OrderChargeBuildUp), so playing normally meant synchronous file I/O in the
+    // middle of combat forever.
+    if (coop::Get().verbose_orders) {
+        SC_LOG("order: #%llu order=%p", g_order_count, order);
+    }
 }
 
 }  // namespace
@@ -637,6 +662,7 @@ bool IsOrderHookInstalled() { return g_installed; }
 void InvalidateAttackTemplate() {
     if (!g_have_template) return;
     g_have_template = false;
+    g_template_from_player = false;
     g_last_intent.valid = false;
     SC_LOG("order: attack template invalidated (pawn changed)");
 }
@@ -757,6 +783,23 @@ void PumpRemoteOrders() {
         }
         ue::UObject* enemy = FindEnemyByHash(actor_hash);
         if (!enemy) continue;
+        // A replayed attack creates a real local hitbox, so the host's chosen
+        // target is applied first where there IS one -- otherwise a stale lock
+        // can send a swing meant for the joining player into their host puppet
+        // instead.
+        //
+        // But a missing target is not a reason to drop the attack. The host
+        // reads its enemies' targets through BPF_GetTargetForAction, which
+        // frequently answers "none" even for an enemy that is mid-swing (the
+        // live log shows whole rooms reporting no target at all). Refusing
+        // every one of those meant enemy attacks essentially never played on the
+        // joining machine -- half of "the animations aren't playing". With no
+        // target flag we simply leave the local body's own lock alone and let
+        // the swing land wherever it lands, which is what the host's copy did.
+        if (!ApplyMirroredEnemyTargetForAttack(actor_hash) && coop::Get().verbose_orders) {
+            SC_LOG("remote: enemy %08X attacked with no mirrored target -- "
+                   "playing it on its existing lock", actor_hash);
+        }
         if (ApplyAttackTo(enemy, attack_index, attack_depth)) {
             ++coop::GetStats().attacks_echoed;
         }

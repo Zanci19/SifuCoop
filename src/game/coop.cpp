@@ -14,6 +14,7 @@ namespace {
 Config g_config;
 Stats g_stats;
 
+bool g_native_network_at_startup = false;
 const char* kSection = "coop";
 
 bool ReadBool(const char* key, bool fallback, const char* ini) {
@@ -30,10 +31,61 @@ void WriteInt(const char* key, int value, const char* ini) {
     WritePrivateProfileStringA(kSection, key, text, ini);
 }
 
+bool CreateDirectoryIfMissing(const char* path) {
+    if (CreateDirectoryA(path, nullptr)) return true;
+    return GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+// Sifu's packaged default is SteamNetDriver. That driver interprets an `open`
+// command through Steam P2P, so a ZeroTier IPv4 connection merely times out.
+// The user config is read before the DLL initializes; write this during the
+// current startup so the following clean restart selects UIpNetDriver.
+void EnsureNativeIpNetDriverConfig() {
+    char local_app_data[MAX_PATH] = {};
+    if (GetEnvironmentVariableA("LOCALAPPDATA", local_app_data,
+                                static_cast<DWORD>(sizeof(local_app_data))) == 0) {
+        SC_LOG("native-net: could not locate LOCALAPPDATA for IP driver config");
+        return;
+    }
+
+    char sifu_dir[MAX_PATH] = {};
+    char saved_dir[MAX_PATH] = {};
+    char config_dir[MAX_PATH] = {};
+    char platform_dir[MAX_PATH] = {};
+    char ini[MAX_PATH] = {};
+    _snprintf(sifu_dir, sizeof(sifu_dir), "%s\\Sifu", local_app_data);
+    _snprintf(saved_dir, sizeof(saved_dir), "%s\\Saved", sifu_dir);
+    _snprintf(config_dir, sizeof(config_dir), "%s\\Config", saved_dir);
+    _snprintf(platform_dir, sizeof(platform_dir), "%s\\WindowsNoEditor", config_dir);
+    _snprintf(ini, sizeof(ini), "%s\\Engine.ini", platform_dir);
+
+    if (!CreateDirectoryIfMissing(sifu_dir) || !CreateDirectoryIfMissing(saved_dir) ||
+        !CreateDirectoryIfMissing(config_dir) || !CreateDirectoryIfMissing(platform_dir)) {
+        SC_LOG("native-net: could not create IP driver config directory (error=%lu)",
+               static_cast<unsigned long>(GetLastError()));
+        return;
+    }
+
+    constexpr const char* kEngineSection = "/Script/Engine.Engine";
+    const bool cleared = WritePrivateProfileStringA(kEngineSection, "!NetDriverDefinitions",
+                                                     "ClearArray", ini) != FALSE;
+    const bool wrote = WritePrivateProfileStringA(
+        kEngineSection, "+NetDriverDefinitions",
+        "(DefName=\"GameNetDriver\",DriverClassName=\"OnlineSubsystemUtils.IpNetDriver\","
+        "DriverClassNameFallback=\"OnlineSubsystemUtils.IpNetDriver\")",
+        ini) != FALSE;
+    if (cleared && wrote) {
+        SC_LOG("native-net: configured UIpNetDriver for ZeroTier in %s; restart once", ini);
+    } else {
+        SC_LOG("native-net: could not write UIpNetDriver config (error=%lu)",
+               static_cast<unsigned long>(GetLastError()));
+    }
+}
 }  // namespace
 
 Config& Get() { return g_config; }
 Stats& GetStats() { return g_stats; }
+bool NativeNetworkActive() { return g_native_network_at_startup; }
 
 void IniPath(char* out, int out_size) {
     if (!out || out_size <= 0) return;
@@ -54,6 +106,9 @@ void Load() {
     g_config.mode = GetPrivateProfileIntA(kSection, "versus", 0, ini) != 0 ? Mode::Versus
                                                                           : Mode::Coop;
     g_config.sync_enemies = ReadBool("sync_enemies", g_config.sync_enemies, ini);
+    g_config.native_network = ReadBool("native_network", g_config.native_network, ini);
+    g_native_network_at_startup = g_config.native_network;
+    if (g_native_network_at_startup) EnsureNativeIpNetDriverConfig();
     g_config.suppress_client_ai = ReadBool("suppress_client_ai",
                                            g_config.suppress_client_ai, ini);
     g_config.sync_enemy_vitals = ReadBool("sync_enemy_vitals",
@@ -66,13 +121,32 @@ void Load() {
                                             g_config.echo_player_attacks, ini);
     g_config.friendly_relationship = ReadBool("friendly_relationship",
                                               g_config.friendly_relationship, ini);
+    g_config.real_second_player = ReadBool("real_second_player",
+                                           g_config.real_second_player, ini);
+    g_config.second_player_disable_splitscreen =
+        ReadBool("second_player_disable_splitscreen",
+                 g_config.second_player_disable_splitscreen, ini);
+    g_config.hide_second_player_hud =
+        ReadBool("hide_second_player_hud", g_config.hide_second_player_hud, ini);
+    g_config.second_player_in_gameplay_only =
+        ReadBool("second_player_in_gameplay_only",
+                 g_config.second_player_in_gameplay_only, ini);
+    g_config.remote_player_attacks =
+        ReadBool("remote_player_attacks", g_config.remote_player_attacks, ini);
+    // Was declared, documented and switchable in the overlay, but never read
+    // from or written to the ini -- so the one thing that carries the peer's
+    // dodges and traversal animations could not actually be configured.
+    g_config.sync_montages = ReadBool("sync_montages", g_config.sync_montages, ini);
     g_config.report_damage = ReadBool("report_damage", g_config.report_damage, ini);
     g_config.mirror_peer_vitals = ReadBool("mirror_peer_vitals",
                                            g_config.mirror_peer_vitals, ini);
+    g_config.mirror_hit_reactions = ReadBool("mirror_hit_reactions",
+                                             g_config.mirror_hit_reactions, ini);
     g_config.sync_run_state = ReadBool("sync_run_state", g_config.sync_run_state, ini);
     g_config.fix_room_clear = ReadBool("fix_room_clear", g_config.fix_room_clear, ini);
     g_config.auto_follow_level = ReadBool("auto_follow_level",
                                           g_config.auto_follow_level, ini);
+    g_config.auto_join_level = ReadBool("auto_join_level", g_config.auto_join_level, ini);
     g_config.adaptive_interp = ReadBool("adaptive_interp", g_config.adaptive_interp, ini);
     g_config.in_game_overlay = ReadBool("in_game_overlay", g_config.in_game_overlay, ini);
     g_config.selftest = ReadBool("selftest", g_config.selftest, ini);
@@ -91,6 +165,16 @@ void Load() {
     if (g_config.snapshot_hz < 10) g_config.snapshot_hz = 10;
     if (g_config.snapshot_hz > 120) g_config.snapshot_hz = 120;
 
+    if (g_config.native_network) {
+        SC_LOG("coop: *** native_network=1 -- THE CUSTOM UDP MIRROR IS OFF ***");
+        SC_LOG("coop: player sync, enemy sync, damage reporting and level invites are ALL "
+               "disabled. Joining goes through the UE4 listen server, which is unverified "
+               "and is what leaves the client stuck on the loading screen.");
+        SC_LOG("coop: set native_network=0 in SifuCoop.ini on BOTH machines for the "
+               "working path.");
+        ReportProblem("native_network=1 -- all co-op sync is disabled");
+    }
+
     SC_LOG("coop: mode=%s enemies=%d ai_off=%d vitals=%d attacks=%d damage=%d "
            "park=%d follow=%d adaptive=%d",
            g_config.mode == Mode::Coop ? "CO-OP" : "VERSUS", g_config.sync_enemies,
@@ -105,6 +189,8 @@ void Save() {
     IniPath(ini, sizeof(ini));
     if (!ini[0]) return;
 
+    WriteBool("native_network", g_config.native_network, ini);
+    if (g_config.native_network) EnsureNativeIpNetDriverConfig();
     WriteBool("versus", g_config.mode == Mode::Versus, ini);
     WriteBool("sync_enemies", g_config.sync_enemies, ini);
     WriteBool("suppress_client_ai", g_config.suppress_client_ai, ini);
@@ -113,11 +199,21 @@ void Save() {
     WriteBool("echo_enemy_attacks", g_config.echo_enemy_attacks, ini);
     WriteBool("echo_player_attacks", g_config.echo_player_attacks, ini);
     WriteBool("friendly_relationship", g_config.friendly_relationship, ini);
+    WriteBool("real_second_player", g_config.real_second_player, ini);
+    WriteBool("second_player_disable_splitscreen",
+              g_config.second_player_disable_splitscreen, ini);
+    WriteBool("hide_second_player_hud", g_config.hide_second_player_hud, ini);
+    WriteBool("second_player_in_gameplay_only",
+              g_config.second_player_in_gameplay_only, ini);
+    WriteBool("remote_player_attacks", g_config.remote_player_attacks, ini);
+    WriteBool("sync_montages", g_config.sync_montages, ini);
     WriteBool("report_damage", g_config.report_damage, ini);
     WriteBool("mirror_peer_vitals", g_config.mirror_peer_vitals, ini);
+    WriteBool("mirror_hit_reactions", g_config.mirror_hit_reactions, ini);
     WriteBool("sync_run_state", g_config.sync_run_state, ini);
     WriteBool("fix_room_clear", g_config.fix_room_clear, ini);
     WriteBool("auto_follow_level", g_config.auto_follow_level, ini);
+    WriteBool("auto_join_level", g_config.auto_join_level, ini);
     WriteBool("adaptive_interp", g_config.adaptive_interp, ini);
     WriteBool("in_game_overlay", g_config.in_game_overlay, ini);
     WriteBool("verbose_enemies", g_config.verbose_enemies, ini);

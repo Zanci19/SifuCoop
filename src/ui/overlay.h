@@ -46,7 +46,10 @@ struct MenuRequests {
     bool spawn_puppet = false;
     bool despawn_puppet = false;
     bool invite_peer = false;     // pull the peer into the level we are in now
+    bool accept_invite = false;   // joiner: take the host up on their standing invite
+    bool teleport_to_peer = false;  // stand where the other player is standing
     bool save_config = false;     // persist the toggles to SifuCoop.ini
+    bool native_start = false;    // explicit UE4 listen host / direct-IP join
     bool log_roster = false;      // dump every tracked character to the log
 };
 
@@ -78,6 +81,13 @@ struct MenuStatus {
     bool puppet_alive = false;
     int faction_mine = -1;
     int faction_puppet = -1;
+
+    // The host has offered a level and the joining player has not taken it yet.
+    bool invite_pending = false;
+    char invite_level[128] = {};
+    // Sifu confirms the two players are marked friendly to each other, which is
+    // the gate on the remote player's attacks being replayed at all.
+    bool friendly_confirmed = false;
 
     // What this machine looks like from outside, once discovery has answered.
     char public_address[64] = {};

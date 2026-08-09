@@ -34,6 +34,23 @@ director). This is the single most important thing to verify on a real two-machi
 it does not follow automatically, the fix is to replicate the game-state clear percentage
 rather than to build a door system. **Status: likely automatic, unverified.**
 
+> **Community input (Sifu modding Discord, 2026-08-07).** From Bondi, who has worked on
+> Sifu's doors before: *removing* a door is not the hard part — **the door is what streams
+> the next sub-level in.** (It also explains the stutter when opening a big door.) That
+> changes the shape of the problem in a way worth writing down: a door is not a barrier to
+> unlock, it is a level-streaming trigger, so two players either pass through it together
+> or the one left behind is standing in a sub-level the other has already unloaded. If
+> room-clear does *not* follow automatically, the answer is still not "build a door
+> system" — it is to make sure both players cross a streaming boundary together, which is
+> what the new **Teleport to partner** action (§7b) exists to make possible without any
+> per-door work.
+>
+> Two other suggestions from the same conversation, both recorded rather than actioned:
+> release for the **arenas first** (one map, no story-mode streaming, so none of the above
+> applies) as a demo while story mode is still unreliable; and in-engine cutscenes let a
+> second player walk around during them, which is funny rather than useful — cutscenes
+> remain explicitly out of scope per the user's own decision in §2.
+
 **Shrines and progression — already independent, by design.** Because `UStatsComponent` is
 per-character and never touched, each player spends their own XP and keeps their own skills
 with no work. Shrines are world actors each machine simulates separately; there is no shared

@@ -1,14 +1,4 @@
-// SifuCoop launcher.
-//
-// Connecting is inherently a pre-launch decision -- you need the peer's address
-// before the game starts -- so the setup UI lives here rather than in-game.
-// Being a separate process, it also cannot crash Sifu.
-//
-// Plain Win32: no dependencies, no runtime to install, builds with the same
-// MinGW toolchain as the mod.
-
-// winsock2.h must precede windows.h, or windows.h pulls in the incompatible
-// winsock 1 headers first.
+// the gui launcher
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -58,15 +48,12 @@ void SetStatus(const wchar_t* text) { SetWindowTextW(g_status, text); }
 
 bool IsHosting() { return SendMessageW(g_host_radio, BM_GETCHECK, 0, 0) == BST_CHECKED; }
 
-// Hosting means telling the peer which address to use, and a machine on a VPN
-// has several. ZeroTier hands out 10.x / 172.16-31.x, so those are flagged --
-// the alternative is the user guessing from ipconfig output.
 void RefreshLocalAddresses() {
     WSADATA wsa = {};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return;
 
     char hostname[256] = {};
-    wchar_t text[1024] = L"Your addresses:\r\n";
+    wchar_t text[1024] = L"ZeroTier address (share the 10.x address with your partner):\r\n";
 
     if (gethostname(hostname, sizeof(hostname)) == 0) {
         addrinfo hints = {};
@@ -86,7 +73,7 @@ void RefreshLocalAddresses() {
                 const bool vpn = (a == 10) || (a == 172 && b >= 16 && b <= 31);
 
                 wchar_t line[128] = {};
-                _snwprintf(line, 128, L"   %hs%s\r\n", ip, vpn ? L"   <- likely ZeroTier" : L"");
+                _snwprintf(line, 128, L"   %hs%s\r\n", ip, vpn ? L"   <- ZeroTier" : L"");
                 wcsncat(text, line, 1023 - wcslen(text));
             }
             freeaddrinfo(results);
@@ -161,8 +148,7 @@ bool SaveSettings() {
         return true;
     }
 
-    SetStatus(hosting ? L"Saved. Hosting - give your peer an address above."
-                      : L"Saved. Will join the address above.");
+    SetStatus(hosting ? L"Saved. Share your ZeroTier address above." : L"Saved. Ready to join your partner.");
     return true;
 }
 
@@ -172,8 +158,6 @@ void LaunchGame() {
     wchar_t dir[MAX_PATH] = {};
     GetWindowTextW(g_game_dir, dir, MAX_PATH);
 
-    // Prefer the Epic shim in the install root: launching the shipping exe
-    // directly can bypass Epic's startup and fail on entitlement checks.
     wchar_t root[MAX_PATH] = {};
     wcsncpy(root, dir, MAX_PATH - 1);
     for (int i = 0; i < 2; ++i) {
@@ -245,18 +229,15 @@ void CreateControls(HWND window) {
                                 window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdPortEdit)),
                                 nullptr, nullptr);
 
-    // Both players must type the same passphrase. It keys the authentication on
-    // every packet, so a mismatch is a silent refusal to connect rather than a
-    // confusing half-working session -- which is exactly why it is on the first
-    // screen rather than buried in the ini.
-    MakeLabel(window, L"Passphrase (both players must match):", 16, 154, 300, 18, 0);
+    // TODO: fix the empty passphrase not working
+    MakeLabel(window, L"Shared passphrase:", 16, 154, 300, 18, 0);
     g_passphrase_edit =
         CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 16, 174,
                       420, 22, window,
                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdPassphraseEdit)), nullptr,
                       nullptr);
     MakeLabel(window,
-              L"Leave empty only on a VPN or LAN. Set one before forwarding a port.", 16, 200,
+              L"Both players must use the same passphrase.", 16, 200,
               420, 18, 0);
 
     g_local_ips = CreateWindowW(L"EDIT", L"",
@@ -274,7 +255,7 @@ void CreateControls(HWND window) {
 
     g_status = MakeLabel(window, L"", 16, 366, 420, 40, kIdStatusLabel);
 
-    // Use the system UI font; the default is the ancient bitmap one.
+    // Use the system font (default is bitmap)
     HFONT font = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                              DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
@@ -331,7 +312,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
     RegisterClassExW(&wc);
 
-    HWND window = CreateWindowExW(0, wc.lpszClassName, L"SifuCoop - Setup",
+    HWND window = CreateWindowExW(0, wc.lpszClassName, L"SifuCoop - ZeroTier Setup",
                                   WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 470, 460, nullptr, nullptr,
                                   instance, nullptr);

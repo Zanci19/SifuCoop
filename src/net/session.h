@@ -30,6 +30,7 @@ bool IsConnected();
 struct LocalState {
     ue::FVector location;
     ue::FRotator rotation;
+    ue::FVector velocity;
     float health = 0.f;
     float max_health = 0.f;
     float guard = 0.f;
@@ -42,7 +43,7 @@ void TickSession(const LocalState& local);
 
 // Latest peer state, interpolated into the past by the configured delay.
 // Returns false when no usable peer data exists yet.
-bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation);
+bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation, ue::FVector* velocity);
 
 // Peer's reported vitals. Returns false when the peer has not reported any yet,
 // which is a different thing from "the peer is at zero health" -- conflating
@@ -96,6 +97,7 @@ const char* GetPeerLevel();
 struct EnemyStateOut {
     std::uint32_t name_hash = 0;
     float x = 0.f, y = 0.f, z = 0.f, yaw = 0.f;
+    float velocity_x = 0.f, velocity_y = 0.f, velocity_z = 0.f;
     float health = 0.f;
     float max_health = 0.f;
     float guard = 0.f;

@@ -1,3 +1,5 @@
+// this is all explained by AI. might consider removing this
+
 #pragma once
 
 #include <cstdint>
@@ -5,7 +7,7 @@
 // Wire format, shared verbatim with testclient/. Everything is little-endian
 // and fixed-size: both ends are x86-64, so no serialisation layer is needed,
 // but every struct is explicitly packed so an accidental padding change cannot
-// silently desync the two builds.
+// desync the two builds.
 //
 // AUTHORITY MODEL
 //
@@ -26,7 +28,7 @@ constexpr std::uint32_t kMagic = 0x53434F50;  // 'SCOP'
 
 // Bumped whenever any struct below changes. Peers refuse to talk across a
 // mismatch rather than misinterpreting each other's bytes.
-constexpr std::uint16_t kProtocolVersion = 7;
+constexpr std::uint16_t kProtocolVersion = 9;
 
 // AUTHENTICATION
 //
@@ -70,11 +72,21 @@ constexpr std::uint8_t kFlagInLevel = 1 << 2;     // sender has a live pawn
 
 // EnemyEntry::flags
 constexpr std::uint8_t kEnemyActive = 1 << 0;  // in the level, not pooled away
+// KNOCKDOWN, not death. Sifu's IsDown() is the stagger/floored state that an
+// enemy recovers from several times in an ordinary fight. Conflating it with
+// death was a real bug: the joining side forced its copy through
+// InternalSetDownState on every knockdown and back again on every recovery,
+// and a body driven through that state machine from outside came back standing
+// but no longer hittable. Only kEnemyDead may drive the local death path.
 constexpr std::uint8_t kEnemyDown = 1 << 1;
 // Which player this enemy is fighting, as seen by the host. The client flips
 // the sense: the host's target is the client's puppet and vice versa.
 constexpr std::uint8_t kEnemyTargetsHost = 1 << 2;
 constexpr std::uint8_t kEnemyTargetsPeer = 1 << 3;
+// The host says this body is actually dead (health at or below zero, or it left
+// the fight while dying). This is the ONLY flag that makes the joining side put
+// its copy down.
+constexpr std::uint8_t kEnemyDead = 1 << 4;
 
 enum class PacketType : std::uint16_t {
     Hello = 1,        // join request
@@ -175,6 +187,11 @@ struct EnemyEntry {
     std::uint32_t name_hash = 0;
     float x = 0.f, y = 0.f, z = 0.f;
     float yaw = 0.f;
+    // Position alone makes the receiving movement component stop whenever it
+    // catches up to a snapshot, then start again on the next one. Keep the
+    // host's actual horizontal motion continuous so its AnimBP sees a real
+    // locomotion velocity between snapshots.
+    float velocity_x = 0.f, velocity_y = 0.f, velocity_z = 0.f;
     float health = 0.f;
     float max_health = 0.f;
     float guard = 0.f;
@@ -271,7 +288,7 @@ struct MontagePacket {
 static_assert(sizeof(PacketHeader) == 24, "header layout changed");
 static_assert(sizeof(SnapshotPacket) == 24 + 36 + 12 + 4, "snapshot layout changed");
 static_assert(sizeof(OrderEventPacket) == 24 + 16, "order event layout changed");
-static_assert(sizeof(EnemyEntry) == 40, "enemy entry layout changed");
+static_assert(sizeof(EnemyEntry) == 52, "enemy entry layout changed");
 static_assert(sizeof(RunStatePacket) == 24 + 4 + 4 + 4 + 192, "run state layout changed");
 static_assert(sizeof(EnemyStatePacket) <= kMaxPacketSize, "enemy packet exceeds the buffer");
 static_assert(sizeof(EnemyDamagePacket) <= kMaxPacketSize, "damage packet exceeds the buffer");

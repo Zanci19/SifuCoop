@@ -85,9 +85,7 @@ void Sha256(const void* data, std::size_t size, std::uint8_t out[kSha256Size]) {
         remaining -= 64;
     }
 
-    // Final block(s): the message, a 0x80 byte, zero padding, and the original
-    // length in bits as a big-endian 64-bit value. Two blocks are needed when
-    // the tail leaves no room for that length.
+    // the message, a 0x80 byte, zero padding, and the original length in bits as a big-endian 64-bit value
     std::uint8_t tail[128] = {};
     memcpy(tail, bytes, remaining);
     tail[remaining] = 0x80;
@@ -126,10 +124,7 @@ void HmacSha256(const std::uint8_t* key, std::size_t key_size, const void* data,
         inner_pad[i] = static_cast<std::uint8_t>(padded_key[i] ^ 0x36);
         outer_pad[i] = static_cast<std::uint8_t>(padded_key[i] ^ 0x5C);
     }
-
-    // Packets are small and bounded, so the concatenations are stack buffers
-    // rather than a streaming API -- which keeps the whole construction visible
-    // in one place at the cost of a fixed ceiling on message size.
+// compact message size
     constexpr std::size_t kMaxMessage = 2048;
     if (size > kMaxMessage) size = kMaxMessage;
 

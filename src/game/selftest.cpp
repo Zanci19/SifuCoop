@@ -20,13 +20,6 @@ namespace ue = sifucoop::ue;
 namespace coop = sifucoop::coop;
 namespace net = sifucoop::net;
 
-// The test runs twice, and the comparison between the two runs is the whole
-// point. Round one leaves the enemy's AI alone, which is the game working
-// normally and establishes that the staging itself is sound -- an enemy in
-// reach, facing the player, able to hurt them. Round two stops the brain and
-// drives the attack the way the joining side does. If round one lands and round
-// two does not, the answer is unambiguous and it is the driven path that is at
-// fault, not the setup.
 enum class Round {
     AiDriven,   // baseline: the enemy attacks under its own control
     ModDriven,  // the real question: we replay the attack, brain stopped
@@ -175,10 +168,7 @@ void TickSelfTest() {
 
     switch (g_step) {
         case Step::WaitForTarget: {
-            // The replay path rebuilds an attack on top of one captured from a
-            // real attack in this process, so there is nothing to replay until
-            // something has attacked. Round one runs under the enemy's own AI
-            // precisely so that it primes the template for round two.
+            // replay path
             if (g_round == Round::ModDriven && !HaveAttackTemplate()) {
                 if (!g_announced) {
                     g_announced = true;
@@ -187,13 +177,6 @@ void TickSelfTest() {
                 }
                 return;
             }
-
-            // The test needs a real enemy that the game has activated -- one
-            // actually in a fight, not one parked in the pool. Rather than
-            // yanking a dormant actor out (which might not be combat-ready and
-            // could crash the very tool meant to diagnose safely), it waits and
-            // tells the player, once, what to do. It then runs on its own the
-            // moment they are next standing among live enemies.
             static bool instructed = false;
             const std::uint32_t target = PickTarget();
             if (target == 0) {
@@ -222,8 +205,6 @@ void TickSelfTest() {
             g_announced = false;
 
             if (g_round == Round::ModDriven) {
-                // Exactly what the joining side does to every enemy the host
-                // reports: brain off, body driven.
                 StopBrain(enemy);
             }
 
@@ -252,9 +233,6 @@ void TickSelfTest() {
 
             ue::UObject* enemy = FindEnemyByHash(g_target_hash);
 
-            // Keep it in reach. An AI enemy will reposition, and a driven one
-            // gets no say at all, so without this the test could measure
-            // nothing more than an enemy having wandered off.
             if (enemy && now - g_last_swing > kSwingIntervalMs / 2) {
                 ue::FVector player_location = {};
                 ue::FVector enemy_location = {};

@@ -36,6 +36,7 @@ bool g_have_peer_addr = false;
 
 std::uint32_t g_send_sequence = 0;
 std::uint32_t g_last_snapshot_sequence = 0;
+DWORD g_last_snapshot_recv_ms = 0;
 DWORD g_last_recv_ms = 0;
 DWORD g_last_send_ms = 0;
 DWORD g_last_ping_ms = 0;
@@ -44,7 +45,11 @@ DWORD g_last_ping_ms = 0;
 // back smoothly is what hides jitter; rendering the newest packet immediately
 // would snap on every late or reordered datagram.
 constexpr int kBufferSize = 64;
-constexpr DWORD kTimeoutMs = 5000;
+constexpr DWORD kTimeoutMs = 20000;
+
+// A gap between ticks longer than this means the game thread was blocked rather
+// than that time merely passed. Well above any frame, well below a level load.
+constexpr DWORD kStallMs = 500;
 constexpr DWORD kPingIntervalMs = 500;
 
 // GetTickCount only advances every ~15.6 ms. With snapshots arriving every
@@ -65,10 +70,68 @@ DWORD NowMs() {
 
 struct PeerState {
     DWORD received_ms = 0;
+    // When the peer SENT this, expressed in our clock. Interpolation runs on
+    // this rather than on arrival time -- see the note on g_clock_offset.
+    DWORD sample_ms = 0;
     ue::FVector location;
     ue::FRotator rotation;
+    ue::FVector velocity;
     bool valid = false;
 };
+
+// Difference between the peer's clock and ours, so a sent-timestamp can be
+// placed on our timeline.
+//
+// Interpolating on ARRIVAL time was the real source of the puppet's jitter.
+// Snapshots are sent evenly, every 16ms, but they do not arrive evenly: round
+// trip on this link swung between 11ms and 54ms, so packets land in bursts.
+// Three snapshots arriving together get three near-identical arrival stamps,
+// and interpolating across them replays 50ms of movement almost instantly --
+// the character races ahead, then stands still waiting for the next burst.
+// Measured as errors of 300 to 700 units appearing and vanishing several times
+// a second, against an average error of only 7 to 16. No amount of smoothing in
+// the drive can fix that, because the target itself is wrong.
+//
+// Sent timestamps are evenly spaced by construction, so rebuilding the timeline
+// from them removes the network's jitter instead of reproducing it.
+//
+// The offset is estimated as the SMALLEST (arrival - sent) seen: the least
+// delayed packet is the one that best reveals the true clock difference. It is
+// allowed to creep upward slowly so that one unusually fast packet -- or a
+// machine whose clock genuinely drifts -- cannot pin the estimate forever.
+// Last position actually handed to the drive, so a starved buffer can hold
+// still instead of lurching. See GetPeerTransform.
+ue::FVector g_last_output_location;
+ue::FRotator g_last_output_rotation;
+ue::FVector g_last_output_velocity;
+bool g_have_last_output = false;
+
+std::int64_t g_clock_offset = 0;
+bool g_clock_offset_valid = false;
+
+// The offset used to be the minimum of (arrival - sent) over the WHOLE session,
+// nudged upward by 1ms every 300 samples. That is far too sticky, and it is how
+// the peer ended up appearing to move about once a second.
+//
+// Packets do not arrive evenly: several land in one burst. Within a burst every
+// packet shares an arrival time, so the NEWEST one in it -- the one that was
+// sent last -- yields the smallest (arrival - sent) of the session. The estimate
+// latches onto that burst, and from then on every sample's timeline position is
+// biased older than it really is by roughly the burst's span. The render point
+// then sits past the newest sample almost all the time, the interpolator is
+// starved on the new side, and (see GetPeerTransform) it used to answer that by
+// repeating its last output. So the character stood still and jumped only when a
+// burst happened to bracket the render point -- which is exactly "the peer's
+// position updates about once a second". At 0.2 ms/s the old recovery would have
+// taken a minute and a half to undo a 20 ms bias.
+//
+// Now the estimate is the minimum over a two-second WINDOW. A fast path is still
+// adopted immediately, but a one-off burst is forgotten within one window
+// instead of holding the timeline hostage for the rest of the session.
+constexpr DWORD kClockWindowMs = 2000;
+std::int64_t g_clock_window_min = 0;
+bool g_clock_window_valid = false;
+DWORD g_clock_window_start = 0;
 
 PeerState g_peer_buffer[kBufferSize];
 int g_peer_head = 0;
@@ -122,6 +185,16 @@ int g_enemy_staging_count = 0;
 std::uint32_t g_enemy_staging_generation = 0;
 std::uint32_t g_enemy_chunks_seen = 0;
 std::uint8_t g_enemy_chunk_total = 0;
+void MergeEnemyLive(const EnemyStateOut& incoming) {
+    for (int i = 0; i < g_enemy_live_count; ++i) {
+        if (g_enemies_live[i].name_hash != incoming.name_hash) continue;
+        g_enemies_live[i] = incoming;
+        return;
+    }
+    if (g_enemy_live_count < kMaxTrackedEnemies) {
+        g_enemies_live[g_enemy_live_count++] = incoming;
+    }
+}
 
 DamageReport g_damage[kMaxDamagePerPacket];
 int g_damage_count = 0;
@@ -477,18 +550,29 @@ char g_montage_path[192] = {};
 float g_montage_position = 0.f;
 bool g_have_montage = false;
 
+void ResetLevelSyncState();
 void ResetPeerState() {
     g_have_montage = false;
+    ResetLevelSyncState();
     for (PeerState& state : g_peer_buffer) state.valid = false;
     g_peer_head = 0;
     g_last_snapshot_sequence = 0;
+    g_last_snapshot_recv_ms = 0;
     g_order_read = g_order_write;
     g_peer_state_valid = false;
     g_peer_vitals = PeerVitals();
     g_peer_run_valid = false;
     g_peer_run = RunSnapshot();
+    // A new peer (or the same one after a reconnect) has an unrelated clock.
+    g_clock_offset_valid = false;
+    g_clock_offset = 0;
+    g_clock_window_valid = false;
+    g_clock_window_min = 0;
+    g_clock_window_start = 0;
+    g_have_last_output = false;
     g_enemy_live_count = 0;
     g_enemy_staging_count = 0;
+    g_enemy_staging_generation = 0;
     g_enemy_chunks_seen = 0;
     g_enemy_chunk_total = 0;
     g_enemy_sweep_seen = false;
@@ -504,6 +588,7 @@ void HandleSnapshot(const SnapshotPacket& packet) {
     // against it is false and no correction ever fires.
     if (!IsFiniteVector(packet.x, packet.y, packet.z)) return;
     if (!IsFiniteVector(packet.pitch, packet.yaw, packet.roll)) return;
+    if (!IsFiniteVector(packet.velocity_x, packet.velocity_y, packet.velocity_z)) return;
     if (!IsFinite(packet.health) || !IsFinite(packet.max_health) || !IsFinite(packet.guard)) {
         return;
     }
@@ -517,12 +602,57 @@ void HandleSnapshot(const SnapshotPacket& packet) {
         if (gap > 1) coop::GetStats().packets_dropped += gap - 1;
     }
     g_last_snapshot_sequence = packet.header.sequence;
+    g_last_snapshot_recv_ms = NowMs();
+    // Counted separately from packets_received, which mixes in pings, enemy
+    // sweeps and damage reports. This is the number that answers "how often does
+    // the peer's position actually update" -- the question the old heartbeat
+    // could not distinguish from ordinary traffic.
+    ++coop::GetStats().snapshots_received;
 
     g_peer_head = (g_peer_head + 1) % kBufferSize;
     PeerState& state = g_peer_buffer[g_peer_head];
     state.received_ms = NowMs();
+
+    // Place this sample on our timeline using when it was SENT, not when it
+    // turned up. See the note on g_clock_offset for why arrival time is unusable.
+    const std::int64_t observed =
+        static_cast<std::int64_t>(state.received_ms) -
+        static_cast<std::int64_t>(packet.header.send_time_ms);
+    if (!g_clock_offset_valid) {
+        g_clock_offset = observed;
+        g_clock_offset_valid = true;
+        g_clock_window_min = observed;
+        g_clock_window_valid = true;
+        g_clock_window_start = state.received_ms;
+    } else {
+        if (!g_clock_window_valid || observed < g_clock_window_min) {
+            g_clock_window_min = observed;
+            g_clock_window_valid = true;
+        }
+        // A genuinely faster path is adopted at once -- it is real information.
+        if (observed < g_clock_offset) g_clock_offset = observed;
+
+        // ...but every window the estimate is re-seated on that window's own
+        // minimum, so it can rise again when the earlier one was a burst
+        // artefact rather than the true clock difference.
+        if (state.received_ms - g_clock_window_start >= kClockWindowMs) {
+            g_clock_window_start = state.received_ms;
+            if (g_clock_window_min > g_clock_offset) {
+                const std::int64_t step = g_clock_window_min - g_clock_offset;
+                // Moved in one go rather than crept: the bias is a constant
+                // offset on the render timeline, and half-correcting it leaves
+                // the puppet half-starved for another window.
+                g_clock_offset += step;
+            }
+            g_clock_window_valid = false;
+        }
+    }
+    state.sample_ms =
+        static_cast<DWORD>(static_cast<std::int64_t>(packet.header.send_time_ms) +
+                           g_clock_offset);
     state.location = {packet.x, packet.y, packet.z};
     state.rotation = {packet.pitch, packet.yaw, packet.roll};
+    state.velocity = {packet.velocity_x, packet.velocity_y, packet.velocity_z};
     state.valid = true;
 
     if (packet.flags & kFlagStateValid) {
@@ -542,6 +672,25 @@ std::uint32_t g_level_request_next = 1;
 char g_pending_level[192] = {};
 bool g_have_pending_level = false;
 char g_peer_level[192] = {};
+constexpr DWORD kLevelRetryIntervalMs = 250;
+constexpr DWORD kLevelRetryTimeoutMs = 20000;
+
+char g_active_level_request[192] = {};
+std::uint32_t g_active_level_request_id = 0;
+DWORD g_active_level_first_sent = 0;
+DWORD g_active_level_last_sent = 0;
+
+void ResetLevelSyncState() {
+    g_level_request_seen = 0;
+    g_level_request_next = 1;
+    g_pending_level[0] = '\0';
+    g_have_pending_level = false;
+    g_peer_level[0] = '\0';
+    g_active_level_request[0] = '\0';
+    g_active_level_request_id = 0;
+    g_active_level_first_sent = 0;
+    g_active_level_last_sent = 0;
+}
 
 void HandleLevelSync(const LevelSyncPacket& packet) {
     // This string ends up in UGameplayStatics::OpenLevel. Authentication means
@@ -570,6 +719,22 @@ void HandleLevelSync(const LevelSyncPacket& packet) {
 }
 
 void HandleEnemyState(const EnemyStatePacket& packet) {
+    if (packet.chunk_count == 0 || packet.chunk_count > 32 ||
+        packet.chunk >= packet.chunk_count) return;
+
+    if (g_enemy_staging_generation != 0) {
+        const std::int32_t generation_delta =
+            static_cast<std::int32_t>(packet.generation - g_enemy_staging_generation);
+        if (generation_delta < 0) return;  // late UDP packet from an older sweep
+    }
+
+    const std::uint32_t chunk_bit = 1u << packet.chunk;
+    if (packet.generation == g_enemy_staging_generation &&
+        g_enemy_chunk_total != 0 && packet.chunk_count != g_enemy_chunk_total) return;
+
+    if (packet.generation == g_enemy_staging_generation &&
+        (g_enemy_chunks_seen & chunk_bit) != 0) return;  // duplicate chunk
+
     int count = packet.count;
     if (count < 0) count = 0;
     if (count > kMaxEnemiesPerPacket) count = kMaxEnemiesPerPacket;
@@ -589,7 +754,8 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
         // Same reasoning as snapshots: these become teleport destinations and
         // health writes. A single bad value here is a character parked at
         // infinity that nothing can bring back.
-        if (!IsFiniteVector(in.x, in.y, in.z) || !IsFinite(in.yaw)) continue;
+        if (!IsFiniteVector(in.x, in.y, in.z) || !IsFinite(in.yaw) ||
+            !IsFiniteVector(in.velocity_x, in.velocity_y, in.velocity_z)) continue;
         if (!IsFinite(in.health) || !IsFinite(in.max_health) || !IsFinite(in.guard) ||
             !IsFinite(in.damage_applied)) {
             continue;
@@ -600,14 +766,18 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
         out.y = in.y;
         out.z = in.z;
         out.yaw = in.yaw;
+        out.velocity_x = in.velocity_x;
+        out.velocity_y = in.velocity_y;
+        out.velocity_z = in.velocity_z;
         out.health = in.health;
         out.max_health = in.max_health;
         out.guard = in.guard;
         out.damage_applied = in.damage_applied;
         out.flags = in.flags;
+        if (g_enemy_sweep_seen) MergeEnemyLive(out);
     }
 
-    if (packet.chunk < 32) g_enemy_chunks_seen |= (1u << packet.chunk);
+    g_enemy_chunks_seen |= chunk_bit;
 
     const std::uint32_t wanted =
         packet.chunk_count >= 32 ? 0xFFFFFFFFu : (1u << packet.chunk_count) - 1u;
@@ -618,7 +788,6 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
     for (int i = 0; i < g_enemy_staging_count; ++i) g_enemies_live[i] = g_enemies_staging[i];
     g_enemy_live_count = g_enemy_staging_count;
     g_enemy_staging_count = 0;
-    g_enemy_chunks_seen = 0;
     g_enemy_sweep_seen = true;
 }
 
@@ -780,6 +949,14 @@ void PumpReceive() {
         g_last_recv_ms = NowMs();
         g_bytes_in += static_cast<std::uint32_t>(received);
         ++coop::GetStats().packets_received;
+
+        if (!g_connected && !handshake && g_have_peer_addr && g_have_session_key &&
+            from.sin_addr.s_addr == g_peer_addr.sin_addr.s_addr &&
+            from.sin_port == g_peer_addr.sin_port) {
+            g_connected = true;
+            g_connected_event = true;
+            SC_LOG("net: peer is still there -- session restored without a new handshake");
+        }
 
         // Anything smaller than the struct it claims to be would read past the
         // end of what actually arrived, so every case checks its own size.
@@ -961,6 +1138,10 @@ void UpdateRates(DWORD now) {
 
 bool StartSession() {
     char host[128] = {};
+    if (coop::Get().native_network) {
+        SC_LOG("net: custom UDP mirror disabled (UE4 native networking selected)");
+        return false;
+    }
     int port = kDefaultPort;
     bool is_host = false;
     ReadConfig(host, sizeof(host), &port, &is_host);
@@ -1059,6 +1240,10 @@ bool StartSession() {
 }
 
 bool Reconfigure(bool host_mode, const char* address, int port, const char* passphrase) {
+    if (port < 1 || port > 65535) {
+        coop::ReportProblem("port must be between 1 and 65535");
+        return false;
+    }
     char ini_path[MAX_PATH] = {};
     coop::IniPath(ini_path, sizeof(ini_path));
 
@@ -1067,7 +1252,7 @@ bool Reconfigure(bool host_mode, const char* address, int port, const char* pass
 
     // Persist first, so the choice survives a restart even if the socket fails.
     WritePrivateProfileStringA("net", "mode", host_mode ? "host" : "client", ini_path);
-    if (address && address[0]) WritePrivateProfileStringA("net", "host", address, ini_path);
+    if (!host_mode && address && address[0]) WritePrivateProfileStringA("net", "host", address, ini_path);
     WritePrivateProfileStringA("net", "port", port_text, ini_path);
     // Written even when empty: clearing the field has to be able to clear the
     // setting, or a passphrase could never be removed from inside the game.
@@ -1160,16 +1345,26 @@ bool PopOrderEvent(std::uint32_t* actor_hash, std::uint32_t* order_type,
     return true;
 }
 
-void SendLevelSync(const char* level_path) {
-    if (!g_connected || !level_path || !level_path[0]) return;
+void SendLevelSyncPacket(const char* level_path, std::uint32_t request_id) {
     LevelSyncPacket packet = {};
     FillHeader(&packet.header, PacketType::LevelSync);
-    packet.request_id = g_level_request_next;
+    packet.request_id = request_id;
     lstrcpynA(packet.level_path, level_path, sizeof(packet.level_path));
     SendPacket(&packet, sizeof(packet));
 }
 
-void BumpLevelRequest() { ++g_level_request_next; }
+void SendLevelSync(const char* level_path) {
+    if (!g_connected || !level_path || !level_path[0]) return;
+    lstrcpynA(g_active_level_request, level_path, sizeof(g_active_level_request));
+    g_active_level_request_id = g_level_request_next;
+    g_active_level_first_sent = NowMs();
+    g_active_level_last_sent = g_active_level_first_sent;
+    SendLevelSyncPacket(g_active_level_request, g_active_level_request_id);
+}
+
+void BumpLevelRequest() {
+    if (++g_level_request_next == 0) g_level_request_next = 1;
+}
 
 void SendLevelPresence(const char* level_path) {
     if (!g_connected || !level_path || !level_path[0]) return;
@@ -1225,6 +1420,9 @@ void SendEnemyStates(const EnemyStateOut* entries, int count) {
             out.z = in.z;
             out.yaw = in.yaw;
             out.health = in.health;
+            out.velocity_x = in.velocity_x;
+            out.velocity_y = in.velocity_y;
+            out.velocity_z = in.velocity_z;
             out.max_health = in.max_health;
             out.guard = in.guard;
             out.damage_applied = in.damage_applied;
@@ -1403,6 +1601,30 @@ void TickSession(const LocalState& local) {
     PumpReceive();
 
     const DWORD now = NowMs();
+
+    // Forgive time the game thread spent blocked, instead of charging it to the
+    // peer. TickSession is the only thing pumping the socket and it runs on the
+    // game thread, so while a level loads no packet can arrive however healthy
+    // the peer is. Measured level loads here were 5.7s and 6.7s against a 5s
+    // timeout -- which meant a joiner was declared timed out at the very moment
+    // it finished travelling into the host's level, on every single join. The
+    // silence was ours, not theirs.
+    static DWORD last_tick_ms = 0;
+    if (last_tick_ms != 0) {
+        const DWORD gap = now - last_tick_ms;
+        if (gap > kStallMs) {
+            SC_LOG("net: %lums stall (level load or hitch) -- not counted against the peer",
+                   gap);
+            if (g_last_recv_ms != 0) {
+                g_last_recv_ms += gap;
+                // Never let the correction run past the present, or the unsigned
+                // subtraction below would wrap into an enormous "silence".
+                if (g_last_recv_ms > now) g_last_recv_ms = now;
+            }
+        }
+    }
+    last_tick_ms = now;
+
     UpdateRates(now);
 
     if (g_connected && g_last_recv_ms != 0 && now - g_last_recv_ms > kTimeoutMs) {
@@ -1449,6 +1671,43 @@ void TickSession(const LocalState& local) {
 
     if (!g_connected) return;
 
+    static DWORD last_snapshot_ms = 0;
+    static DWORD last_rehello_ms = 0;
+    if (g_last_snapshot_sequence != 0) last_snapshot_ms = g_last_snapshot_recv_ms;
+    if (g_role == Role::Client && last_snapshot_ms != 0 &&
+        now - last_snapshot_ms > 4000 && now - last_rehello_ms > 2000) {
+        last_rehello_ms = now;
+        SC_LOG("net: no position from the host for %lums while the link is up -- "
+               "re-announcing ourselves", now - last_snapshot_ms);
+        HelloPacket hello = {};
+        FillHeader(&hello.header, PacketType::Hello);
+        lstrcpynA(hello.name, "sifu-peer", sizeof(hello.name));
+        memcpy(hello.nonce, g_local_nonce, kSessionNonceSize);
+        const bool had_session = g_have_session_key;
+        g_have_session_key = false;
+        SendPacket(&hello, sizeof(hello));
+        g_have_session_key = had_session;
+    }
+
+    if (g_role == Role::Host && g_active_level_request[0]) {
+        if (_stricmp(g_peer_level, g_active_level_request) == 0) {
+            SC_LOG("net: level invite acknowledged by peer");
+            g_active_level_request[0] = '\0';
+            g_active_level_request_id = 0;
+            g_active_level_first_sent = 0;
+            g_active_level_last_sent = 0;
+        } else if (now - g_active_level_first_sent >= kLevelRetryTimeoutMs) {
+            SC_LOG("net: level invite timed out without peer presence");
+            g_active_level_request[0] = '\0';
+            g_active_level_request_id = 0;
+            g_active_level_first_sent = 0;
+            g_active_level_last_sent = 0;
+        } else if (now - g_active_level_last_sent >= kLevelRetryIntervalMs) {
+            SendLevelSyncPacket(g_active_level_request, g_active_level_request_id);
+            g_active_level_last_sent = now;
+        }
+    }
+
     if (now - g_last_ping_ms >= kPingIntervalMs) {
         g_last_ping_ms = now;
         PingPacket ping = {};
@@ -1470,6 +1729,9 @@ void TickSession(const LocalState& local) {
     snapshot.pitch = local.rotation.Pitch;
     snapshot.yaw = local.rotation.Yaw;
     snapshot.roll = local.rotation.Roll;
+    snapshot.velocity_x = local.velocity.X;
+    snapshot.velocity_y = local.velocity.Y;
+    snapshot.velocity_z = local.velocity.Z;
     snapshot.health = local.health;
     snapshot.max_health = local.max_health;
     snapshot.guard = local.guard;
@@ -1482,7 +1744,8 @@ void TickSession(const LocalState& local) {
     SendPacket(&snapshot, sizeof(snapshot));
 }
 
-bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation) {
+bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation, ue::FVector* velocity) {
+    if (!location || !rotation || !velocity) return false;
     const DWORD target = NowMs() - static_cast<DWORD>(GetInterpolationDelayMs());
 
     // Find the two samples bracketing the render time and blend between them.
@@ -1491,28 +1754,64 @@ bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation) {
     for (int i = 0; i < kBufferSize; ++i) {
         const PeerState& state = g_peer_buffer[i];
         if (!state.valid) continue;
-        if (state.received_ms <= target && (!older || state.received_ms > older->received_ms)) {
+        if (state.sample_ms <= target && (!older || state.sample_ms > older->sample_ms)) {
             older = &state;
         }
-        if (state.received_ms > target && (!newer || state.received_ms < newer->received_ms)) {
+        if (state.sample_ms > target && (!newer || state.sample_ms < newer->sample_ms)) {
             newer = &state;
         }
     }
 
     if (!older && !newer) return false;
-    if (!older) {
-        *location = newer->location;
-        *rotation = newer->rotation;
-        return true;
-    }
+
+    // Starved on the NEW side: the render point has run past the newest sample
+    // we hold. This is the common case whenever the clock estimate is even
+    // slightly pessimistic, and it used to be answered by repeating the last
+    // output -- which is a character standing perfectly still until the buffer
+    // happened to catch up. Together with the burst-latched clock offset above,
+    // that was the whole of "the peer's position only updates once a second".
+    //
+    // Dead reckoning is the right answer instead: carry the newest sample
+    // forward along its own reported velocity. It is what the peer's character
+    // is actually doing, it stays continuous, and it self-corrects the moment a
+    // packet lands. Capped so a lost connection coasts a little and then stops
+    // rather than sending the character across the level.
     if (!newer) {
-        *location = older->location;
+        constexpr DWORD kMaxExtrapolationMs = 200;
+        DWORD ahead = target - older->sample_ms;
+        if (ahead > kMaxExtrapolationMs) ahead = kMaxExtrapolationMs;
+        const float seconds = static_cast<float>(ahead) / 1000.f;
+
+        location->X = older->location.X + older->velocity.X * seconds;
+        location->Y = older->location.Y + older->velocity.Y * seconds;
+        location->Z = older->location.Z;  // never guess at falling
         *rotation = older->rotation;
+        *velocity = older->velocity;
+
+        g_last_output_location = *location;
+        g_last_output_rotation = *rotation;
+        g_last_output_velocity = *velocity;
+        g_have_last_output = true;
         return true;
     }
 
-    const DWORD span = newer->received_ms - older->received_ms;
-    const float alpha = span == 0 ? 0.f : static_cast<float>(target - older->received_ms) / span;
+    // Starved on the OLD side: every sample is newer than the render point,
+    // which happens for a moment after a reconnect or a level change. There is
+    // nothing behind us to blend from, so show the oldest thing we have rather
+    // than inventing a position.
+    if (!older) {
+        *location = newer->location;
+        *rotation = newer->rotation;
+        *velocity = newer->velocity;
+        g_last_output_location = *location;
+        g_last_output_rotation = *rotation;
+        g_last_output_velocity = *velocity;
+        g_have_last_output = true;
+        return true;
+    }
+
+    const DWORD span = newer->sample_ms - older->sample_ms;
+    const float alpha = span == 0 ? 0.f : static_cast<float>(target - older->sample_ms) / span;
 
     location->X = older->location.X + (newer->location.X - older->location.X) * alpha;
     location->Y = older->location.Y + (newer->location.Y - older->location.Y) * alpha;
@@ -1527,6 +1826,14 @@ bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation) {
     rotation->Pitch = older->rotation.Pitch;
     rotation->Yaw = older->rotation.Yaw + delta_yaw * alpha;
     rotation->Roll = older->rotation.Roll;
+    velocity->X = older->velocity.X + (newer->velocity.X - older->velocity.X) * alpha;
+    velocity->Y = older->velocity.Y + (newer->velocity.Y - older->velocity.Y) * alpha;
+    velocity->Z = older->velocity.Z + (newer->velocity.Z - older->velocity.Z) * alpha;
+
+    g_last_output_location = *location;
+    g_last_output_rotation = *rotation;
+    g_last_output_velocity = *velocity;
+    g_have_last_output = true;
     return true;
 }
 

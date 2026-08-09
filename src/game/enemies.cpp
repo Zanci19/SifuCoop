@@ -65,18 +65,45 @@ struct Tracked {
     // every packet about either of them addressed both.
     char name[96] = {};
 
+    // Set when the leaf name carried a UE4 runtime instance number, which is
+    // stripped off `name` before hashing because it differs per machine. The
+    // number itself is kept only to order same-named actors by spawn time.
+    bool runtime_named = false;
+    std::uint32_t runtime_number = 0;
+    int ordinal = 0;
+
     // --- Client-side ---
     bool ai_stopped = false;
+    DWORD last_ai_stop_ms = 0;
+    // "We have put this body down because the HOST said it died." Deliberately
+    // not set for an ordinary knockdown -- see the kEnemyDown comment in
+    // protocol.h.
     bool was_down = false;
     bool parked = false;          // we hid it because the host has not activated it
+    // Whether this body currently has collision and is visible, as far as WE
+    // last told it. Tracked rather than inferred: an enemy that reaches the
+    // fight with collision still switched off is a live opponent you cannot
+    // hit, and nothing else in the loop would ever notice.
+    bool present = true;
     bool seen_from_host = false;  // present in the most recent host sweep
     bool ever_seen_from_host = false;
+    // First tick at which the host stopped publishing this body. One dropped
+    // sweep must not be read as "it died" -- see the retirement loop.
+    DWORD missing_since = 0;
     float last_local_health = -1.f;
     float reported_total = 0.f;  // running damage we have told the host about
     float host_applied = 0.f;    // how much of that the host says it has applied
 
     // --- Host-side ---
-    float peer_applied = 0.f;    // how much of the peer's total we have applied
+    // (How much of the peer's total has been applied lives in the ledger above,
+    //  not here: a field on this struct is lost every time the table rebuilds.)
+
+    // Frames of "this one is dead" still owed to the peer. An enemy that dies is
+    // recycled into the pool almost immediately, and a pooled enemy is not
+    // published at all -- so the joining side was simply never told, and its own
+    // copy stood there indefinitely, upright and untouched, long after the host
+    // had killed it. The death has to outlive the body.
+    DWORD death_announce_until = 0;
 
     // --- Display ---
     float distance = 0.f;
@@ -84,6 +111,20 @@ struct Tracked {
     float max_health = 0.f;
     bool active = false;
     bool driven = false;
+    // Host-only motion sample. Enemy packets need a velocity as well as a
+    // location or the joiner's movement component repeatedly falls to idle
+    // between otherwise healthy 60 Hz snapshots.
+    ue::FVector last_host_location = {};
+    DWORD last_host_motion_ms = 0;
+    bool have_host_motion = false;
+
+
+    // The host's current target, represented with the wire flags already
+    // reserved in protocol.h. On the client this is translated to that
+    // machine's corresponding player before an echoed enemy attack is launched.
+    std::uint8_t host_target_flags = 0;
+    ue::UObject* mirrored_target = nullptr;
+    DWORD last_target_sample_ms = 0;
 };
 
 Tracked g_tracked[net::kMaxTrackedEnemies];
@@ -96,12 +137,93 @@ int g_tracked_count = 0;
 // relying on being refreshed first.
 ue::UObject* g_tracked_world = nullptr;
 bool g_had_host_sweep = false;
+bool g_refresh_requested = false;
 
 bool TrackingIsCurrent() {
     return g_tracked_count > 0 && g_tracked_world != nullptr &&
            g_tracked_world == ue::GetWorld();
 }
 
+// Read the attack component's selected target through its reflected Blueprint
+// accessor. The layout is from the shipped PDB and contains no game-object
+// field offset guesses.
+ue::UObject* ReadAttackTarget(ue::UObject* attack_component, std::uint8_t action_type) {
+    if (!attack_component) return nullptr;
+    struct Params {
+        std::uint8_t action_type;
+        std::uint8_t force_out_of_date;
+        std::uint8_t pad[6];
+        ue::UObject* ReturnValue;
+    } params = {};
+    params.action_type = action_type;
+    if (!ue::CallFunction(attack_component, L"BPF_GetTargetForAction", &params)) return nullptr;
+    return params.ReturnValue;
+}
+
+constexpr std::uint8_t kEnemyTargetMask =
+    net::kEnemyTargetsHost | net::kEnemyTargetsPeer;
+
+std::uint8_t HostTargetFlags(ue::UObject* attack_component, ue::UObject* host_player,
+                             ue::UObject* peer_player) {
+    // The target API is action-specific. Passing the zero-initialised enum only
+    // asks for one action slot, which the log proved was idle even while the
+    // enemy was attacking. Probe the compact action enum instead of inventing a
+    // private offset or guessing a "current target" field. The getter is
+    // read-only; invalid enum values simply have no target.
+    for (std::uint8_t action_type = 0; action_type < 8; ++action_type) {
+        const ue::UObject* target = ReadAttackTarget(attack_component, action_type);
+        if (target == host_player) return net::kEnemyTargetsHost;
+        if (target && peer_player && target == peer_player) return net::kEnemyTargetsPeer;
+    }
+    return 0;
+}
+
+void KeepClientBrainStopped(Tracked& entry, DWORD now) {
+    // Level scripts can restart an AI brain after it was initially stopped.
+    // A host-authoritative replica must never resume local decision making, or
+    // its own AI will fight the network driver and create a private encounter.
+    constexpr DWORD kRetryMs = 750;
+    if (entry.ai_stopped && now - entry.last_ai_stop_ms < kRetryMs) return;
+    entry.last_ai_stop_ms = now;
+    if (StopBrain(entry.actor)) entry.ai_stopped = true;
+}
+
+// Map the host's target to the equivalent body on the joining machine. The host
+// player is represented by this client's puppet, while the host's remote-player
+// body is represented by this client's physical player.
+bool ApplyMirroredTarget(Tracked& entry, std::uint8_t flags) {
+    flags &= kEnemyTargetMask;
+    entry.host_target_flags = flags;
+    if (flags == 0 || (flags == kEnemyTargetMask) || !entry.attack_component) return false;
+
+    ue::UObject* world = ue::GetWorld();
+    ue::UObject* desired = nullptr;
+    if (flags == net::kEnemyTargetsHost) {
+        desired = GetPuppet();
+    } else if (world) {
+        desired = ue::GetPlayerCharacter(world, 0);
+    }
+    if (!desired) return false;
+
+    if (entry.mirrored_target == desired) return true;
+
+    // UAttackComponent::BPF_UpdateLockMoveTarget(AActor* _currentAttacked).
+    // This is the component's own target-update path, unlike writing a private
+    // field or guessing an attack slot name.
+    struct Params {
+        ue::UObject* current_attacked;
+    } params = {};
+    params.current_attacked = desired;
+    if (!ue::CallFunction(entry.attack_component, L"BPF_UpdateLockMoveTarget", &params)) {
+        SC_LOG("targets: %s could not apply mirrored target", entry.name);
+        return false;
+    }
+
+    entry.mirrored_target = desired;
+    SC_LOG("targets: %s mirrored to %s", entry.name,
+           flags == net::kEnemyTargetsHost ? "host puppet" : "local player");
+    return true;
+}
 // Every fighting character in the level, players included.
 int EnumerateFighters(ue::UObject** out, int max_out) {
     if (!g_get_all_actors || !g_fighting_character_class) return 0;
@@ -123,18 +245,49 @@ int FindTracked(std::uint32_t hash) {
     return -1;
 }
 
-// Rebuilt periodically rather than every frame: enumeration is not free, and
-// the pool means the set of actors is fixed for the level anyway. Per-enemy
-// bookkeeping is carried across a refresh by hash, so a rebuild does not
-// forget how much damage has been reported.
+struct AppliedTotal {
+    std::uint32_t hash = 0;
+    float total = 0.f;
+};
+
+AppliedTotal g_applied[net::kMaxTrackedEnemies * 2];
+int g_applied_count = 0;
+
+void ResetAppliedTotals() {
+    g_applied_count = 0;
+}
+
+// returns the stored total for an id, creating a "zeroed" slot (null only if the ledger is full, which cannot happen for a real roster)
+float* AppliedTotalFor(std::uint32_t hash) {
+    for (int i = 0; i < g_applied_count; ++i) {
+        if (g_applied[i].hash == hash) return &g_applied[i].total;
+    }
+    if (g_applied_count >= static_cast<int>(sizeof(g_applied) / sizeof(g_applied[0]))) {
+        return nullptr;
+    }
+    AppliedTotal& slot = g_applied[g_applied_count++];
+    slot.hash = hash;
+    slot.total = 0.f;
+    return &slot.total;
+}
+
+// report the figure back to peer
+float AppliedTotalValue(std::uint32_t hash) {
+    for (int i = 0; i < g_applied_count; ++i) {
+        if (g_applied[i].hash == hash) return g_applied[i].total;
+    }
+    return 0.f;
+}
+
 void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
+    if (ue::GetWorld() != g_tracked_world) ResetAppliedTotals();
+
     ue::UObject* fighters[net::kMaxTrackedEnemies * 2] = {};
     const int count = EnumerateFighters(fighters, net::kMaxTrackedEnemies * 2);
 
     Tracked previous[net::kMaxTrackedEnemies];
     const int previous_count = g_tracked_count;
     for (int i = 0; i < previous_count; ++i) previous[i] = g_tracked[i];
-
     g_tracked_count = 0;
     for (int i = 0; i < count && g_tracked_count < net::kMaxTrackedEnemies; ++i) {
         ue::UObject* actor = fighters[i];
@@ -142,38 +295,58 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
 
         char name[sizeof(Tracked::name)] = {};
         if (!LeafName(actor, name, sizeof(name))) continue;
-        const std::uint32_t hash = HashName(name);
 
         Tracked& entry = g_tracked[g_tracked_count];
         entry = Tracked();
-        entry.hash = hash;
         entry.actor = actor;
         entry.attack_component = ResolveFighter(actor).attack;
+        entry.runtime_named = SplitRuntimeSuffix(name, &entry.runtime_number);
         lstrcpynA(entry.name, name, sizeof(entry.name));
+        ++g_tracked_count;
+    }
+    for (int i = 0; i < g_tracked_count; ++i) {
+        Tracked& entry = g_tracked[i];
+        if (!entry.runtime_named) {
+            entry.hash = HashName(entry.name);
+            continue;
+        }
+        int ordinal = 0;
+        for (int k = 0; k < g_tracked_count; ++k) {
+            if (k == i || !g_tracked[k].runtime_named) continue;
+            if (lstrcmpA(g_tracked[k].name, entry.name) != 0) continue;
+            if (g_tracked[k].runtime_number > entry.runtime_number) ++ordinal;
+        }
+        entry.ordinal = ordinal;
+        entry.hash = HashNameWithOrdinal(entry.name, ordinal);
+    }
 
+    for (int i = 0; i < g_tracked_count; ++i) {
+        Tracked& entry = g_tracked[i];
         for (int k = 0; k < previous_count; ++k) {
-            if (previous[k].hash != hash) continue;
+            if (previous[k].hash != entry.hash) continue;
             entry.ai_stopped = previous[k].ai_stopped;
+            entry.last_ai_stop_ms = previous[k].last_ai_stop_ms;
             entry.was_down = previous[k].was_down;
             entry.parked = previous[k].parked;
+            entry.present = previous[k].present;
+            entry.missing_since = previous[k].missing_since;
+            entry.active = previous[k].active;
+            entry.death_announce_until = previous[k].death_announce_until;
             entry.last_local_health = previous[k].last_local_health;
             entry.reported_total = previous[k].reported_total;
             entry.host_applied = previous[k].host_applied;
-            entry.peer_applied = previous[k].peer_applied;
+            entry.last_host_location = previous[k].last_host_location;
+            entry.last_host_motion_ms = previous[k].last_host_motion_ms;
+            entry.have_host_motion = previous[k].have_host_motion;
             entry.ever_seen_from_host = previous[k].ever_seen_from_host;
             break;
         }
-        ++g_tracked_count;
     }
 
     g_tracked_world = ue::GetWorld();
     coop::GetStats().enemies_known = g_tracked_count;
 
-    // Two enemies sharing an id is fatal to everything downstream -- every
-    // packet about one addresses both, so they are driven to the same place and
-    // damaged together -- and it is completely silent. It happened, from a name
-    // buffer one byte too short, and the symptom was a pair of enemies moving
-    // as one. Cheap to check over a set this size; never worth not knowing.
+    // check collisions so the figure doesnt freak out like me tryna get off the blanket at 2 am
     int collisions = 0;
     for (int i = 0; i < g_tracked_count; ++i) {
         for (int k = i + 1; k < g_tracked_count; ++k) {
@@ -190,8 +363,7 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
     }
 }
 
-// --- HOST -------------------------------------------------------------------
-
+// HOST
 void ApplyPeerDamage() {
     net::DamageReport reports[net::kMaxDamagePerPacket];
     const int count = net::GetEnemyDamage(reports, net::kMaxDamagePerPacket);
@@ -203,26 +375,19 @@ void ApplyPeerDamage() {
         const int index = FindTracked(reports[i].name_hash);
         if (index < 0) continue;
         Tracked& entry = g_tracked[index];
+        float* applied = AppliedTotalFor(reports[i].name_hash);
+        if (!applied) continue;
+        if (reports[i].total + 0.01f < *applied) *applied = 0.f;
 
-        // A total that went backwards means the peer restarted its count for
-        // this body -- the enemy was recycled through the pool. Restarting ours
-        // too is what keeps a reused enemy damageable; without it the peer
-        // could never again exceed the old high-water mark and every hit it
-        // landed on that body would be silently discarded.
-        if (reports[i].total + 0.01f < entry.peer_applied) entry.peer_applied = 0.f;
-
-        const float delta = reports[i].total - entry.peer_applied;
+        const float delta = reports[i].total - *applied;
         if (delta <= 0.01f) continue;
-        entry.peer_applied = reports[i].total;
+        *applied = reports[i].total;
 
         Fighter fighter = ResolveFighter(entry.actor);
         if (!fighter.health) continue;
         ApplyDamage(fighter, delta);
 
         stats.damage_applied_total += delta;
-        // The first time the peer's damage lands on an enemy is proof the
-        // joining player can actually fight -- logged once, always, because it
-        // is exactly what a two-machine test is trying to confirm.
         static bool first = true;
         if (first) {
             first = false;
@@ -237,6 +402,10 @@ void ApplyPeerDamage() {
 }
 
 void PublishEnemies() {
+    ue::UObject* world = ue::GetWorld();
+    ue::UObject* host_player = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
+    ue::UObject* peer_player = GetPuppet();
+    const DWORD now = GetTickCount();
     net::EnemyStateOut out[net::kMaxTrackedEnemies];
     int count = 0;
     int active = 0;
@@ -247,11 +416,30 @@ void PublishEnemies() {
         ue::FVector location = {};
         if (!ue::GetActorLocation(entry.actor, &location)) continue;
 
+        const bool was_active = entry.active;
         entry.active = !IsPooled(location);
+        if (was_active && !entry.active) {
+            // TODO: fix this fucking shit with the enemies dying and still standing
+            entry.death_announce_until = now + 2000;
+        }
+        const bool announcing_death = !entry.active && entry.death_announce_until != 0 &&
+                                     static_cast<LONG>(now - entry.death_announce_until) < 0;
+        if (!entry.active && !announcing_death) entry.death_announce_until = 0;
+        if (announcing_death) {
+            net::EnemyStateOut& dead = out[count++];
+            dead.name_hash = entry.hash;
+            dead.x = location.X;
+            dead.y = location.Y;
+            dead.z = location.Z;
+            dead.yaw = 0.f;
+            dead.health = 0.f;
+            dead.max_health = entry.max_health > 0.f ? entry.max_health : 1.f;
+            dead.guard = 0.f;
+            dead.damage_applied = AppliedTotalValue(entry.hash);
+            dead.flags = net::kEnemyActive | net::kEnemyDown | net::kEnemyDead;
+            continue;
+        }
         if (!entry.active) {
-            // Parked in the pool: not in the fight, so not replicated. Its
-            // damage accounting restarts with the body, in step with the peer.
-            entry.peer_applied = 0.f;
             continue;
         }
         ++active;
@@ -269,25 +457,44 @@ void PublishEnemies() {
         state.y = location.Y;
         state.z = location.Z;
         state.yaw = rotation.Yaw;
+        if (entry.have_host_motion) {
+            const DWORD elapsed_ms = now - entry.last_host_motion_ms;
+            if (elapsed_ms > 0 && elapsed_ms <= 250) {
+                const float seconds = static_cast<float>(elapsed_ms) / 1000.f;
+                state.velocity_x = (location.X - entry.last_host_location.X) / seconds;
+                state.velocity_y = (location.Y - entry.last_host_location.Y) / seconds;
+                state.velocity_z = (location.Z - entry.last_host_location.Z) / seconds;
+                const float speed = sqrtf(state.velocity_x * state.velocity_x +
+                                          state.velocity_y * state.velocity_y +
+                                          state.velocity_z * state.velocity_z);
+                if (speed > 3000.f) state.velocity_x = state.velocity_y = state.velocity_z = 0.f;
+            }
+        }
+        entry.last_host_location = location;
+        entry.last_host_motion_ms = now;
+        entry.have_host_motion = true;
         state.health = entry.health;
         state.max_health = entry.max_health;
         state.guard = GetGuard(fighter);
-        state.damage_applied = entry.peer_applied;
+        state.damage_applied = AppliedTotalValue(entry.hash);
         state.flags = net::kEnemyActive;
+        // TODO: refresh rate of puppet
+        if (now - entry.last_target_sample_ms >= 50) {
+            entry.last_target_sample_ms = now;
+            entry.host_target_flags = HostTargetFlags(entry.attack_component, host_player,
+                                                      peer_player);
+        }
+        state.flags |= entry.host_target_flags;
         if (IsDown(fighter)) state.flags |= net::kEnemyDown;
+        if (entry.max_health > 0.f && entry.health <= 0.5f) state.flags |= net::kEnemyDead;
     }
 
     coop::GetStats().enemies_active = active;
-    // Always sent, including when empty: an empty sweep is how the client
-    // learns a fight has ended and stops driving bodies back into the room.
     net::SendEnemyStates(out, count);
 }
 
-// --- CLIENT -----------------------------------------------------------------
+// CLIENT
 
-// Watches for health that dropped without the host having said so: that is our
-// own player's hit landing on a driven enemy, and it is the only evidence the
-// host will ever get that the joining player is fighting at all.
 void AccumulateLocalDamage(Tracked& entry, const Fighter& fighter) {
     if (!fighter.health) return;
     const float health = GetHealth(fighter);
@@ -304,8 +511,7 @@ void AccumulateLocalDamage(Tracked& entry, const Fighter& fighter) {
     entry.reported_total += drop;
     coop::Stats& stats = coop::GetStats();
     stats.damage_reported_total += drop;
-    // First local hit on a driven enemy: proof this side is landing hits that
-    // will be reported to the host. Logged once, always.
+    // TODO: currently if the client fights an enemy, the enemy is assigned to them. what if they wombo-combo together or switch? fix that
     static bool first = true;
     if (first) {
         first = false;
@@ -355,53 +561,51 @@ void ApplyRemoteEnemies() {
         const net::EnemyStateOut& state = states[i];
         const int index = FindTracked(state.name_hash);
         if (index < 0) {
-            // Normal for a moment after a level load, and permanent if the two
-            // machines somehow disagree about the level's contents.
             ++unmatched;
             continue;
         }
 
         Tracked& entry = g_tracked[index];
+        const bool first_host_state = !entry.ever_seen_from_host;
         entry.seen_from_host = true;
         entry.ever_seen_from_host = true;
         entry.active = (state.flags & net::kEnemyActive) != 0;
+        ApplyMirroredTarget(entry, state.flags);
 
-        // Stop its brain once. Repeating every frame would be wasted work and
-        // would fight the engine if it ever legitimately restarts logic.
-        if (config.suppress_client_ai && !entry.ai_stopped) {
-            if (StopBrain(entry.actor)) {
-                entry.ai_stopped = true;
-            }
-        }
+        if (config.suppress_client_ai) KeepClientBrainStopped(entry, GetTickCount());
 
-        if (entry.parked) {
+        const bool dead = (state.flags & net::kEnemyDead) != 0 ||
+                          (state.max_health > 0.f && state.health <= 0.5f);
+        const bool knocked_down = (state.flags & net::kEnemyDown) != 0;
+
+        const bool should_be_present = entry.active && !dead;
+        if (should_be_present && (!entry.present || entry.parked || first_host_state)) {
             SetActorPresent(entry.actor, true);
+            entry.present = true;
             entry.parked = false;
         }
 
         Fighter fighter = ResolveFighter(entry.actor);
 
-        // Order matters here. Local damage has to be read *before* the host's
-        // health is written on top, or the write itself would be mistaken for
-        // a hit -- or worse, our own hit would be erased before it was ever
-        // reported and the enemy would be unkillable from this side.
         if (config.report_damage) AccumulateLocalDamage(entry, fighter);
 
         if (config.sync_enemy_vitals && fighter.health) {
-            // Only accept the host's number once it accounts for everything we
-            // have told it about. Until then its value is stale-high and would
-            // visibly heal an enemy we just hit.
-            // Both counters run monotonically for as long as this body is in
-            // the fight, and both restart together when it leaves. That
-            // matters: an earlier version retired the client's total the
-            // instant the host caught up, which made the two numbers
-            // incomparable from then on -- the host's stale-but-larger total
-            // satisfied this test immediately after every new hit, so the
-            // enemy's health visibly sprang back up before settling. Never
-            // reset one side of a comparison without the other.
             const bool host_caught_up = state.damage_applied + 0.05f >= entry.reported_total;
             if (host_caught_up) {
-                SetHealth(fighter, state.health);
+                const float local_health = GetHealth(fighter);
+                if (state.health + 0.05f < local_health) {
+                    const bool lethal = dead || state.health <= 0.5f;
+                    if (lethal || config.mirror_hit_reactions) {
+                        ApplyDamage(fighter, local_health - state.health);
+                        if (GetHealth(fighter) > state.health + 0.5f) {
+                            SetHealth(fighter, state.health);
+                        }
+                    } else {
+                        SetHealth(fighter, state.health);
+                    }
+                } else if (state.health > local_health + 0.05f) {
+                    SetHealth(fighter, state.health);
+                }
                 SetGuard(fighter, state.guard);
                 entry.last_local_health = state.health;
                 entry.host_applied = state.damage_applied;
@@ -410,55 +614,50 @@ void ApplyRemoteEnemies() {
 
         entry.health = GetHealth(fighter);
         entry.max_health = GetMaxHealth(fighter);
-
-        // Zero health counts as down even when the flag is clear. Testing
-        // against a live level showed enemies going to 0 and being recycled
-        // into the pool without IsDown() ever becoming true -- that flag tracks
-        // the knockdown state, and an enemy at zero health simply dies. Reading
-        // only the flag left the joining side driving a corpse around.
-        const bool down = (state.flags & net::kEnemyDown) != 0 ||
-                          (state.max_health > 0.f && state.health <= 0.5f);
-        if (entry.was_down != down) {
-            entry.was_down = down;
-            SetDown(fighter, down);
+        if (entry.was_down != dead) {
+            entry.was_down = dead;
+            SetDown(fighter, dead);
             if (config.verbose_enemies) {
-                SC_LOG("enemies: %s %s", entry.name, down ? "DOWN" : "up");
+                SC_LOG("enemies: %s %s", entry.name, dead ? "DIED" : "recycled alive");
             }
         }
-
-        // A downed enemy is not walking anywhere; driving it would drag the
-        // body around while its death animation plays.
-        if (!down && config.sync_enemies) {
+        if (!dead && !knocked_down && !IsDown(fighter) && config.sync_enemies) {
             const ue::FVector target = {state.x, state.y, state.z};
             const ue::FRotator facing = {0.f, state.yaw, 0.f};
-            DriveActorTo(entry.actor, target, facing);
+            const ue::FVector velocity = {state.velocity_x, state.velocity_y, state.velocity_z};
+            DriveActorTo(entry.actor, target, facing, velocity);
             entry.driven = true;
             ++driven;
         }
     }
-
-    // An enemy the host had and then dropped is finished: it died, or the
-    // encounter ended and it went back to the pool. Either way it must stop
-    // standing here as a live opponent our own player could still swing at --
-    // that enemy no longer exists in the fight both players are sharing.
+    constexpr DWORD kMissingGraceMs = 1500;
+    const DWORD retire_now = GetTickCount();
     for (int i = 0; i < g_tracked_count; ++i) {
         Tracked& entry = g_tracked[i];
-        if (!entry.ever_seen_from_host || entry.seen_from_host || entry.was_down) continue;
+        if (!entry.ever_seen_from_host || entry.was_down) {
+            entry.missing_since = 0;
+            continue;
+        }
+        if (entry.seen_from_host) {
+            entry.missing_since = 0;
+            continue;
+        }
+        if (entry.missing_since == 0) {
+            entry.missing_since = retire_now;
+            continue;
+        }
+        if (retire_now - entry.missing_since < kMissingGraceMs) continue;
+        entry.missing_since = 0;
         entry.was_down = true;
         entry.reported_total = 0.f;
         entry.last_local_health = -1.f;
-        SetDown(ResolveFighter(entry.actor), true);
+        Fighter fighter = ResolveFighter(entry.actor);
+        const float local_health = GetHealth(fighter);
+        if (local_health > 0.5f) ApplyDamage(fighter, local_health);
+        if (GetHealth(fighter) > 0.5f) SetHealth(fighter, 0.f);
+        SetDown(fighter, true);
         if (config.verbose_enemies) SC_LOG("enemies: %s left the host's fight", entry.name);
     }
-
-    // Anything the host has not activated must not be standing in our level:
-    // its AI is stopped, so it would loiter as an inert obstacle, and if the AI
-    // were left running it would be a second, private fight.
-    //
-    // Enemies the host *did* have and then dropped are left alone. They died,
-    // or the host pooled them; either way we already put them down and the
-    // local game will clean the body up the way it normally does. Hiding them
-    // instead would make every kill end with the corpse blinking out.
     if (config.park_extra_enemies && g_had_host_sweep) {
         for (int i = 0; i < g_tracked_count; ++i) {
             Tracked& entry = g_tracked[i];
@@ -474,11 +673,13 @@ void ApplyRemoteEnemies() {
             }
             SetActorPresent(entry.actor, false);
             entry.parked = true;
+            entry.present = false;
             entry.last_local_health = -1.f;
             entry.reported_total = 0.f;
             if (config.verbose_enemies) SC_LOG("enemies: parked %s", entry.name);
         }
     }
+    if (unmatched > 0) g_refresh_requested = true;
 
     stats.enemies_driven = driven;
     stats.enemies_unmatched = unmatched;
@@ -486,6 +687,47 @@ void ApplyRemoteEnemies() {
 }
 
 }  // namespace
+//   UAttackComponent::BPF_GetTargetForAction(_eActionType @0x00,
+//                                            _bForceOutOfDate @0x01) -> AActor* @0x08
+void DumpEnemyTargets() {
+    ue::UObject* world = ue::GetWorld();
+    ue::UObject* player = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
+    ue::UObject* second = GetPuppet();
+
+    int targeting_player = 0;
+    int targeting_second = 0;
+    int targeting_other = 0;
+    int no_target = 0;
+
+    for (int i = 0; i < g_tracked_count; ++i) {
+        const Tracked& entry = g_tracked[i];
+        if (!entry.active || !entry.attack_component) continue;
+
+        struct Params {
+            std::uint8_t action_type;
+            std::uint8_t force_out_of_date;
+            std::uint8_t pad[6];
+            ue::UObject* ReturnValue;
+        } params = {};
+        if (!ue::CallFunction(entry.attack_component, L"BPF_GetTargetForAction", &params)) {
+            continue;
+        }
+
+        if (!params.ReturnValue) {
+            ++no_target;
+        } else if (params.ReturnValue == player) {
+            ++targeting_player;
+        } else if (second && params.ReturnValue == second) {
+            ++targeting_second;
+        } else {
+            ++targeting_other;
+        }
+    }
+
+    SC_LOG("targets: %d enemies on YOU, %d on the second player, %d elsewhere, %d idle%s",
+           targeting_player, targeting_second, targeting_other, no_target,
+           second ? "" : "  (no second player present)");
+}
 
 void DumpRoster() {
     ue::UObject* world = ue::GetWorld();
@@ -499,10 +741,18 @@ void DumpRoster() {
         ue::FVector location = {};
         ue::GetActorLocation(entry.actor, &location);
         Fighter fighter = ResolveFighter(entry.actor);
-        SC_LOG("enemies:  [%02d] %08X %-46s hp=%.0f/%.0f %s%s%s (%.0f, %.0f, %.0f)", i,
+        // The name printed is the *stripped* one -- the portable identity. For a
+        // runtime-spawned enemy the discarded instance number is shown too, so
+        // two machines' rosters can be compared: the hash and ordinal must
+        // agree, the raw number will not.
+        char origin[48] = {};
+        if (entry.runtime_named) {
+            wsprintfA(origin, " ord=%d rt=%u", entry.ordinal, entry.runtime_number);
+        }
+        SC_LOG("enemies:  [%02d] %08X %-46s hp=%.0f/%.0f %s%s%s(%.0f, %.0f, %.0f)%s", i,
                entry.hash, entry.name, GetHealth(fighter), GetMaxHealth(fighter),
                IsPooled(location) ? "POOLED " : "active ", entry.ai_stopped ? "ai-off " : "",
-               entry.parked ? "parked " : "", location.X, location.Y, location.Z);
+               entry.parked ? "parked " : "", location.X, location.Y, location.Z, origin);
     }
     if (player) {
         Fighter mine = ResolveFighter(player);
@@ -535,6 +785,12 @@ std::uint32_t EnemyHashForAttackComponent(const void* attack_component) {
         if (g_tracked[i].attack_component == attack_component) return g_tracked[i].hash;
     }
     return 0;
+}
+bool ApplyMirroredEnemyTargetForAttack(std::uint32_t hash) {
+    if (!TrackingIsCurrent()) return false;
+    const int index = FindTracked(hash);
+    if (index < 0) return false;
+    return ApplyMirroredTarget(g_tracked[index], g_tracked[index].host_target_flags);
 }
 
 int GetEnemyRows(EnemyRow* out, int max_out) {
@@ -587,10 +843,12 @@ void TickEnemies() {
     // off an empty table meant a level with no fighting characters in it -- a
     // hub, a menu -- ran a full actor enumeration every single frame forever.
     static DWORD last_refresh = 0;
-    if (world_changed || puppet != last_puppet || now - last_refresh > 2000) {
+    if (world_changed || puppet != last_puppet || now - last_refresh > 2000 ||
+        (g_refresh_requested && now - last_refresh > 250)) {
         last_refresh = now;
         last_puppet = puppet;
         RefreshTracked(player, puppet);
+        g_refresh_requested = false;
 
         // The whole pairing scheme rests on both machines deriving the same id
         // for the same enemy, and the only way to check that is to compare the
@@ -604,7 +862,20 @@ void TickEnemies() {
         }
     }
 
-    if (wants_roster) DumpRoster();
+    if (wants_roster) {
+        DumpRoster();
+        DumpEnemyTargets();
+    }
+
+    // Also on a slow timer while a second player exists, so the answer shows up
+    // in the log without anyone having to remember to press a key mid-fight.
+    if (GetPuppet()) {
+        static DWORD last_targets = 0;
+        if (now - last_targets > 5000) {
+            last_targets = now;
+            DumpEnemyTargets();
+        }
+    }
 
     // Distances and liveness are display-only, so they refresh at the rate a
     // human can read rather than the rate the game runs at -- and they refresh

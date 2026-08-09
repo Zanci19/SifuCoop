@@ -94,6 +94,13 @@ bool StopBrain(ue::UObject* actor);
 // has not -- a teleport alone leaves a pooled enemy invisible and intangible.
 void SetActorPresent(ue::UObject* actor, bool present);
 
+// Sends a desired world-space velocity through the character movement component.
+// This is native engine steering (not a transform write), so movement, collision
+// and locomotion animation stay on the normal Sifu path. A true result means the
+// request was dispatched; callers that need recovery still watch displacement.
+bool RequestDirectMove(ue::UObject* actor, const ue::FVector& desired_velocity,
+                       bool force_max_speed = false);
+
 // Hard reposition, for corrections too large to walk off.
 bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
                    const ue::FRotator& rotation);
@@ -109,6 +116,17 @@ bool IsPooled(const ue::FVector& location);
 // identical on both machines, so this is how an enemy is addressed on the wire.
 std::uint32_t HashName(const char* text);
 bool LeafName(ue::UObject* object, char* out, int out_size);
+
+// Strips a trailing UE4 runtime instance number (`Base_2147475019`) off a leaf
+// name in place, returning true and the number when one was present. That
+// number is allocated by a per-process counter, so it is different on every
+// machine -- hashing it made runtime-spawned enemies unpairable across a real
+// two-machine session. See the comment in actors.cpp.
+bool SplitRuntimeSuffix(char* name, std::uint32_t* number_out);
+
+// Hash for a name that carried a runtime suffix: the stripped name plus the
+// enemy's spawn ordinal within its group, which is stable on both machines.
+std::uint32_t HashNameWithOrdinal(const char* text, int ordinal);
 std::uint32_t ActorHash(ue::UObject* actor);
 
 }  // namespace sifucoop::game

@@ -26,6 +26,12 @@ enum class Mode : int {
 struct Config {
     Mode mode = Mode::Coop;
 
+    // Uses Sifu's shipped UE4 IP listen-server path (UIpNetDriver) instead of
+    // the legacy custom UDP mirror. It starts with no synthetic local player,
+    // so the engine owns player possession, combat orders, AI and replication.
+    // It is opt-in until verified live on both supported store builds.
+    bool native_network = false;
+
     // Phase A -- enemies exist and agree on both screens.
     bool sync_enemies = true;         // drive client enemies from the host
     bool suppress_client_ai = true;   // StopLogic on the client's copies
@@ -60,6 +66,43 @@ struct Config {
     // while standing next to it, and watch whether your health drops.
     bool friendly_relationship = false;
 
+    // EXPERIMENTAL, default off. Represent the remote player with a REAL second
+    // player created by the engine (UGameplayStatics::CreatePlayer) instead of a
+    // clone we puppet around.
+    //
+    // The puppet is not a player as far as Sifu is concerned, which is the root
+    // of three separate complaints at once: enemies only ever fight the host,
+    // the joining player's hits register erratically, and the remote character
+    // cannot perform its own moves. A real PlayerController with a game-mode
+    // spawned pawn is a genuine target, has ordinary hitboxes, and owns its
+    // moveset. Sifu ships the whole path -- a community split-screen mod uses
+    // the same call -- but whether its game mode will hand out a second player
+    // is unknown until it is asked.
+    bool real_second_player = true;
+
+    // Whether to force the viewport out of splitscreen when the second player is
+    // created. On paper this is what we want -- the other player is on another
+    // machine, so half a screen showing their camera is wasted. In practice it
+    // is also a prime suspect for the camera freezing on the level's start view
+    // when a second player joins, so it is a switch rather than a decision.
+    bool second_player_disable_splitscreen = true;
+
+    // The second player is a REAL local player, so Sifu builds it a HUD -- and
+    // with splitscreen force-disabled that HUD is drawn into the same
+    // full-screen viewport as yours. Since the mod also mirrors the peer's real
+    // health onto that body, the result is the remote player's life bar sitting
+    // on your screen looking like yours. Suppressing the second player's HUD is
+    // the fix; it is a switch because it is done by declining Sifu's own
+    // BPF_SetHUD call for that controller, and a build that does not expose the
+    // symbol simply keeps the old behaviour.
+    bool hide_second_player_hud = true;
+
+    // Never hand the engine a second player while the local player is sitting
+    // in a menu, the hideout level picker, or any other non-gameplay world.
+    // Registering a second local player there is indistinguishable, to Sifu,
+    // from someone pressing Start on a second pad.
+    bool second_player_in_gameplay_only = true;
+
     // Mirror the peer''s montage onto their puppet as a pure visual. Sifu drives
     // combat through Orders and barely uses montages, so this mostly carries
     // dodges and traversal -- cheap, additive, and off nothing when idle.
@@ -69,6 +112,8 @@ struct Config {
     bool report_damage = true;        // client tells the host what it hit
     bool mirror_peer_vitals = true;   // the puppet shows the peer's real health
 
+    bool mirror_hit_reactions = false;
+
     // Phase D -- run state, informational by default.
     bool sync_run_state = true;       // exchange age / room-clear / held weapon
     bool fix_room_clear = false;      // nudge the local room-clear % to the host's
@@ -76,8 +121,33 @@ struct Config {
     // state, so it is off until a player asks for it -- singleplayer behaviour
     // is preserved by default and the toggle is a checkbox away in Tuning.
 
+    // Replay the peer's attacks on their body so they visibly fight, but only
+    // once Sifu's own relationship system has been set to friendly between the
+    // two players AND that value has been read back out of the game. Until the
+    // readback agrees, the replay stays off, because a replayed swing is a real
+    // hitbox and an unenforced exemption means the remote player kills their own
+    // co-op partner.
+    //
+    // Be clear about what the readback proves: that Sifu is STORING "these two
+    // are friendly", not that its melee code consults that map. The latter is
+    // still an inference (it is why two grunts of one faction do not hurt each
+    // other) and is what a two-machine session has to confirm. If partners start
+    // damaging each other, set this to 0 -- the remote player then moves but
+    // does not swing, which is the previous, safe behaviour.
+    //
+    // echo_player_attacks above is the manual override and ignores the check.
+    bool remote_player_attacks = false;
+
     // Session flow.
-    bool auto_follow_level = true;    // the joiner follows the host's level
+    bool auto_follow_level = true;    // the host keeps pulling the joiner along
+    // Whether the JOINER acts on a level invite without being asked.
+    //
+    // Default OFF, and this is a behaviour change: it used to travel the instant
+    // an invite arrived, which meant loading a level on the host yanked the
+    // other player out of whatever they were doing with no prompt -- "the game
+    // just starts without me pressing start". The invite is now held, shown in
+    // the overlay, and joined when the joining player says so.
+    bool auto_join_level = false;
     bool adaptive_interp = true;      // size the interpolation buffer from RTT
 
     int interp_delay_ms = 60;         // used when adaptive_interp is off
@@ -109,6 +179,9 @@ struct Stats {
     std::uint32_t packets_received = 0;
     std::uint32_t packets_dropped = 0;   // gaps in the peer's sequence numbers
     std::uint32_t packets_rejected = 0;  // failed authentication -- wrong key, or a stranger
+    // Position updates specifically, so "how often does the peer move" can be
+    // read off the heartbeat instead of inferred from total packet traffic.
+    std::uint32_t snapshots_received = 0;
     std::uint32_t bytes_per_second_in = 0;
     std::uint32_t bytes_per_second_out = 0;
 
@@ -130,6 +203,10 @@ struct Stats {
 Config& Get();
 Stats& GetStats();
 
+// True only when the option was present at process startup. This prevents a
+// live custom-mirror session from switching to the engine path after it has
+// already created its synthetic local player.
+bool NativeNetworkActive();
 // Reads SifuCoop.ini next to the executable. Missing keys keep their defaults,
 // so an ini written by an older build still works.
 void Load();

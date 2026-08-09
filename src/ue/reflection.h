@@ -2,10 +2,6 @@
 
 #include <cstdint>
 
-// Minimal mirrors of UE 4.26 types. Only layouts that are ABI-stable and
-// verified against the shipped build appear here -- everything else goes
-// through the reflection layer instead of a hand-written struct.
-
 namespace sifucoop::ue {
 
 struct FVector {
@@ -16,13 +12,11 @@ struct FRotator {
     float Pitch = 0.f, Yaw = 0.f, Roll = 0.f;
 };
 
-// FName in 4.26 without FNAME_OUTLINE_NUMBER: two int32s.
 struct FName {
     std::int32_t comparison_index = 0;
     std::int32_t number = 0;
 };
 
-// Opaque -- we only ever hold pointers and pass them back to the game.
 struct UObject;
 struct UFunction;
 
@@ -59,15 +53,8 @@ bool ReadAnimState(UObject* actor, AnimState* out);
 // Plays `montage` on `actor` and seeks it to `position`.
 bool ApplyAnimState(UObject* actor, const AnimState& state);
 
-// The UAnimInstance driving an actor's skeletal mesh, or null.
+// The UAnimInstance driving an actor's skeletal mesh, or null
 UObject* GetAnimInstance(UObject* actor);
-
-// --- Cross-machine object identity ----------------------------------------
-//
-// Object pointers are process-local, so they cannot be sent to a peer. Both
-// peers run the identical build and load identical assets, so an object's path
-// name ("/Game/.../DA_Attack_Light_01.DA_Attack_Light_01") is a stable
-// identifier on both sides. These two calls are the bridge.
 
 // Writes `object`'s full path name into `out` as UTF-8. False if unavailable.
 bool GetObjectPathName(UObject* object, char* out, int out_size);
@@ -75,17 +62,14 @@ bool GetObjectPathName(UObject* object, char* out, int out_size);
 // Resolves a path name produced by GetObjectPathName back to a live object.
 UObject* FindObjectByPath(const wchar_t* path_name);
 
-// --- Level travel ----------------------------------------------------------
-
-// Package path of the level currently loaded, e.g.
-// "/Game/Maps/Hideout3/Hideout_3_Main". False when there is no world yet.
-// Read at runtime rather than from a hardcoded list -- map names live inside
-// the encrypted pak, and this works for levels we have never seen.
+// Package path of the level currently loaded
 bool GetCurrentLevelPath(char* out, int out_size);
 
-// Travels to `level_path`. This is how the joining player is pulled into the
-// host's level; the host reaches theirs through Sifu's own menus so their game
-// state is set up normally.
 bool OpenLevel(const char* level_path);
+
+// args to lvl
+bool OpenLevelWithOptions(const char* level_path, const char* options);
+
+bool ExecuteConsoleCommand(const char* command, UObject* specific_player = nullptr);
 
 }  // namespace sifucoop::ue

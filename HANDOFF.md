@@ -159,10 +159,15 @@ the PDB). Requires WinLibs g++ (MinGW UCRT) and Python 3. Compiles warning-clean
 
 ## 5. CURRENT STATE (as of this handoff — important, partially mid-stream)
 
-- **Protocol is v7. The build is clean (no warnings) and passes crypto vectors.**
-- **The just-built `dsound.dll` is v7; the DEPLOYED dll in the game folder is still v6 (older).**
-  Redeploy is needed before testing. Both machines must run the SAME protocol version, and the
-  `testclient.exe` must be rebuilt from the same source (build.ps1 does this).
+- **Protocol is v9** (v8 → v9 added `kEnemyDead`; see §7b.2). The build is clean (no
+  warnings) and passes crypto vectors, and the v9 dll IS deployed to the Epic game folder.
+  **Both machines must be updated together** — a v8 peer and a v9 peer will refuse to talk
+  and log "peer speaks protocol vN". `testclient.exe` is rebuilt from the same source by
+  build.ps1.
+- **The `steam` build definition is one offset short of `epic` (75 vs 76):** it predates
+  `AFightingPlayerController_BPF_SetHUD`, so on a Steam machine the second player's HUD
+  suppression degrades to a logged no-op until `build.ps1` is re-run there. Nothing else
+  is affected.
 - **`sync_montages` (default ON):** cosmetic animation mirroring — captures the local player's
   active `UAnimMontage` on change, sends its object path, and plays it on the peer's puppet as a
   PURE VISUAL (no hitbox). **Caveat discovered:** Sifu drives combat through "Orders", NOT
@@ -219,6 +224,83 @@ the PDB). Requires WinLibs g++ (MinGW UCRT) and Python 3. Compiles warning-clean
    all others straight through. (Note: this crash occurred once, at startup, right after
    force-killing the previous instance — driver state was likely also disturbed. The fix
    addresses a real latent bug with the right signature but was not reproduced/confirmed fixed.)
+
+---
+
+## 7b. THE 2026-08-08 PASS — five reported defects, what was changed, what is still unproven
+
+All five came from a two-machine session. Every change below is **implemented and
+compiles warning-clean; none of it has been seen running.** The diagnosis for each is
+stated so the next session can tell "the fix did not work" from "the diagnosis was wrong".
+
+1. **"Life from the client appears as mine."** Diagnosis: the second player is a real
+   local player, so Sifu builds it a real HUD, and with splitscreen force-disabled that
+   HUD draws into the *same* full-screen viewport as player one's — while the mod mirrors
+   the peer's real health onto that body. Fix: hook `AFightingPlayerController::BPF_SetHUD`
+   (new offset) and decline it for the second controller, taking the widget back out of
+   the viewport. Toggle `hide_second_player_hud`. Two independent guards were added for
+   the *other* possible cause — Sifu's game mode handing the second player player one's
+   own character, which it is already known to do at creation and can plausibly redo on
+   respawn/travel: `MaintainSecondPlayer` now detects and repairs a re-theft (after a
+   1 s confirmation window, so an ordinary respawn is not "repaired"), and `ApplyPeerVitals`
+   refuses any body controller 0 is possessing.
+2. **"Cannot hit enemies the other player has touched."** Diagnosis, and this one is
+   solid: `kEnemyDown` conflated *knockdown* with *death*. The joiner forced its copy
+   through `InternalSetDownState(Down, force)` on every host knockdown and back through
+   `(None, force)` on every recovery — and a body walked in and out of that state machine
+   from outside comes back upright but no longer a valid hit target. Fix: new `kEnemyDead`
+   wire flag; only death drives the local down path, knockdown replicates as position
+   only. Two supporting fixes: presence (visibility + collision) is now tracked per enemy
+   and repaired whenever it disagrees, instead of only being restored on the first host
+   state; and the "left the host's fight" retirement now needs the body to be absent for
+   1.5 s, so one dropped sweep no longer executes a live enemy.
+3. **"The game starts when I load the level without pressing start."** Two causes
+   addressed. The joiner used to call `OpenLevel` the instant a `LevelSync` arrived —
+   `auto_follow_level` was only ever consulted on the *host*. Invites are now held and
+   offered ("Join them" in F1 → Play); `auto_join_level` (default **0**) restores the old
+   behaviour. Separately, a second local player is no longer registered outside a playable
+   level (`second_player_in_gameplay_only`), because asking the engine for one in a menu
+   is indistinguishable from a second pad pressing Start.
+4. **"The peer's position updates about once a second."** Diagnosis: the clock offset was
+   the minimum of (arrival − sent) over the *whole session*, corrected upward at 0.2 ms/s.
+   Packets arrive in bursts; within a burst the newest packet yields the smallest observed
+   value of the session, so the estimate latched onto it and every sample's timeline
+   position was biased older by roughly the burst span. The render point then sat past the
+   newest sample almost always, the interpolator was starved, and the starved branch
+   *repeated its last output* — a character standing still, moving only when a burst
+   happened to bracket the render point. Fixes: the offset is now a minimum over a rolling
+   2 s window (a burst is forgotten in one window instead of held for the session), and
+   starvation on the new side now dead-reckons from the newest sample along its reported
+   velocity (capped at 200 ms) instead of freezing. **The heartbeat now prints `peerpos=N/s`**
+   — snapshots only, separate from total `rx` — so the next session can settle this by
+   reading one number instead of reasoning about it. If `peerpos` is near `snapshot_hz` and
+   the character still stands still, the fault is in the drive, not the transport.
+5. **"Animations do not play — neither the peer's nor the enemies'."** Two separate causes.
+   (a) Every remote animation is rebuilt on a locally captured `FDelayedActionAttack`, and
+   that template could only be captured from the *local player's own* attack — so the
+   joining player had to throw a punch before any enemy would visibly swing, and the
+   template is discarded on every respawn and level change. It is now captured from any
+   local character (enemies swing constantly), with the player's still preferred.
+   (b) `PumpRemoteOrders` *dropped* an echoed enemy attack whenever the host reported no
+   target for it — and `BPF_GetTargetForAction` answers "none" for whole rooms in the live
+   log, so enemy attacks essentially never played. A missing target now means "leave the
+   local lock alone and play it anyway" rather than "discard".
+   For the remote *player*: `remote_player_attacks` (default on) replays their swings, but
+   only after the friendly relationship has been set **and read back out of the game**.
+   Be clear what that proves — that Sifu is *storing* "these two are friendly", not that
+   its melee code consults that map. If partners start damaging each other, set
+   `remote_player_attacks=0` and they will move but not swing, which is the old behaviour.
+
+**Also added:** "Teleport to partner" (F1 → Play, only when both report the same level) —
+the play-testers' "wait for me at the boss" request, generalised so it needs no per-boss
+scripting. And `sync_montages` is finally read from and written to the ini; it was
+declared, documented and switchable but never actually loaded.
+
+**What to check first, in this order:** `peerpos=N/s` in the heartbeat; whether an enemy
+the other player knocked down is still hittable afterwards; whether enemy swings animate
+on the joining screen from the first fight; whether the log line
+`puppet: friendly relationship ... readback` says CONFIRMED; and whether loading a level on
+the host now leaves the other player where they were.
 
 ---
 

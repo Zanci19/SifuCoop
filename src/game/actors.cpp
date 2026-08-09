@@ -26,6 +26,8 @@ using GetFactionFn = int(__fastcall*)(const ue::UObject* actor);
 using SetFactionFn = void(__fastcall*)(ue::UObject* actor, int faction);
 using SetInvincibilityFn = void(__fastcall*)(ue::UObject* actor, bool invincible);
 using BrainClassFn = void*(__fastcall*)();
+using GetMovementComponentFn = ue::UObject*(__fastcall*)(const ue::UObject* actor);
+using RequestDirectMoveFn = void(__fastcall*)(ue::UObject* component, const ue::FVector& velocity, bool force_max_speed);
 
 GetHealthComponentFn g_get_health = nullptr;
 GetAttackComponentFn g_get_attack = nullptr;
@@ -39,6 +41,8 @@ GetFactionFn g_get_faction = nullptr;
 SetFactionFn g_set_faction = nullptr;
 SetInvincibilityFn g_set_invincibility = nullptr;
 BrainClassFn g_brain_class = nullptr;
+GetMovementComponentFn g_get_movement_component = nullptr;
+RequestDirectMoveFn g_request_direct_move = nullptr;
 
 bool g_ready = false;
 
@@ -83,6 +87,11 @@ void InitActors(std::uintptr_t base) {
     g_set_invincibility = reinterpret_cast<SetInvincibilityFn>(
         base + offsets::AFightingCharacter_BPF_SetInvincibility);
     g_brain_class = reinterpret_cast<BrainClassFn>(base + offsets::UBrainComponent_StaticClass);
+    g_get_movement_component = offsets::ACharacter_GetMovementComponent
+                                   ? reinterpret_cast<GetMovementComponentFn>(base + offsets::ACharacter_GetMovementComponent)
+                                   : nullptr;
+    g_request_direct_move = offsets::UCharacterMovementComponent_RequestDirectMove
+                                 ? reinterpret_cast<RequestDirectMoveFn>(base + offsets::UCharacterMovementComponent_RequestDirectMove) : nullptr;
 
     // Only the offsets that would silently corrupt a read are treated as
     // mandatory; the rest degrade to "that feature is off".
@@ -154,8 +163,7 @@ bool IsDead(const Fighter& fighter) {
 
 void SetDown(const Fighter& fighter, bool down) {
     if (!fighter.health) return;
-    // The flag alone only records the fact; InternalSetDownState is what makes
-    // the character actually fall over. Learned when the puppet refused to die.
+    // REMEMBER: The flag alone only records the fact, InternalSetDownState is what makes the character actually fall over, learned when the puppet refused to die (SloClap what the fuck?)
     if (g_set_is_down) g_set_is_down(fighter.health, down);
     if (g_set_down_state) {
         bool scratch = false;
@@ -203,8 +211,7 @@ bool StopBrain(ue::UObject* actor) {
         return false;
     }
 
-    // FString Reason, by value. Zeroed is a valid empty string and its
-    // destructor on a null pointer is a no-op.
+    // FString Reason by value, zeroed is a valid empty string and its destructor on a null pointer is a no-op
     struct FStringParam {
         void* data;
         std::int32_t num;
@@ -229,10 +236,18 @@ void SetActorPresent(ue::UObject* actor, bool present) {
     ue::CallFunction(actor, L"SetActorEnableCollision", &collision);
 }
 
+bool RequestDirectMove(ue::UObject* actor, const ue::FVector& desired_velocity,
+                       bool force_max_speed) {
+    if (!actor || !g_get_movement_component || !g_request_direct_move) return false;
+    ue::UObject* component = g_get_movement_component(actor);
+    if (!component) return false;
+    g_request_direct_move(component, desired_velocity, force_max_speed);
+    return true;  // dispatched; a caller may still watch actual displacement
+}
+
 bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
                    const ue::FRotator& rotation) {
-    // K2_TeleportTo's parameter block is just (FVector, FRotator, bool) -- no
-    // FHitResult whose layout would have to be guessed.
+    // K2_TeleportTo's parameter block is just (FVector, FRotator, bool), no FHitResult
     struct Params {
         ue::FVector DestLocation;
         ue::FRotator DestRotation;
@@ -240,11 +255,6 @@ bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
     } params = {};
     params.DestLocation = location;
     params.DestRotation = rotation;
-    // Two different questions, and returning the wrong one hid a failure: the
-    // call succeeding means the UFunction was found, while ReturnValue is
-    // whether the actor actually moved. K2_TeleportTo refuses when the
-    // destination would not fit, so a caller that only checked the former
-    // believed it had repositioned something that had not budged.
     if (!ue::CallFunction(actor, L"K2_TeleportTo", &params)) return false;
     return params.ReturnValue;
 }
@@ -275,6 +285,51 @@ std::uint32_t ActorHash(ue::UObject* actor) {
     char name[128] = {};
     if (!LeafName(actor, name, sizeof(name))) return 0;
     return HashName(name);
+}
+
+// Some more AI description!!11!
+
+/* UE4 names an actor spawned at runtime `Base_<number>`, where the number comes
+from a per-process counter that walks *down* from MAX_int32. It therefore
+differs on every machine and every launch: the same grunt in the same fight
+was `000_AISpawner_Group015_Grunt_Character_2147475019` on one machine and
+`..._2147473188` on the other.
+
+This is what broke enemy pairing between two real machines. Enemies placed in
+the level's pool are named `..._C_0` and match perfectly, which is why a
+pooled roster of 62 enemies tested clean across launches -- but the enemies
+that actually fight a room are spawned by an AISpawner at runtime, and every
+one of those hashed differently on each side. The receiving machine found no
+enemy for any id the host sent (driven=0, unmatched=every active enemy).
+
+Anything at or above this floor is a runtime counter value rather than a real
+instance index; `..._C_0` and `..._Group015` stay untouched. */
+
+constexpr std::uint32_t kRuntimeNameFloor = 2000000000u;
+
+bool SplitRuntimeSuffix(char* name, std::uint32_t* number_out) {
+    if (!name || !number_out) return false;
+    char* underscore = strrchr(name, '_');
+    if (!underscore || !underscore[1]) return false;
+
+    unsigned long long value = 0;
+    for (const char* p = underscore + 1; *p; ++p) {
+        if (*p < '0' || *p > '9') return false;   // not a pure number: leave it alone
+        value = value * 10 + static_cast<unsigned long long>(*p - '0');
+        if (value > 0xFFFFFFFFull) return false;  // absurd; treat as part of the name
+    }
+    if (value < kRuntimeNameFloor) return false;
+
+    *number_out = static_cast<std::uint32_t>(value);
+    *underscore = '\0';
+    return true;
+}
+
+std::uint32_t HashNameWithOrdinal(const char* text, int ordinal) {
+    std::uint32_t hash = HashName(text);
+    hash ^= static_cast<std::uint32_t>(ordinal) & 0xFFu;
+    hash *= 16777619u;
+    return hash;
 }
 
 }  // namespace sifucoop::game

@@ -1,8 +1,6 @@
 #pragma once
 
-// Deliberately dependency-free and crash-tolerant: this log is often the only
-// evidence available when the game dies during startup, so every line is
-// flushed immediately rather than buffered.
+// on game crash, this will write the log file
 
 namespace sifucoop::log {
 
