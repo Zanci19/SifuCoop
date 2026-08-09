@@ -355,6 +355,17 @@ bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
 
     // Trust nothing: confirm it actually landed. Anything that still cannot be
     // moved is a genuinely stuck body and worth knowing about.
+    //
+    // Sampled rather than checked every time. A refusal can affect the puppet
+    // and every driven enemy on the same frame, and the confirmation is another
+    // ProcessEvent each -- which is exactly the per-enemy-per-frame reflection
+    // cost this file exists to avoid. Four times a second is plenty to notice a
+    // body that is truly stuck.
+    static DWORD last_verify_ms = 0;
+    const DWORD verify_now = GetTickCount();
+    if (verify_now - last_verify_ms < 250) return true;
+    last_verify_ms = verify_now;
+
     ue::FVector now = {};
     if (!ue::GetActorLocation(actor, &now)) return false;
     const float dx = now.X - location.X;

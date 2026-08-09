@@ -45,7 +45,16 @@ DWORD g_last_hello_ms = 0;
 // back smoothly is what hides jitter; rendering the newest packet immediately
 // would snap on every late or reordered datagram.
 constexpr int kBufferSize = 64;
-constexpr DWORD kTimeoutMs = 5000;
+
+// Raised from 5000. The socket is pumped from the game thread, so a peer whose
+// game thread is blocked cannot send however healthy it is -- and Sifu blocks
+// it for 5.7--6.7 s on a measured level load. There was already an exemption for
+// a level the HOST invited the peer to, but a peer that loads, dies, respawns or
+// travels of its own accord got no such grace, and today's log has seven
+// disconnects at almost exactly 5.00 s, each one right after a load began. The
+// cost of the larger value is only that a genuinely dead connection takes this
+// much longer to notice, which nobody is waiting on.
+constexpr DWORD kTimeoutMs = 12000;
 
 // A gap between ticks longer than this means the game thread was blocked rather
 // than that time merely passed. Well above any frame, well below a level load.
