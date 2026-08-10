@@ -234,6 +234,27 @@ void DrawLobbyTab(const MenuStatus& status) {
     }
     ImGui::EndDisabled();
 
+    // The engine's own networking, if it has been enabled in the ini. These two
+    // buttons are the whole native experiment: everything needed for them is in
+    // the shipped binary, and until now there was no way to press it -- the code
+    // existed and nothing called it.
+    if (coop::Get().native_network) {
+        ImGui::Separator();
+        ImGui::TextUnformatted("UE4 listen server (experimental)");
+        ImGui::TextDisabled("One simulation for both machines. Host first, then join.");
+        if (ImGui::Button("Host as listen server", ImVec2(180, 0))) {
+            MenuRequests r;
+            r.native_host = true;
+            PostRequests(r);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Join listen server", ImVec2(180, 0))) {
+            MenuRequests r;
+            r.native_join = true;
+            PostRequests(r);
+        }
+    }
+
     // A standing invite from the host. It is deliberately an offer rather than
     // something that just happens: the host loading a level used to drag the
     // other player out of whatever they were doing without a prompt.

@@ -18,6 +18,7 @@
 #include "actors.h"
 #include "coop.h"
 #include "enemies.h"
+#include "native_net.h"
 #include "orders.h"
 #include "player2.h"
 
@@ -1343,6 +1344,23 @@ void UpdateLobby(ue::UObject* player) {
         if (requests.despawn_puppet) DespawnPuppet();
         if (requests.invite_peer) InvitePeerHere(current_level, have_level);
         if (requests.accept_invite) AcceptInvite();
+        // The engine's own networking. Both of these were written, documented
+        // and unreachable: nothing in the whole codebase called them, so the
+        // experiment could not be run however the ini was set.
+        if (requests.native_host || requests.native_join) {
+            // Read straight from the ini rather than adding an accessor to the
+            // UDP session: the two transports share nothing but these numbers.
+            char ini[MAX_PATH] = {};
+            coop::IniPath(ini, sizeof(ini));
+            char address[128] = {};
+            GetPrivateProfileStringA("net", "host", "", address, sizeof(address), ini);
+            const int port = GetPrivateProfileIntA("net", "port", 7777, ini);
+            if (requests.native_host) {
+                native_net::HostCurrentLevel(port);
+            } else {
+                native_net::JoinHost(address, port);
+            }
+        }
         if (requests.teleport_to_peer) TeleportToPeer(current_level, have_level);
         if (requests.travel && requests.level[0]) {
             g_coop_started = true;

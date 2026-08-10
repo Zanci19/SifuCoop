@@ -52,6 +52,11 @@ struct MenuRequests {
     bool restart_network = false; // restart the configured UDP session
     bool disconnect_network = false; // leave networking offline
     bool log_roster = false;      // dump every tracked character to the log
+    // Start / join a real UE4 listen server. Separate from the UDP buttons
+    // above: this asks the ENGINE to network the game, which is the only way
+    // both machines can run one simulation instead of two that agree closely.
+    bool native_host = false;
+    bool native_join = false;
 };
 
 // Game thread: takes and clears whatever the menu asked for. Returns false when

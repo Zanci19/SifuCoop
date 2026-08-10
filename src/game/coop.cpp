@@ -153,7 +153,10 @@ void Save() {
     IniPath(ini, sizeof(ini));
     if (!ini[0]) return;
 
-    WriteBool("native_network", false, ini);
+    // Was hardcoded false, so pressing "Save settings" -- or anything else that
+    // writes the ini back -- silently reset the setting the user had just turned
+    // on. Persist what is actually configured.
+    WriteBool("native_network", g_config.native_network, ini);
     WriteBool("versus", g_config.mode == Mode::Versus, ini);
     WriteBool("sync_enemies", g_config.sync_enemies, ini);
     WriteBool("suppress_client_ai", g_config.suppress_client_ai, ini);
