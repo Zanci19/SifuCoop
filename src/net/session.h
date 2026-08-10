@@ -141,6 +141,25 @@ struct DamageReport {
 // recovery mechanism, so this can be called on a timer and forgotten about.
 void SendEnemyDamage(const DamageReport* entries, int count);
 
+// AUTHORITY FOLLOWS THE FIGHT. The joining machine publishes the enemies that
+// are fighting ITS player -- the ones running their own behaviour tree there --
+// and the host displays those rather than its own drifting simulation of them.
+// Health and death stay host-authoritative regardless; this is only about where
+// a body is standing.
+struct OwnedEnemy {
+    std::uint32_t name_hash = 0;
+    float x = 0.f, y = 0.f, z = 0.f;
+    float yaw = 0.f;
+    float velocity_x = 0.f, velocity_y = 0.f, velocity_z = 0.f;
+};
+
+void SendOwnedEnemies(const OwnedEnemy* entries, int count);
+
+// False when the peer does not own this enemy, or has stopped saying so. The
+// timeout matters: without it a body would freeze wherever the last packet left
+// it when the peer died, disconnected or simply stopped fighting.
+bool GetOwnedEnemy(std::uint32_t name_hash, OwnedEnemy* out);
+
 // Host: the peer's latest totals. Returns the count written to `out`.
 int GetEnemyDamage(DamageReport* out, int max_out);
 

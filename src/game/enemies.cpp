@@ -1048,6 +1048,29 @@ void PublishEnemies() {
                 if (speed > 3000.f) state.velocity_x = state.velocity_y = state.velocity_z = 0.f;
             }
         }
+        // If the PEER owns this enemy, its version wins on this screen too.
+        //
+        // The joining machine simulates the enemies fighting it, because that is
+        // the only place they can be given a real fight. Without this the host
+        // kept its own drifting copy and the two players were watching different
+        // enemies in different places. Ownership is only about position: the
+        // host still decides health and death, and it publishes what it sees
+        // here so the joiner's own copy keeps its authority over nothing but the
+        // transform.
+        net::OwnedEnemy owned = {};
+        if (net::GetOwnedEnemy(entry.wire_hash ? entry.wire_hash : entry.hash, &owned)) {
+            const ue::FVector target = {owned.x, owned.y, owned.z};
+            const ue::FRotator facing = {0.f, owned.yaw, 0.f};
+            const ue::FVector velocity = {owned.velocity_x, owned.velocity_y,
+                                          owned.velocity_z};
+            DriveActorTo(entry.actor, target, facing, velocity);
+            location = target;  // publish where it actually is, not where we had it
+            state.x = target.X;
+            state.y = target.Y;
+            state.z = target.Z;
+            state.yaw = owned.yaw;
+        }
+
         entry.last_host_location = location;
         entry.last_host_motion_ms = now;
         entry.have_host_motion = true;
@@ -1122,6 +1145,42 @@ void AccumulateLocalDamage(Tracked& entry, const Fighter& fighter) {
         SC_LOG("enemies: dealt %.1f to %s locally (total %.1f)", drop, entry.name,
                entry.reported_total);
     }
+}
+
+// The other half of authority following the fight.
+//
+// Enemies running their own behaviour tree on THIS machine are the ones fighting
+// this player, and their position here is the real one -- the host is simulating
+// a copy that drifts. Publish them so the host can display ours instead of its
+// own. Health and death are untouched by this and stay host-authoritative; all
+// this decides is where a body is standing.
+void SendOwnedEnemies() {
+    net::OwnedEnemy owned[net::kMaxOwnedEnemiesPerPacket];
+    int count = 0;
+    for (int i = 0; i < g_tracked_count && count < net::kMaxOwnedEnemiesPerPacket; ++i) {
+        const Tracked& entry = g_tracked[i];
+        if (!entry.local_brain || !entry.active || !entry.actor) continue;
+
+        ue::FVector where = {};
+        ue::FRotator facing = {};
+        if (!ue::GetActorLocation(entry.actor, &where)) continue;
+        ue::GetActorRotation(entry.actor, &facing);
+        ue::FVector velocity = {};
+        GetActorVelocity(entry.actor, &velocity);
+
+        net::OwnedEnemy& out = owned[count++];
+        out.name_hash = entry.wire_hash ? entry.wire_hash : entry.hash;
+        out.x = where.X;
+        out.y = where.Y;
+        out.z = where.Z;
+        out.yaw = facing.Yaw;
+        out.velocity_x = velocity.X;
+        out.velocity_y = velocity.Y;
+        out.velocity_z = velocity.Z;
+    }
+    // Sent even when empty is NOT wanted here: the host's staleness timeout is
+    // what releases ownership, and an empty packet would keep refreshing it.
+    if (count > 0) net::SendOwnedEnemies(owned, count);
 }
 
 void SendDamageReports() {
@@ -1863,6 +1922,7 @@ void TickEnemies() {
         if (coop::Get().report_damage && now - last_report >= 100) {
             last_report = now;
             SendDamageReports();
+            SendOwnedEnemies();
         }
     }
 }

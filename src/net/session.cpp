@@ -578,6 +578,29 @@ PendingAnimation g_animation_queue[kAnimationQueueSize] = {};
 int g_animation_read = 0;
 int g_animation_write = 0;
 
+// Enemies the PEER owns, kept exactly as received.
+//
+// The host displays these rather than its own simulation of them, because the
+// machine fighting an enemy is the one whose version is real. Replaced wholesale
+// per packet, like the damage table, so a stale entry cannot outlive the fight
+// that produced it.
+OwnedEnemyEntry g_owned_enemies[kMaxOwnedEnemiesPerPacket];
+int g_owned_enemy_count = 0;
+DWORD g_owned_enemies_at = 0;
+
+void HandleOwnedEnemies(const OwnedEnemyPacket& packet) {
+    const int count = static_cast<int>(packet.count);
+    if (count < 0 || count > kMaxOwnedEnemiesPerPacket) return;
+    for (int i = 0; i < count; ++i) {
+        const OwnedEnemyEntry& in = packet.entries[i];
+        if (!IsFiniteVector(in.x, in.y, in.z) || !IsFinite(in.yaw)) return;
+        if (!IsFiniteVector(in.velocity_x, in.velocity_y, in.velocity_z)) return;
+    }
+    for (int i = 0; i < count; ++i) g_owned_enemies[i] = packet.entries[i];
+    g_owned_enemy_count = count;
+    g_owned_enemies_at = NowMs();
+}
+
 void ResetLevelSyncState();
 void ResetPeerState() {
     g_animation_read = g_animation_write = 0;
@@ -605,6 +628,7 @@ void ResetPeerState() {
     g_enemy_sweep_seen = false;
     g_damage_count = 0;
     g_damage_sequence = 0;
+    g_owned_enemy_count = 0;
     g_rtt_ms = -1;
     g_rtt_jitter_ms = 0;
 }
@@ -1114,6 +1138,16 @@ void PumpReceive() {
                     }
                 }
                 break;
+            case PacketType::OwnedEnemy:
+                if (fits(offsetof(OwnedEnemyPacket, entries))) {
+                    OwnedEnemyPacket owned = {};
+                    memcpy(&owned, buffer, received);
+                    if (owned.count <= kMaxOwnedEnemiesPerPacket &&
+                        received == static_cast<int>(OwnedEnemyPacketSize(owned.count))) {
+                        HandleOwnedEnemies(owned);
+                    }
+                }
+                break;
             case PacketType::Ping:
                 if (fits(sizeof(PingPacket))) {
                     PingPacket ping = {};
@@ -1501,6 +1535,51 @@ void ResetEnemyReplication() {
     g_enemy_sweep_seen = false;
     g_damage_count = 0;
     g_damage_sequence = 0;
+    g_owned_enemy_count = 0;
+}
+
+void SendOwnedEnemies(const OwnedEnemy* entries, int count) {
+    if (!g_connected || !entries || count <= 0) return;
+    if (count > kMaxOwnedEnemiesPerPacket) count = kMaxOwnedEnemiesPerPacket;
+
+    OwnedEnemyPacket packet = {};
+    FillHeader(&packet.header, PacketType::OwnedEnemy);
+    packet.count = static_cast<std::uint32_t>(count);
+    for (int i = 0; i < count; ++i) {
+        OwnedEnemyEntry& out = packet.entries[i];
+        out.name_hash = entries[i].name_hash;
+        out.x = entries[i].x;
+        out.y = entries[i].y;
+        out.z = entries[i].z;
+        out.yaw = entries[i].yaw;
+        out.velocity_x = entries[i].velocity_x;
+        out.velocity_y = entries[i].velocity_y;
+        out.velocity_z = entries[i].velocity_z;
+    }
+    SendPacket(&packet, static_cast<int>(OwnedEnemyPacketSize(packet.count)));
+}
+
+// Stale ownership must expire. If the peer stops publishing an enemy -- it died,
+// the fight ended, the peer disconnected -- the host has to go back to its own
+// simulation rather than freezing the body wherever the last packet left it.
+bool GetOwnedEnemy(std::uint32_t name_hash, OwnedEnemy* out) {
+    if (!out || g_owned_enemy_count <= 0) return false;
+    constexpr DWORD kOwnershipStaleMs = 500;
+    if (NowMs() - g_owned_enemies_at > kOwnershipStaleMs) return false;
+    for (int i = 0; i < g_owned_enemy_count; ++i) {
+        if (g_owned_enemies[i].name_hash != name_hash) continue;
+        const OwnedEnemyEntry& in = g_owned_enemies[i];
+        out->name_hash = in.name_hash;
+        out->x = in.x;
+        out->y = in.y;
+        out->z = in.z;
+        out->yaw = in.yaw;
+        out->velocity_x = in.velocity_x;
+        out->velocity_y = in.velocity_y;
+        out->velocity_z = in.velocity_z;
+        return true;
+    }
+    return false;
 }
 
 void SendEnemyDamage(const DamageReport* entries, int count) {

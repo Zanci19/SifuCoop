@@ -29,7 +29,7 @@ constexpr std::uint32_t kMagic = 0x53434F50;  // 'SCOP'
 // MEANING changes: `sequence` is now per packet type rather than one counter for
 // the whole socket, and a v11 peer's numbering would read as constant loss.
 // Peers refuse to talk across a mismatch rather than misinterpreting each other.
-constexpr std::uint16_t kProtocolVersion = 13;
+constexpr std::uint16_t kProtocolVersion = 14;
 
 // AUTHENTICATION
 //
@@ -102,6 +102,7 @@ enum class PacketType : std::uint16_t {
     Pong = 10,        // reply, echoing the probe's timestamp
     RunState = 11,    // either: age, room-clear progress, held weapon (Phase D)
     MontageState = 12,  // either: "my character is now playing this animation" (cosmetic)
+    OwnedEnemy = 13,    // client: "these enemies are fighting ME, here is where they are"
 };
 
 #pragma pack(push, 1)
@@ -243,6 +244,38 @@ struct EnemyDamagePacket {
     std::uint32_t count = 0;
     DamageEntry entries[kMaxDamagePerPacket];
 };
+
+// AUTHORITY FOLLOWS THE FIGHT.
+//
+// Enemies are host-authoritative, except the ones actually fighting the joining
+// player: those run their own behaviour tree on that machine, because only a
+// player its own director recognises can be allocated an attacker (see
+// peer_fights_locally). That bought a real fight and cost position agreement --
+// the host kept simulating its own copy and the two drifted apart.
+//
+// This is the missing half. Whoever owns an enemy publishes it, and the other
+// side displays what it is told. Health and death stay host-authoritative in
+// both directions, so ownership never changes who decides whether something
+// died; it only decides who says where it is standing.
+struct OwnedEnemyEntry {
+    std::uint32_t name_hash = 0;
+    float x = 0.f, y = 0.f, z = 0.f;
+    float yaw = 0.f;
+    float velocity_x = 0.f, velocity_y = 0.f, velocity_z = 0.f;
+};
+
+constexpr int kMaxOwnedEnemiesPerPacket = 24;
+
+struct OwnedEnemyPacket {
+    PacketHeader header;
+    std::uint32_t count = 0;
+    OwnedEnemyEntry entries[kMaxOwnedEnemiesPerPacket];
+};
+
+constexpr std::size_t OwnedEnemyPacketSize(std::uint32_t count) {
+    return offsetof(OwnedEnemyPacket, entries) +
+           static_cast<std::size_t>(count) * sizeof(OwnedEnemyEntry);
+}
 
 constexpr std::size_t EnemyDamagePacketSize(std::uint32_t count) {
     return offsetof(EnemyDamagePacket, entries) +

@@ -62,6 +62,16 @@ bool g_have_puppet_presentation_velocity = false;
 // Resolved on the game thread in DriveTo and consumed inside the animation
 // update, which may not call reflection. Cleared whenever the puppet changes.
 PresentationTargets g_puppet_presentation_targets;
+// The world those two component pointers were resolved in.
+//
+// They are raw pointers into components that a level change frees, and the
+// animation hook runs on the ENGINE's schedule -- so between the world being
+// torn down and TickPuppet noticing, the hook can fire and hand a freed
+// movement component to SetSpeedState. That is a read through dead memory and
+// it is the crash seen on a Steam restart: the faulting address was inside
+// this dll for the first time. Comparing the world is a single pointer read
+// through GWorld, which is cheap enough to do in the hook.
+ue::UObject* g_puppet_targets_world = nullptr;
 
 // Weak: the puppet can be destroyed by the game (level transition, respawn),
 // so this is validated before use rather than trusted.
@@ -307,8 +317,15 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
         // speed band, blendspace angle, move status and every transition
         // condition itself, from consistent inputs, exactly as it does for a
         // real player.
-        WritePresentationVelocity(g_puppet_presentation_targets,
-                                  g_puppet_presentation_velocity);
+        // Refuse to touch either component if the world has moved on since they
+        // were resolved -- but never skip the engine's own update on the way
+        // out. See g_puppet_targets_world.
+        const bool targets_live = g_puppet_targets_world == ue::GetWorld();
+
+        if (targets_live) {
+            WritePresentationVelocity(g_puppet_presentation_targets,
+                                      g_puppet_presentation_velocity);
+        }
 
         // ...and the locomotion band, at ITS source.
         //
@@ -318,8 +335,10 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
         // graph. It belongs to the movement component, and m_SpeedState below is
         // a copy NativeUpdateAnimation refreshes from there every frame. Writing
         // the copy was writing a mirror; this writes the thing being mirrored.
-        SetMovementSpeedState(g_puppet_presentation_targets.movement,
-                              SpeedStateForSpeed(bytes, speed));
+        if (targets_live) {
+            SetMovementSpeedState(g_puppet_presentation_targets.movement,
+                                  SpeedStateForSpeed(bytes, speed));
+        }
 
         std::memcpy(bytes + kAnimOwnerVelocity, &g_puppet_presentation_velocity,
                     sizeof(g_puppet_presentation_velocity));
@@ -625,6 +644,7 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
         if (resolved_for != target_actor) {
             resolved_for = target_actor;
             g_puppet_presentation_targets = ResolvePresentationTargets(target_actor);
+            g_puppet_targets_world = ue::GetWorld();
         }
         if (!TeleportActor(target_actor, corrected, new_rotation)) ++correction_failed;
         WritePresentationVelocity(g_puppet_presentation_targets, presentation_velocity);
@@ -1681,6 +1701,7 @@ void DespawnPuppet() {
     g_puppet_anim_instance = nullptr;
     g_have_puppet_presentation_velocity = false;
     g_puppet_presentation_targets = {};
+    g_puppet_targets_world = nullptr;
     g_cosmetic_attack_montage_until = 0;
     g_puppet_cinematic_until = 0;
     g_puppet_cinematic_needs_clear = false;
@@ -1725,6 +1746,7 @@ void TickPuppet() {
         g_puppet_anim_instance = nullptr;
         g_have_puppet_presentation_velocity = false;
         g_puppet_presentation_targets = {};
+        g_puppet_targets_world = nullptr;
         g_cosmetic_attack_montage_until = 0;
         g_puppet_cinematic_until = 0;
         g_puppet_cinematic_needs_clear = false;
