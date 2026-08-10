@@ -14,10 +14,6 @@ namespace {
 Config g_config;
 Stats g_stats;
 
-bool g_native_network_at_startup = false;
-// Whether the engine had the IpNetDriver config when it started, as opposed to
-// us having just written it for next time.
-bool g_native_driver_ready = false;
 const char* kSection = "coop";
 
 bool ReadBool(const char* key, bool fallback, const char* ini) {
@@ -34,91 +30,10 @@ void WriteInt(const char* key, int value, const char* ini) {
     WritePrivateProfileStringA(kSection, key, text, ini);
 }
 
-bool CreateDirectoryIfMissing(const char* path) {
-    if (CreateDirectoryA(path, nullptr)) return true;
-    return GetLastError() == ERROR_ALREADY_EXISTS;
-}
-
-// THE reason `open <ip>:<port>` never connects.
-//
-// Sifu's packaged default GameNetDriver is not IpNetDriver -- it routes through
-// EOS/Steam P2P, so an `open` against a plain IPv4 address is taken as a P2P
-// session request and simply times out. No error, no refusal, nothing in the
-// log: the listen server comes up and the client never arrives, which is exactly
-// what the old sessions recorded 136 times over as
-// "authoritative roster has 1 player(s); waiting for joiner".
-//
-// This existed once and was lost when the tree was overwritten, so the
-// experiment was never finished rather than newly broken. The user config is
-// read before this DLL is loaded at all, so writing it takes effect on the NEXT
-// launch -- once, and then it stays.
-void EnsureNativeIpNetDriverConfig() {
-    char local_app_data[MAX_PATH] = {};
-    if (GetEnvironmentVariableA("LOCALAPPDATA", local_app_data,
-                                static_cast<DWORD>(sizeof(local_app_data))) == 0) {
-        SC_LOG("native-net: could not locate LOCALAPPDATA for IP driver config");
-        return;
-    }
-
-    char sifu_dir[MAX_PATH] = {};
-    char saved_dir[MAX_PATH] = {};
-    char config_dir[MAX_PATH] = {};
-    char platform_dir[MAX_PATH] = {};
-    char ini[MAX_PATH] = {};
-    _snprintf(sifu_dir, sizeof(sifu_dir), "%s\\Sifu", local_app_data);
-    _snprintf(saved_dir, sizeof(saved_dir), "%s\\Saved", sifu_dir);
-    _snprintf(config_dir, sizeof(config_dir), "%s\\Config", saved_dir);
-    _snprintf(platform_dir, sizeof(platform_dir), "%s\\WindowsNoEditor", config_dir);
-    _snprintf(ini, sizeof(ini), "%s\\Engine.ini", platform_dir);
-
-    if (!CreateDirectoryIfMissing(sifu_dir) || !CreateDirectoryIfMissing(saved_dir) ||
-        !CreateDirectoryIfMissing(config_dir) || !CreateDirectoryIfMissing(platform_dir)) {
-        SC_LOG("native-net: could not create IP driver config directory (error=%lu)",
-               static_cast<unsigned long>(GetLastError()));
-        return;
-    }
-
-    constexpr const char* kEngineSection = "/Script/Engine.Engine";
-
-    // Was it already there when the engine read its config, or are we writing it
-    // for the first time right now? That is the difference between "you can test
-    // this" and "this cannot possibly work yet", and getting it wrong already
-    // cost one test: the file was written during the very session it was then
-    // tested in, so the engine had read the old config before the file existed
-    // and the world could never have gone into listen mode.
-    char existing[512] = {};
-    GetPrivateProfileStringA(kEngineSection, "+NetDriverDefinitions", "", existing,
-                             sizeof(existing), ini);
-    g_native_driver_ready = strstr(existing, "IpNetDriver") != nullptr;
-
-    const bool cleared = WritePrivateProfileStringA(kEngineSection, "!NetDriverDefinitions",
-                                                    "ClearArray", ini) != FALSE;
-    const bool wrote = WritePrivateProfileStringA(
-        kEngineSection, "+NetDriverDefinitions",
-        "(DefName=\"GameNetDriver\",DriverClassName=\"OnlineSubsystemUtils.IpNetDriver\","
-        "DriverClassNameFallback=\"OnlineSubsystemUtils.IpNetDriver\")",
-        ini) != FALSE;
-    if (cleared && wrote) {
-        if (g_native_driver_ready) {
-            SC_LOG("native-net: UIpNetDriver is ACTIVE for this session -- hosting and "
-                   "joining by IP can be tested now");
-        } else {
-            SC_LOG("native-net: UIpNetDriver written to %s, but this session already read "
-                   "the old config -- RESTART THE GAME ONCE. Testing before that cannot "
-                   "work and will report standalone", ini);
-        }
-    } else {
-        SC_LOG("native-net: could not write UIpNetDriver config (error=%lu)",
-               static_cast<unsigned long>(GetLastError()));
-    }
-}
-
 }  // namespace
 
 Config& Get() { return g_config; }
 Stats& GetStats() { return g_stats; }
-bool NativeNetworkActive() { return g_native_network_at_startup; }
-bool NativeDriverReady() { return g_native_driver_ready; }
 
 void IniPath(char* out, int out_size) {
     if (!out || out_size <= 0) return;
@@ -139,25 +54,6 @@ void Load() {
     g_config.mode = GetPrivateProfileIntA(kSection, "versus", 0, ini) != 0 ? Mode::Versus
                                                                           : Mode::Coop;
     g_config.sync_enemies = ReadBool("sync_enemies", g_config.sync_enemies, ini);
-    // No longer forced off.
-    //
-    // This was hard-disabled with a log line and never revisited, and it is the
-    // only route to what the mirror keeps approximating: one simulation, both
-    // machines identical, enemies fighting both players with Sifu's own code.
-    // The binary has every piece -- UWorld::Listen, UIpNetDriver::InitListen,
-    // AThePlainesGameMode::PostLogin, APlayerController::ClientTravel -- and,
-    // decisively, AFightingCharacter::GetLifetimeReplicatedProps exists, which
-    // means Sifu's characters were built to replicate.
-    //
-    // Still default OFF, because whether the shipped game will actually accept
-    // a login is unproven. Turning it on does not disable the UDP mirror; it
-    // adds the engine path beside it so the two can be compared.
-    g_config.native_network = ReadBool("native_network", false, ini);
-    g_native_network_at_startup = g_config.native_network;
-    if (g_config.native_network) {
-        SC_LOG("coop: native UE4 networking ENABLED -- F1 -> Play to host or join");
-        EnsureNativeIpNetDriverConfig();
-    }
     g_config.suppress_client_ai = ReadBool("suppress_client_ai",
                                            g_config.suppress_client_ai, ini);
     g_config.sync_enemy_vitals = ReadBool("sync_enemy_vitals",
@@ -237,10 +133,6 @@ void Save() {
     IniPath(ini, sizeof(ini));
     if (!ini[0]) return;
 
-    // Was hardcoded false, so pressing "Save settings" -- or anything else that
-    // writes the ini back -- silently reset the setting the user had just turned
-    // on. Persist what is actually configured.
-    WriteBool("native_network", g_config.native_network, ini);
     WriteBool("versus", g_config.mode == Mode::Versus, ini);
     WriteBool("sync_enemies", g_config.sync_enemies, ini);
     WriteBool("suppress_client_ai", g_config.suppress_client_ai, ini);

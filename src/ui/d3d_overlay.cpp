@@ -234,38 +234,6 @@ void DrawLobbyTab(const MenuStatus& status) {
     }
     ImGui::EndDisabled();
 
-    // The engine's own networking, if it has been enabled in the ini. These two
-    // buttons are the whole native experiment: everything needed for them is in
-    // the shipped binary, and until now there was no way to press it -- the code
-    // existed and nothing called it.
-    if (coop::Get().native_network) {
-        ImGui::Separator();
-        ImGui::TextUnformatted("UE4 listen server (experimental)");
-        ImGui::TextDisabled("One simulation for both machines. Host first, then join.");
-        // Sifu's default net driver routes an `open` through EOS P2P, so the mod
-        // writes an IpNetDriver config -- which the engine only reads at startup.
-        // Pressing these before that restart cannot work and reports standalone,
-        // which is exactly how one test was already wasted. Say so instead.
-        if (!coop::NativeDriverReady()) {
-            ImGui::TextUnformatted("RESTART THE GAME ONCE first:");
-            ImGui::TextDisabled("the IpNetDriver config was written this session, and the");
-            ImGui::TextDisabled("engine read the old one before it existed.");
-        }
-        ImGui::BeginDisabled(!coop::NativeDriverReady());
-        if (ImGui::Button("Host as listen server", ImVec2(180, 0))) {
-            MenuRequests r;
-            r.native_host = true;
-            PostRequests(r);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Join listen server", ImVec2(180, 0))) {
-            MenuRequests r;
-            r.native_join = true;
-            PostRequests(r);
-        }
-        ImGui::EndDisabled();
-    }
-
     // A standing invite from the host. It is deliberately an offer rather than
     // something that just happens: the host loading a level used to drag the
     // other player out of whatever they were doing without a prompt.

@@ -1411,10 +1411,35 @@ void ApplyRemoteEnemies() {
         // and falls under its own state machine. That is also why forcing the
         // down state from outside was never necessary -- the local game was
         // already going to play it.
-        // A body running its own brain must not also be dragged along the host's
-        // transform stream: the two fight each other and it slides through its
-        // own attacks. Position authority is the price of a real fight, which is
-        // why peer_fights_locally is off until it has been measured.
+        // A body running its own brain must not be dragged along the host's
+        // transform stream frame by frame: the two fight each other and it
+        // slides through its own attacks.
+        //
+        // But letting it drift without limit is the other complaint -- the two
+        // machines end up disagreeing about where an enemy stands by metres. So
+        // it is left alone while it stays near where the host has it, and pulled
+        // back only when the gap becomes larger than a fight can explain. Far
+        // enough apart and they are not describing the same enemy any more,
+        // which is worse than a correction.
+        if (fights_us && !dead && !knocked_down && config.sync_enemies) {
+            ue::FVector here = {};
+            if (ue::GetActorLocation(entry.actor, &here)) {
+                const float dx = state.x - here.X;
+                const float dy = state.y - here.Y;
+                const float gap = sqrtf(dx * dx + dy * dy);
+                constexpr float kTolerated = 400.f;  // roughly two strides
+                if (gap > kTolerated) {
+                    const ue::FVector target = {state.x, state.y, state.z};
+                    const ue::FRotator facing = {0.f, state.yaw, 0.f};
+                    DriveActorTo(entry.actor, target, facing, ue::FVector{});
+                    if (config.verbose_enemies) {
+                        SC_LOG("enemies: %s drifted %.0f units from the host -- pulled back",
+                               entry.name, gap);
+                    }
+                }
+            }
+        }
+
         if (!dead && !knocked_down && !IsDown(fighter) && config.sync_enemies && !fights_us) {
             const ue::FVector target = {state.x, state.y, state.z};
             const ue::FRotator facing = {0.f, state.yaw, 0.f};

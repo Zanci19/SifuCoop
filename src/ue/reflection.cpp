@@ -176,9 +176,11 @@ bool OpenLevel(const char* level_path) {
 
     // FString Options, passed by value: 16 bytes, so the ABI passes it by
     // address. Zeroed is a valid empty FString -- null data, zero length, and
-    // therefore safe for the callee to destroy. This is the form that has been
-    // travelling levels for months; do not put a real string in it (see
-    // OpenLevelWithOptions for why that crashes).
+    // therefore safe for the callee to destroy. Do NOT put a real string in it:
+    // the parameter is by value, so the callee frees it, and pointing it at a
+    // stack buffer crashes the allocator outright
+    // ("Attempt to realloc an unrecognized block"). Learned the hard way while
+    // trying to pass "listen?port=N" -- see HANDOFF section 14.
     struct FString {
         wchar_t* data;
         std::int32_t num;
@@ -188,54 +190,6 @@ bool OpenLevel(const char* level_path) {
     SC_LOG("level: opening '%s'", level_path);
     g_open_level(world, name, false, &options);
     return true;
-}
-
-// Reflection, NOT the native pointer, and the difference is a hard crash.
-//
-// UGameplayStatics::OpenLevel takes `FString Options` BY VALUE, so the callee
-// owns it and destroys it. Handing that a pointer into our own stack made UE
-// try to free a stack address:
-//   FMallocBinned2 Attempt to realloc an unrecognized block ... canary == 0x0
-// Through ProcessEvent the generated thunk copies the string into a local of
-// its own, and destroys that copy rather than anything of ours -- so a stack
-// buffer is safe here in a way it is not for the direct call.
-//
-// The params block is oversized and zeroed for the same reason as elsewhere in
-// this codebase: an offset that turns out to be wrong then reads zeroes, which
-// means "no options" and a level that loads normally, instead of garbage.
-bool OpenLevelWithOptions(const char* level_path, const char* options_text) {
-    if (!g_ready || !level_path || !level_path[0]) return false;
-    if (!options_text || !options_text[0]) return OpenLevel(level_path);
-
-    UObject* world = GetWorld();
-    UObject* statics = FindObjectByPath(L"/Script/Engine.Default__GameplayStatics");
-    if (!world || !statics) return false;
-
-    wchar_t wide[512] = {};
-    MultiByteToWideChar(CP_UTF8, 0, level_path, -1, wide, 512);
-    wchar_t options_wide[256] = {};
-    const int chars = MultiByteToWideChar(CP_UTF8, 0, options_text, -1, options_wide, 256);
-    if (chars <= 0) return false;
-
-    struct FStringView {
-        wchar_t* data;
-        std::int32_t num;
-        std::int32_t max;
-    };
-
-    std::uint8_t params[128] = {};
-    const FName level_name = MakeName(wide);
-    // (const UObject* WorldContextObject, FName LevelName, bool bAbsolute,
-    //  FString Options) -- the FString needs 8-byte alignment, so it starts at
-    //  0x18 rather than immediately after the bool.
-    std::memcpy(params + 0x00, &world, sizeof(world));
-    std::memcpy(params + 0x08, &level_name, sizeof(level_name));
-    params[0x10] = 0;  // bAbsolute
-    FStringView options = {options_wide, chars, chars};
-    std::memcpy(params + 0x18, &options, sizeof(options));
-
-    SC_LOG("level: opening '%s' options '%s'", level_path, options_text);
-    return CallFunction(statics, L"OpenLevel", params);
 }
 
 bool ExecuteConsoleCommand(const char* command, UObject* specific_player) {

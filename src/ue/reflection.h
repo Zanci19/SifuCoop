@@ -117,12 +117,6 @@ bool GetCurrentLevelPath(char* out, int out_size);
 // state is set up normally.
 bool OpenLevel(const char* level_path);
 
-// Same, with UE4 URL options ("listen?port=7778"). Needed because the console
-// route drops them: `open <map>?listen` reloads the map through Sifu's own level
-// flow and the world comes back standalone. OpenLevel takes the options as a
-// real parameter, so nothing can rewrite them on the way through.
-bool OpenLevelWithOptions(const char* level_path, const char* options_text);
-
 // Runs a UE console command through the engine's reflected Kismet bridge. This
 // is deliberately limited to the mod's own fixed commands; callers must never
 // feed it untrusted network text.

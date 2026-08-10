@@ -26,8 +26,6 @@ enum class Mode : int {
 struct Config {
     Mode mode = Mode::Coop;
 
-    // Legacy experimental setting retained for config migration; custom UDP mirror is the supported transport.
-    bool native_network = false;
 
     // Phase A -- enemies exist and agree on both screens.
     bool sync_enemies = true;         // drive client enemies from the host
@@ -277,12 +275,7 @@ Stats& GetStats();
 // True only when the option was present at process startup. This prevents a
 // live custom-mirror session from switching to the engine path after it has
 // already created its synthetic local player.
-bool NativeNetworkActive();
 
-// True when the engine started WITH the IpNetDriver config, so hosting and
-// joining by IP can actually work. False means the config was only just
-// written and the game needs one restart first.
-bool NativeDriverReady();
 // Reads SifuCoop.ini next to the executable. Missing keys keep their defaults,
 // so an ini written by an older build still works.
 void Load();

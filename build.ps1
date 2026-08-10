@@ -83,7 +83,6 @@ $sources = @(
     "src\game\actors.cpp"
     "src\game\coop.cpp"
     "src\game\selftest.cpp"
-    "src\game\native_net.cpp"
     "src\game\puppet.cpp"
     "src\game\runstate.cpp"
     "src\game\player2.cpp"
