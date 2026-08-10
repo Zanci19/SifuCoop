@@ -2009,6 +2009,32 @@ void TickPuppet() {
         DespawnPuppet();
     }
 
+    // "The host could not move" watchdog.
+    //
+    // WASD going dead means one of two things, and they need different fixes:
+    // controller 0 has no pawn at all, or it is possessing the wrong body --
+    // the puppet is a clone of the player class, and Sifu's game mode has been
+    // seen handing a second player the first player's character before. Reading
+    // it is one comparison, and it turns "it froze" into a named cause.
+    {
+        ue::UObject* possessed = PrimaryPlayerPawn();
+        static int last_state = -1;
+        const int state = !possessed ? 0 : (possessed == g_puppet ? 1 : 2);
+        if (state != last_state) {
+            last_state = state;
+            if (state == 0) {
+                SC_LOG("input: controller 0 has NO pawn -- this is why movement is dead");
+                coop::ReportProblem("you have no character: controller 0 lost its pawn");
+            } else if (state == 1) {
+                SC_LOG("input: controller 0 is possessing the PUPPET -- your input is "
+                       "driving the remote player's body");
+                coop::ReportProblem("your controller took over your partner's body");
+            } else {
+                SC_LOG("input: controller 0 possessing its own pawn (normal)");
+            }
+        }
+    }
+
     UpdateLobby(player);
     ReconcileJoinerArrival(player);
 

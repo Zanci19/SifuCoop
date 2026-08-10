@@ -396,11 +396,22 @@ ue::UObject* ReadAIEnemy(ue::UObject* ai_fighting) {
 // are used instead of BPF_ForceEnemy: no ticket manager entry is created, so
 // there is nothing for the director to trip over when the body is destroyed.
 // One takes no arguments at all and the other a single enum.
-void WakeEnemyPerception(ue::UObject* ai_fighting) {
+// `force_behaviour` is deliberately not the default.
+//
+// Forcing a global behaviour on the HOST's enemies every few seconds is the
+// most invasive thing this file does to a machine whose fight is otherwise
+// working, and the host losing WASD appeared in the same session it started
+// doing that. Detection alone is enough for the thing this is for -- an enemy
+// that has noticed the other player -- and it takes no arguments, so it cannot
+// put a character into a state. The behaviour push is kept for the one place
+// that genuinely needs it: the moment the joining machine restarts a brain and
+// that brain must not open on a stranger.
+void WakeEnemyPerception(ue::UObject* ai_fighting, bool force_behaviour = false) {
     if (!ai_fighting) return;
     struct Empty {
     } none = {};
     ue::CallFunction(ai_fighting, L"ActivateEnemyDetectionTimer", &none);
+    if (!force_behaviour) return;
     struct Params {
         std::uint8_t eBehavior;
     } params = {};
@@ -882,6 +893,22 @@ void ApplyPeerDamage() {
         ApplyDamage(fighter, delta);
         *applied = reports[i].total;
 
+        // BPF_ApplyDamage is a health path: it reaches zero and kills the body,
+        // but it never went through the hit that would have chosen a death
+        // animation, so the corpse stays on its feet. That is the other half of
+        // "the one who did not land the killing blow never sees it fall" -- the
+        // joining side had this fixed, the host had the same hole for the
+        // damage its peer reported.
+        //
+        // No animation to hand over here, so this is the plain version: put it
+        // down. A body that falls generically beats one that stands.
+        if (GetHealth(fighter) <= 0.5f && !IsDown(fighter)) {
+            SetDown(fighter, true);
+            if (coop::Get().verbose_enemies) {
+                SC_LOG("enemies: %s killed by your partner -- forced down", entry.name);
+            }
+        }
+
         // Raw replicated health damage has no instigator, so Sifu perception
         // never learns who hit it. Hand aggro to the host's peer body and keep
         // it alive briefly; normal AI can then select/attack that body.
@@ -1187,7 +1214,7 @@ void ApplyRemoteEnemies() {
                     // appeared from nowhere, and Sifu treats that as an ambush:
                     // structure broken outright and wide open to a takedown,
                     // which is exactly what was reported.
-                    WakeEnemyPerception(entry.ai_fighting);
+                    WakeEnemyPerception(entry.ai_fighting, /*force_behaviour=*/true);
                     SC_LOG("enemies: %s handed to local AI -- it is fighting you", entry.name);
                 }
             } else {
