@@ -5,6 +5,10 @@ namespace sifucoop::game::native_net {
 // Starts Sifu's own UE4 listen-server path on the current map. This performs
 // a full level reload, so it is intentionally called only from an explicit F1
 // menu action, never automatically from a UDP handshake.
+// Asks the engine whether it is standalone, a listen server, or a connected
+// client, and logs it. This is what makes the native experiment readable.
+void LogNetMode(const char* when);
+
 bool HostCurrentLevel(int port);
 
 // Leaves the current local world and connects to an existing UE4 listen server

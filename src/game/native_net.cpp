@@ -20,7 +20,34 @@ bool ValidIpv4(const char* address) {
     return InetPtonA(AF_INET, address, &parsed) == 1;
 }
 
+// UKismetSystemLibrary::IsServer / IsStandalone, so the answer to "did the
+// engine actually go into network mode" comes from the engine rather than from
+// whether a console command was dispatched.
+//
+// Without this the experiment is unreadable: `open ?listen` always reports
+// success because ExecuteConsoleCommand only says the command was delivered,
+// and a listen server that refused to start looks exactly like one that worked
+// until a peer fails to appear.
+bool QueryNetFlag(const wchar_t* function_name) {
+    ue::UObject* world = ue::GetWorld();
+    ue::UObject* kismet = ue::FindObjectByPath(L"/Script/Engine.Default__KismetSystemLibrary");
+    if (!world || !kismet) return false;
+    struct Params {
+        ue::UObject* WorldContextObject;
+        bool ReturnValue;
+    } params = {world, false};
+    if (!ue::CallFunction(kismet, function_name, &params)) return false;
+    return params.ReturnValue;
+}
+
 }  // namespace
+
+void LogNetMode(const char* when) {
+    const bool standalone = QueryNetFlag(L"IsStandalone");
+    const bool server = QueryNetFlag(L"IsServer");
+    SC_LOG("native-net: %s -- standalone=%d server=%d (%s)", when, standalone, server,
+           standalone ? "NOT networked" : (server ? "listen server" : "connected client"));
+}
 
 bool HostCurrentLevel(int port) {
     if (!ValidPort(port)) {
@@ -37,6 +64,7 @@ bool HostCurrentLevel(int port) {
     // listen server; `port` is consumed by UIpNetDriver::InitListen.
     char command[256] = {};
     _snprintf(command, sizeof(command) - 1, "open %s?listen?port=%d", level, port);
+    LogNetMode("before hosting");
     const bool ok = ue::ExecuteConsoleCommand(command);
     SC_LOG("native-net: host command '%s' -> %s", command, ok ? "dispatched" : "FAILED");
     if (!ok) coop::ReportProblem("could not start the engine listen server");
@@ -51,6 +79,7 @@ bool JoinHost(const char* address, int port) {
 
     char command[96] = {};
     _snprintf(command, sizeof(command) - 1, "open %s:%d", address, port);
+    LogNetMode("before joining");
     const bool ok = ue::ExecuteConsoleCommand(command);
     SC_LOG("native-net: join command '%s' -> %s", command, ok ? "dispatched" : "FAILED");
     if (!ok) coop::ReportProblem("could not start the engine connection");

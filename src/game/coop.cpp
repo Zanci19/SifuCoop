@@ -56,11 +56,24 @@ void Load() {
     g_config.mode = GetPrivateProfileIntA(kSection, "versus", 0, ini) != 0 ? Mode::Versus
                                                                           : Mode::Coop;
     g_config.sync_enemies = ReadBool("sync_enemies", g_config.sync_enemies, ini);
-    if (ReadBool("native_network", false, ini)) {
-        SC_LOG("coop: native UE4 networking requested by config but disabled; using UDP mirror");
+    // No longer forced off.
+    //
+    // This was hard-disabled with a log line and never revisited, and it is the
+    // only route to what the mirror keeps approximating: one simulation, both
+    // machines identical, enemies fighting both players with Sifu's own code.
+    // The binary has every piece -- UWorld::Listen, UIpNetDriver::InitListen,
+    // AThePlainesGameMode::PostLogin, APlayerController::ClientTravel -- and,
+    // decisively, AFightingCharacter::GetLifetimeReplicatedProps exists, which
+    // means Sifu's characters were built to replicate.
+    //
+    // Still default OFF, because whether the shipped game will actually accept
+    // a login is unproven. Turning it on does not disable the UDP mirror; it
+    // adds the engine path beside it so the two can be compared.
+    g_config.native_network = ReadBool("native_network", false, ini);
+    g_native_network_at_startup = g_config.native_network;
+    if (g_config.native_network) {
+        SC_LOG("coop: native UE4 networking ENABLED -- F1 -> Play to host or join");
     }
-    g_config.native_network = false;
-    g_native_network_at_startup = false;
     g_config.suppress_client_ai = ReadBool("suppress_client_ai",
                                            g_config.suppress_client_ai, ini);
     g_config.sync_enemy_vitals = ReadBool("sync_enemy_vitals",
