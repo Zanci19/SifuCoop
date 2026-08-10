@@ -532,6 +532,28 @@ packaging. The inference chain skipped the one function that had to exist, and t
 that settled it (symbol count at the address) costs one `awk` line and should have been the
 first thing done, not the last.
 
+**The server half of UE4 networking is compiled out of this executable.** Two functions are
+folded stubs, and they are exactly the two that live behind `#if WITH_SERVER_CODE`:
+
+```
+0x0085E5C0  11,097 symbols  <- UNetDriver::ServerReplicateActors   (folded stub)
+0x0085E7C0  82,450 symbols  <- UWorld::Listen                      (folded stub)
+0x0347B1D0  unique          <- UActorChannel::ReplicateActor
+0x03664E20  unique          <- UNetDriver::TickFlush
+0x0328BC50  unique          <- AActor::PreReplication
+0x035D97F0  unique          <- UWorld::SpawnPlayActor
+```
+
+`ServerReplicateActors` is the function that walks the world's actors and sends their
+replicated state to connected clients. It has no body. So even a hand-built listen server
+would accept a connection and then replicate nothing, forever -- `ReplicateActor` being real
+does not help, because it is only ever called *by* the function that was removed.
+
+This closes the loophole below: there is nothing left to hand-build except UE4's replication
+loop itself, from outside the process. And that is precisely what this mod already is -- a
+hand-written stand-in for `ServerReplicateActors`, for the subset of actors that matter.
+Rewriting it generically would be a bigger, worse version of what is already working.
+
 **What would still be theoretically possible**, and is not recommended: hand-building the
 listen server — `GEngine->CreateNamedNetDriver`, `UIpNetDriver::InitListen` (real), then
 assigning the driver to the world and setting its net mode by hand. That reimplements
