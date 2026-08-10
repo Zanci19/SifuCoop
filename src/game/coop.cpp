@@ -31,6 +31,67 @@ void WriteInt(const char* key, int value, const char* ini) {
     WritePrivateProfileStringA(kSection, key, text, ini);
 }
 
+bool CreateDirectoryIfMissing(const char* path) {
+    if (CreateDirectoryA(path, nullptr)) return true;
+    return GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+// THE reason `open <ip>:<port>` never connects.
+//
+// Sifu's packaged default GameNetDriver is not IpNetDriver -- it routes through
+// EOS/Steam P2P, so an `open` against a plain IPv4 address is taken as a P2P
+// session request and simply times out. No error, no refusal, nothing in the
+// log: the listen server comes up and the client never arrives, which is exactly
+// what the old sessions recorded 136 times over as
+// "authoritative roster has 1 player(s); waiting for joiner".
+//
+// This existed once and was lost when the tree was overwritten, so the
+// experiment was never finished rather than newly broken. The user config is
+// read before this DLL is loaded at all, so writing it takes effect on the NEXT
+// launch -- once, and then it stays.
+void EnsureNativeIpNetDriverConfig() {
+    char local_app_data[MAX_PATH] = {};
+    if (GetEnvironmentVariableA("LOCALAPPDATA", local_app_data,
+                                static_cast<DWORD>(sizeof(local_app_data))) == 0) {
+        SC_LOG("native-net: could not locate LOCALAPPDATA for IP driver config");
+        return;
+    }
+
+    char sifu_dir[MAX_PATH] = {};
+    char saved_dir[MAX_PATH] = {};
+    char config_dir[MAX_PATH] = {};
+    char platform_dir[MAX_PATH] = {};
+    char ini[MAX_PATH] = {};
+    _snprintf(sifu_dir, sizeof(sifu_dir), "%s\\Sifu", local_app_data);
+    _snprintf(saved_dir, sizeof(saved_dir), "%s\\Saved", sifu_dir);
+    _snprintf(config_dir, sizeof(config_dir), "%s\\Config", saved_dir);
+    _snprintf(platform_dir, sizeof(platform_dir), "%s\\WindowsNoEditor", config_dir);
+    _snprintf(ini, sizeof(ini), "%s\\Engine.ini", platform_dir);
+
+    if (!CreateDirectoryIfMissing(sifu_dir) || !CreateDirectoryIfMissing(saved_dir) ||
+        !CreateDirectoryIfMissing(config_dir) || !CreateDirectoryIfMissing(platform_dir)) {
+        SC_LOG("native-net: could not create IP driver config directory (error=%lu)",
+               static_cast<unsigned long>(GetLastError()));
+        return;
+    }
+
+    constexpr const char* kEngineSection = "/Script/Engine.Engine";
+    const bool cleared = WritePrivateProfileStringA(kEngineSection, "!NetDriverDefinitions",
+                                                    "ClearArray", ini) != FALSE;
+    const bool wrote = WritePrivateProfileStringA(
+        kEngineSection, "+NetDriverDefinitions",
+        "(DefName=\"GameNetDriver\",DriverClassName=\"OnlineSubsystemUtils.IpNetDriver\","
+        "DriverClassNameFallback=\"OnlineSubsystemUtils.IpNetDriver\")",
+        ini) != FALSE;
+    if (cleared && wrote) {
+        SC_LOG("native-net: UIpNetDriver written to %s -- RESTART THE GAME ONCE for it to "
+               "take effect; hosting and joining by IP cannot work before that", ini);
+    } else {
+        SC_LOG("native-net: could not write UIpNetDriver config (error=%lu)",
+               static_cast<unsigned long>(GetLastError()));
+    }
+}
+
 }  // namespace
 
 Config& Get() { return g_config; }
@@ -73,6 +134,7 @@ void Load() {
     g_native_network_at_startup = g_config.native_network;
     if (g_config.native_network) {
         SC_LOG("coop: native UE4 networking ENABLED -- F1 -> Play to host or join");
+        EnsureNativeIpNetDriverConfig();
     }
     g_config.suppress_client_ai = ReadBool("suppress_client_ai",
                                            g_config.suppress_client_ai, ini);

@@ -9,6 +9,9 @@ namespace sifucoop::game::native_net {
 // client, and logs it. This is what makes the native experiment readable.
 void LogNetMode(const char* when);
 
+// Emits the scheduled outcome reading. Called once per frame.
+void TickNativeNet();
+
 bool HostCurrentLevel(int port);
 
 // Leaves the current local world and connects to an existing UE4 listen server

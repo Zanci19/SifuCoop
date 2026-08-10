@@ -45,8 +45,31 @@ bool QueryNetFlag(const wchar_t* function_name) {
 void LogNetMode(const char* when) {
     const bool standalone = QueryNetFlag(L"IsStandalone");
     const bool server = QueryNetFlag(L"IsServer");
+    // IsServer is true in standalone as well -- a standalone game IS the
+    // authority -- so it answers nothing on its own. IsStandalone is the one
+    // that discriminates, and reading only the pair together is meaningful.
     SC_LOG("native-net: %s -- standalone=%d server=%d (%s)", when, standalone, server,
            standalone ? "NOT networked" : (server ? "listen server" : "connected client"));
+}
+
+DWORD g_report_at = 0;
+const char* g_report_what = nullptr;
+
+// The outcome, a few seconds later.
+//
+// Only "before" was ever logged, which made the experiment unreadable in the
+// one way that mattered: `open` returns immediately, the map reload takes
+// seconds, and the interesting state exists only afterwards. Both attempts now
+// schedule a reading.
+void TickNativeNet() {
+    if (!g_report_at || GetTickCount() < g_report_at) return;
+    g_report_at = 0;
+    LogNetMode(g_report_what ? g_report_what : "after");
+}
+
+void ReportShortly(const char* what) {
+    g_report_what = what;
+    g_report_at = GetTickCount() + 8000;
 }
 
 bool HostCurrentLevel(int port) {
@@ -67,6 +90,7 @@ bool HostCurrentLevel(int port) {
     LogNetMode("before hosting");
     const bool ok = ue::ExecuteConsoleCommand(command);
     SC_LOG("native-net: host command '%s' -> %s", command, ok ? "dispatched" : "FAILED");
+    if (ok) ReportShortly("after hosting");
     if (!ok) coop::ReportProblem("could not start the engine listen server");
     return ok;
 }
@@ -82,6 +106,7 @@ bool JoinHost(const char* address, int port) {
     LogNetMode("before joining");
     const bool ok = ue::ExecuteConsoleCommand(command);
     SC_LOG("native-net: join command '%s' -> %s", command, ok ? "dispatched" : "FAILED");
+    if (ok) ReportShortly("after joining");
     if (!ok) coop::ReportProblem("could not start the engine connection");
     return ok;
 }

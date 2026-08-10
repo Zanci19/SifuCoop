@@ -2053,6 +2053,8 @@ void TickPuppet() {
         }
     }
 
+    native_net::TickNativeNet();
+
     UpdateLobby(player);
     ReconcileJoinerArrival(player);
 
