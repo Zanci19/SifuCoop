@@ -1646,7 +1646,18 @@ bool SpawnPuppet() {
     // A spawned clone is not a LocalPlayer and was absent from normal AI
     // candidate selection in live logs. Register its real target component
     // with Sifu's actor manager so enemies can acquire it.
-    if (g_get_targetable_actor_component && g_register_targetable_actor) {
+    //
+    // HOST ONLY, and this is what "the enemies want to fight the host no matter
+    // what" turned out to be. The two machines want opposite things from this
+    // body. On the host it stands in for the joining player, and enemies
+    // acquiring it is how that player's fight begins -- the flag it produces is
+    // what the joiner claims an enemy on. On the joining machine it stands in
+    // for the HOST, whose fight is resolved on the host's own machine, so an
+    // enemy that walks over to attack it accomplishes nothing and is stolen from
+    // the player standing right there. The joiner's own census showed three or
+    // four of five enemies doing exactly that, leaving one on the actual player.
+    const bool attract_enemies = net::GetRole() != net::Role::Client;
+    if (attract_enemies && g_get_targetable_actor_component && g_register_targetable_actor) {
         ue::UObject* targetable = g_get_targetable_actor_component(spawned);
         if (targetable) {
             g_register_targetable_actor(targetable);
@@ -1654,6 +1665,9 @@ bool SpawnPuppet() {
         } else {
             SC_LOG("puppet: targetable component MISSING -- enemy AI cannot select peer");
         }
+    } else if (!attract_enemies) {
+        SC_LOG("puppet: NOT registered as a target -- your partner's body is a picture "
+               "here, and their fight happens on their own machine");
     }
     g_peer_was_down = false;
 
