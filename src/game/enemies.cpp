@@ -153,6 +153,8 @@ struct Tracked {
     // When the host first stopped saying this enemy fights the peer. Ownership
     // is held for a few seconds past that, so a flickering flag cannot thrash it.
     DWORD not_ours_since = 0;
+    // Per-enemy throttle for the esync diagnostic.
+    DWORD last_esync_ms = 0;
     // The exact death sequence the host's lethal hit selected, handed over by
     // the Kill hook through the animation channel. Sifu picks this per
     // archetype, direction and killing move, so it is the difference between a
@@ -815,6 +817,7 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
             // until the first unmatched enemy and no longer.
             entry.local_brain = previous[k].local_brain;
             entry.not_ours_since = previous[k].not_ours_since;
+            entry.last_esync_ms = previous[k].last_esync_ms;
             break;
         }
     }
@@ -1195,6 +1198,14 @@ void SendDamageReports() {
 void ApplyRemoteEnemies() {
     if (!net::HasEnemySweep()) return;
 
+    // Every actor pointer below belongs to the world the table was built in, and
+    // a restart frees all of them. The level-path check further down is not
+    // enough on its own -- restarting the SAME level produces a new UWorld with
+    // the same package path, which is exactly the case the refresh code already
+    // warns about. Without this the pass ran over freed bodies and crashed
+    // inside this dll on restart, with nothing but our own frames on the stack.
+    if (!TrackingIsCurrent()) return;
+
     // Enemy ids are only meaningful inside one map. The live log proved the
     // old loop applied Hideout 4's sweep while the joiner was still in
     // Hideout 0, stopped every local brain, and parked the whole Wuguan roster.
@@ -1574,11 +1585,15 @@ void ApplyRemoteEnemies() {
         // three fixes that each looked right in the file and changed nothing on
         // screen, so it gets an instrument rather than a fourth guess. Every
         // field here is already computed above.
+        // Rate-limited PER ENEMY. A single shared timer was one static shared by
+        // the whole loop, so exactly one enemy was ever printed -- the first to
+        // pass the gate each second, which was a dead civilian for a whole
+        // session while the four that mattered went unlogged. An instrument that
+        // reports one row of a table is not an instrument.
         if (config.verbose_enemies && entry.active) {
-            static DWORD last_esync = 0;
             const DWORD esync_now = GetTickCount();
-            if (esync_now - last_esync >= 1000) {
-                last_esync = esync_now;
+            if (esync_now - entry.last_esync_ms >= 1000) {
+                entry.last_esync_ms = esync_now;
                 SC_LOG("esync: %s hp=%.0f/%.0f applied=%.0f/%.0f caught_up=%d down=%d "
                        "hostdown=%d dead=%d owned=%d",
                        entry.name, GetHealth(fighter), state.health, state.damage_applied,
