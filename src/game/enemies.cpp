@@ -1287,8 +1287,52 @@ void ApplyRemoteEnemies() {
         // and released only after it has said otherwise for a while -- or at
         // once when the body dies or leaves the fight, because then the host's
         // death handling has to own it again immediately.
+        // Claimed on OUR OWN judgement, not only on the host's word.
+        //
+        // The host's census reports up to five enemies fighting the peer while
+        // this side claimed none of them, and the flag has to survive a sample,
+        // a packet and a 50 ms window to get here. This machine does not need to
+        // be told: it can see where the enemy is standing, where its own player
+        // is, and where the puppet standing in for the host is. An enemy clearly
+        // nearer to us than to them is ours to simulate, and that is the same
+        // judgement the host makes for its own side.
+        //
+        // The margin matters. Without it a body midway between the two players
+        // would change hands every few frames, which is the thrash the latch
+        // exists to prevent. The host's flag is kept as an additional trigger,
+        // so nothing that used to claim an enemy stops claiming it.
+        bool near_us = false;
+        if (config.peer_fights_locally && entry.active) {
+            ue::UObject* world = ue::GetWorld();
+            ue::UObject* mine = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
+            ue::UObject* theirs = GetPuppet();
+            ue::FVector enemy_at = {};
+            ue::FVector my_at = {};
+            if (mine && ue::GetActorLocation(entry.actor, &enemy_at) &&
+                ue::GetActorLocation(mine, &my_at)) {
+                const float dxm = enemy_at.X - my_at.X;
+                const float dym = enemy_at.Y - my_at.Y;
+                const float to_me = sqrtf(dxm * dxm + dym * dym);
+                // Out of fighting range of us at all: never ours.
+                constexpr float kEngagedWithin = 1200.f;
+                if (to_me <= kEngagedWithin) {
+                    ue::FVector their_at = {};
+                    if (theirs && ue::GetActorLocation(theirs, &their_at)) {
+                        const float dxt = enemy_at.X - their_at.X;
+                        const float dyt = enemy_at.Y - their_at.Y;
+                        const float to_them = sqrtf(dxt * dxt + dyt * dyt);
+                        constexpr float kMargin = 300.f;
+                        near_us = to_me + kMargin < to_them;
+                    } else {
+                        near_us = true;  // no puppet to compare against yet
+                    }
+                }
+            }
+        }
+
         const bool host_says_ours =
-            config.peer_fights_locally && (state.flags & net::kEnemyTargetsPeer) != 0;
+            config.peer_fights_locally &&
+            (((state.flags & net::kEnemyTargetsPeer) != 0) || near_us);
         // `dead` proper is decided further down; this needs the same answer
         // earlier, and it is the same two facts off the same packet.
         const bool host_says_dead = (state.flags & net::kEnemyDead) != 0 ||
