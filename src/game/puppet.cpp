@@ -737,18 +737,94 @@ bool EnsureRemoteVisible(ue::UObject* puppet, bool log_result) {
     return ok;
 }
 
+// Re-applies the bystander faction once there IS a live enemy to copy one from.
+//
+// The puppet is spawned when the peer connects, which is normally long before
+// any enemy is active, so the faction lookup at spawn finds nothing and falls
+// back to the players' faction -- leaving the body attracting enemies for the
+// whole first fight. Cheap to retry: it stops as soon as it succeeds.
+void MaintainBystanderFaction(ue::UObject* player, ue::UObject* puppet) {
+    if (coop::Get().mode != coop::Mode::Coop) return;
+    if (net::GetRole() != net::Role::Client) return;
+    if (!player || !puppet) return;
+
+    static ue::UObject* settled_for = nullptr;
+    if (settled_for == puppet) return;
+
+    const int player_faction = GetFaction(player);
+    if (player_faction < 0) return;
+    if (GetFaction(puppet) != player_faction) {
+        settled_for = puppet;  // already out of the players' faction
+        return;
+    }
+
+    static DWORD next_attempt = 0;
+    const DWORD now = GetTickCount();
+    if (next_attempt != 0 && now < next_attempt) return;
+    next_attempt = now + 1000;
+
+    EnemyRow rows[64];
+    const int count = GetEnemyRows(rows, 64);
+    for (int i = 0; i < count; ++i) {
+        if (!rows[i].active) continue;
+        ue::UObject* actor = FindEnemyByHash(rows[i].hash);
+        if (!actor || actor == puppet || actor == player) continue;
+        const int faction = GetFaction(actor);
+        if (faction < 0 || faction == player_faction) continue;
+        SetFaction(puppet, faction);
+        settled_for = puppet;
+        SC_LOG("puppet: faction %d applied late -- enemies here will now ignore your "
+               "partner's body and fight you", faction);
+        return;
+    }
+}
+
 void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
     const int player_faction = GetFaction(player);
     const bool coop_mode = coop::Get().mode == coop::Mode::Coop;
 
-    if (player_faction >= 0) {
+    // On the JOINING machine the puppet is put in the ENEMIES' faction, so they
+    // stop treating it as something to fight.
+    //
+    // Declining to register it with the targetable actor manager was not enough
+    // -- the joiner's census still showed up to four of five enemies walking over
+    // to hit it, because registration is only one of the ways Sifu acquires a
+    // target and the body is a player-class pawn in the players' faction either
+    // way. Faction is the game's own answer to "this is not your business", and
+    // it is the same mechanism that stops one grunt punching another.
+    //
+    // Only on the joiner, and the asymmetry is the point: on the host this body
+    // stands in for the other player and enemies SHOULD fight it, because that
+    // is how their fight starts. Here it stands in for the host, whose fight is
+    // resolved on the host's own machine, so every enemy that comes over is
+    // taken from the player actually standing here for nothing in return.
+    const bool as_bystander = coop_mode && net::GetRole() == net::Role::Client;
+    int enemy_faction = -1;
+    if (as_bystander) {
+        EnemyRow rows[64];
+        const int count = GetEnemyRows(rows, 64);
+        for (int i = 0; i < count && enemy_faction < 0; ++i) {
+            if (!rows[i].active) continue;
+            ue::UObject* actor = FindEnemyByHash(rows[i].hash);
+            if (!actor || actor == puppet || actor == player) continue;
+            const int faction = GetFaction(actor);
+            if (faction >= 0 && faction != player_faction) enemy_faction = faction;
+        }
+    }
+
+    if (as_bystander && enemy_faction >= 0) {
+        SetFaction(puppet, enemy_faction);
+        SC_LOG("puppet: faction %d -- your partner's body joins the ENEMIES' faction here "
+               "so they ignore it and fight YOU instead", enemy_faction);
+    } else if (player_faction >= 0) {
         // Faction 0 and 1 are the two sides; picking "the other one" rather
         // than a constant means this still works if the player's faction ever
         // differs by level.
         const int target = coop_mode ? player_faction : (player_faction == 1 ? 0 : 1);
         SetFaction(puppet, target);
-        SC_LOG("puppet: faction %d (you are %d) -- %s", target, player_faction,
-               coop_mode ? "CO-OP, allied against the level" : "VERSUS, hostile to you");
+        SC_LOG("puppet: faction %d (you are %d) -- %s%s", target, player_faction,
+               coop_mode ? "CO-OP, allied against the level" : "VERSUS, hostile to you",
+               as_bystander ? " (no live enemy to copy a faction from yet)" : "");
     } else {
         SC_LOG("puppet: could not read your faction -- leaving the puppet's alone");
     }
@@ -2116,6 +2192,7 @@ void TickPuppet() {
 
     // Best-effort, default-off: no-op once applied for this puppet.
     MaintainFriendlyRelationship(player, g_puppet);
+    MaintainBystanderFaction(player, g_puppet);
 
     // A live peer always wins over the local follow-mode rehearsal.
     ue::FVector peer_location = {};
