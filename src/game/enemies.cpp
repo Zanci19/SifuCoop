@@ -148,6 +148,8 @@ struct Tracked {
     // to tell it again. See MaintainPeerHostility.
     DWORD next_hostility_ms = 0;
     bool hostile_confirmed = false;
+    // Running its own behaviour tree locally rather than following the host.
+    bool local_brain = false;
     // The exact death sequence the host's lethal hit selected, handed over by
     // the Kill hook through the animation channel. Sifu picks this per
     // archetype, direction and killing move, so it is the difference between a
@@ -804,6 +806,10 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
             entry.last_peer_target_ms = previous[k].last_peer_target_ms;
             entry.next_hostility_ms = previous[k].next_hostility_ms;
             entry.hostile_confirmed = previous[k].hostile_confirmed;
+            // Without this a rebuild forgets the body is running its own brain,
+            // and the very next frame stops it again -- the handover would last
+            // until the first unmatched enemy and no longer.
+            entry.local_brain = previous[k].local_brain;
             break;
         }
     }
@@ -1171,7 +1177,29 @@ void ApplyRemoteEnemies() {
 
         // Stop its brain once. Repeating every frame would be wasted work and
         // would fight the engine if it ever legitimately restarts logic.
-        if (config.suppress_client_ai) KeepClientBrainStopped(entry, GetTickCount());
+        // Enemies the host says are fighting THIS player are handed back to
+        // their own brains, when that has been asked for. The host's director
+        // will never allocate an attacker to the puppet standing in for this
+        // player, so the only place a real fight can happen for them is here,
+        // where they are player zero and a legitimate target like any other.
+        const bool fights_us =
+            config.peer_fights_locally && (state.flags & net::kEnemyTargetsPeer) != 0;
+        if (fights_us != entry.local_brain) {
+            entry.local_brain = fights_us;
+            if (fights_us) {
+                if (StartBrain(entry.actor)) {
+                    entry.ai_stopped = false;
+                    SC_LOG("enemies: %s handed to local AI -- it is fighting you", entry.name);
+                }
+            } else {
+                entry.ai_stopped = false;  // make the next stop actually run
+                SC_LOG("enemies: %s returned to the host's drive", entry.name);
+            }
+        }
+
+        if (config.suppress_client_ai && !fights_us) {
+            KeepClientBrainStopped(entry, GetTickCount());
+        }
 
         // Death and knockdown are now distinct on the wire. Everything below
         // needs both, so decide them once, up front.
@@ -1345,7 +1373,11 @@ void ApplyRemoteEnemies() {
         // and falls under its own state machine. That is also why forcing the
         // down state from outside was never necessary -- the local game was
         // already going to play it.
-        if (!dead && !knocked_down && !IsDown(fighter) && config.sync_enemies) {
+        // A body running its own brain must not also be dragged along the host's
+        // transform stream: the two fight each other and it slides through its
+        // own attacks. Position authority is the price of a real fight, which is
+        // why peer_fights_locally is off until it has been measured.
+        if (!dead && !knocked_down && !IsDown(fighter) && config.sync_enemies && !fights_us) {
             const ue::FVector target = {state.x, state.y, state.z};
             const ue::FRotator facing = {0.f, state.yaw, 0.f};
             const ue::FVector velocity = {state.velocity_x, state.velocity_y, state.velocity_z};

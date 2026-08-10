@@ -124,6 +124,27 @@ struct Config {
     // notices.
     bool mirror_hit_reactions = true;
 
+    // Let the JOINING machine's own AI fight its player, for the enemies the
+    // host says are already targeting them.
+    //
+    // This is the only route to "the client gets a real fight" that does not go
+    // through the host's director. Only a DirectOpponent is allowed to swing,
+    // that ticket is allocated per target, and the host's puppet is not a player
+    // its director will ever allocate one to -- forcing it there is what crashed
+    // on death cleanup and parked the rest of the room as NonOpponent.
+    //
+    // On the joining machine, though, that player IS player zero: a legitimate
+    // target the local director allocates attackers to normally. So for enemies
+    // the host reports as fighting the peer, the joiner stops driving their
+    // transform and lets their own behaviour tree run. It fits what this project
+    // already decided -- each player resolves their own damage, because only a
+    // running Sifu can adjudicate its own hitboxes and parry windows.
+    //
+    // DEFAULT OFF. Those enemies stop being position-authoritative, so the two
+    // machines will disagree about where they are standing while it is on. That
+    // is the trade, and it is worth measuring before it becomes the default.
+    bool peer_fights_locally = false;
+
     bool fix_room_clear = false;      // nudge the local room-clear % to the host's
     // fix_room_clear is a real (if optional) mutation of the joiner's own game
     // state, so it is off until a player asks for it -- singleplayer behaviour

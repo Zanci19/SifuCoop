@@ -93,6 +93,13 @@ ue::UObject* GetDefaultCombo(const Fighter& fighter);
 // tree's real implementation.
 bool StopBrain(ue::UObject* actor);
 
+// Puts a stopped behaviour tree back to work. Used only on the joining side,
+// and only for enemies the host says are fighting that player: those are the
+// ones that have to make their own decisions locally, because the host's
+// director will never allocate an attacker to a body that is not one of its
+// players.
+bool StartBrain(ue::UObject* actor);
+
 // --- Presence --------------------------------------------------------------
 
 // Hidden and collision together, because for our purposes they are one idea:

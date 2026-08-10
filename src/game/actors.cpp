@@ -265,6 +265,37 @@ bool StopBrain(ue::UObject* actor) {
     return ue::CallFunction(component.ReturnValue, L"StopLogic", &reason);
 }
 
+// The mirror of StopBrain. Restarting the behaviour tree is what lets an enemy
+// on the joining machine fight that player for real instead of being a puppet
+// of the host's transform stream.
+//
+// RestartLogic rather than StartLogic: the tree has already been initialised
+// and stopped, and restarting is the documented way back from that.
+bool StartBrain(ue::UObject* actor) {
+    if (!actor || !g_brain_class) return false;
+
+    struct ControllerParams {
+        ue::UObject* ReturnValue;
+    } controller = {};
+    if (!ue::CallFunction(actor, L"GetController", &controller) || !controller.ReturnValue) {
+        return false;
+    }
+
+    struct ComponentParams {
+        void* ComponentClass;
+        ue::UObject* ReturnValue;
+    } component = {};
+    component.ComponentClass = g_brain_class();
+    if (!ue::CallFunction(controller.ReturnValue, L"GetComponentByClass", &component) ||
+        !component.ReturnValue) {
+        return false;
+    }
+
+    struct Empty {
+    } none = {};
+    return ue::CallFunction(component.ReturnValue, L"RestartLogic", &none);
+}
+
 void SetActorPresent(ue::UObject* actor, bool present) {
     if (!actor) return;
 

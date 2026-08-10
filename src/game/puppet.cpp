@@ -1842,8 +1842,22 @@ void TickPuppet() {
             float cursor = 0.f;
             std::memcpy(&cursor, bytes + kAnimLastActionCursor, sizeof(cursor));
 
+            // m_LastActionAnim is a LAST action, not a current one: it keeps
+            // pointing at the asset long after the action has finished, and
+            // repeating the same move never changes the pointer. Triggering on
+            // the pointer alone therefore fired exactly once per session --
+            // today's log has a single `action: sent`, for the death that ended
+            // it, across three sessions of fighting.
+            //
+            // The cursor is what actually says an action started: it runs
+            // forward while one plays and restarts when the next begins. Send on
+            // either a new asset or a cursor that has gone backwards.
             static ue::UObject* last_action_sent = nullptr;
-            if (action && action != last_action_sent) {
+            static float last_cursor = 0.f;
+            const bool restarted = cursor + 0.01f < last_cursor;
+            const bool changed = action != last_action_sent;
+            last_cursor = cursor;
+            if (action && (changed || restarted)) {
                 last_action_sent = action;
                 char action_path[192] = {};
                 if (ue::GetObjectPathName(action, action_path, sizeof(action_path))) {
