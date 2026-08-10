@@ -1405,7 +1405,29 @@ void ApplyRemoteEnemies() {
                         SetHealth(fighter, state.health);  // guarded fallback
                     }
                 } else if (state.health > local_health + 0.05f) {
-                    SetHealth(fighter, state.health);
+                    // Upward corrections are for a body that was RESET, not for
+                    // ordinary disagreement mid-fight.
+                    //
+                    // This used to heal on any difference, and that is why one
+                    // grunt absorbed 252 damage from the joining player against
+                    // a pool of roughly 100-220 before it would die: every hit
+                    // landed, and the next sweep put the health back. From the
+                    // player's side that is exactly "I cannot hurt the enemies
+                    // the host has already touched".
+                    //
+                    // The host's number is legitimately stale-high whenever this
+                    // side is a beat ahead of it, and host_caught_up cannot see
+                    // that, because it only accounts for damage the host has
+                    // applied on OUR behalf -- not for the host's own hits still
+                    // in flight. A genuine reset is a body returning to the pool
+                    // at full health, which is a large jump; an in-fight
+                    // difference is small. Only the large one is honoured, and
+                    // the small one is left for the host to catch up on.
+                    const float max_health = GetMaxHealth(fighter);
+                    const float reset_gap = max_health > 0.f ? max_health * 0.5f : 60.f;
+                    if (state.health - local_health >= reset_gap || first_host_state) {
+                        SetHealth(fighter, state.health);
+                    }
                 }
                 // Guard follows the same rule as health: take the host's value
                 // when it is LOWER, never raise it.
@@ -1548,7 +1570,53 @@ void ApplyRemoteEnemies() {
             }
         }
 
-        if (!dead && !knocked_down && !IsDown(fighter) && config.sync_enemies && !fights_us) {
+        // One line per active enemy, once a second. This function has now eaten
+        // three fixes that each looked right in the file and changed nothing on
+        // screen, so it gets an instrument rather than a fourth guess. Every
+        // field here is already computed above.
+        if (config.verbose_enemies && entry.active) {
+            static DWORD last_esync = 0;
+            const DWORD esync_now = GetTickCount();
+            if (esync_now - last_esync >= 1000) {
+                last_esync = esync_now;
+                SC_LOG("esync: %s hp=%.0f/%.0f applied=%.0f/%.0f caught_up=%d down=%d "
+                       "hostdown=%d dead=%d owned=%d",
+                       entry.name, GetHealth(fighter), state.health, state.damage_applied,
+                       entry.reported_total,
+                       state.damage_applied + 0.05f >= entry.reported_total ? 1 : 0,
+                       IsDown(fighter) ? 1 : 0, knocked_down ? 1 : 0, dead ? 1 : 0,
+                       entry.local_brain ? 1 : 0);
+            }
+        }
+
+        // A STUCK down state is what stopped the driving, permanently.
+        //
+        // The gate below used to include IsDown(fighter), and one session's
+        // numbers say what that cost: driven fell 3 -> 1 -> 0 while active
+        // stayed at 6, and never recovered, with "DIED: 6, recycled alive: 0" in
+        // the same log. Bodies go down under their own state machine here --
+        // sync_enemy_vitals feeds the host's damage through Sifu's real
+        // ApplyDamage, so this copy stages and falls by itself -- and nothing
+        // ever brought one back up, because SetDown(false) only runs on a
+        // host-driven dead->alive edge that never arrives for a body Sifu
+        // floored on its own.
+        //
+        // Two changes. Repair the state when the host says this enemy is alive
+        // and upright and the local copy disagrees, the same shape as the
+        // existing stale-save revival. And keep driving a floored body's
+        // position regardless: a knocked-down enemy still has somewhere it is
+        // supposed to BE, and refusing to move it is what made one bad beat
+        // permanent. Only the down/death state machine is left alone.
+        if (!dead && !knocked_down && IsDown(fighter) && config.sync_enemies) {
+            SetDown(fighter, false);
+            entry.was_down = false;
+            if (config.verbose_enemies) {
+                SC_LOG("enemies: %s was floored locally but the host has it up -- restored",
+                       entry.name);
+            }
+        }
+
+        if (!dead && config.sync_enemies && !fights_us) {
             const ue::FVector target = {state.x, state.y, state.z};
             const ue::FRotator facing = {0.f, state.yaw, 0.f};
             const ue::FVector velocity = {state.velocity_x, state.velocity_y, state.velocity_z};
