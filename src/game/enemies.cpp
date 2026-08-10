@@ -1674,9 +1674,16 @@ void ApplyRemoteEnemies() {
                 const char* tgt = (state.flags & net::kEnemyTargetsPeer) ? "peer"
                                  : (state.flags & net::kEnemyTargetsHost) ? "host"
                                                                           : "none";
-                SC_LOG("esync: %s hp=%.0f/%.0f applied=%.0f/%.0f caught_up=%d down=%d "
+                // fac is here because the faction experiment produced no result
+                // at all: the puppet was never moved out of the players' faction
+                // because no enemy was ever found in a DIFFERENT one. Either
+                // Sifu's enemies share faction 0 with the players -- in which
+                // case faction is not what its AI discriminates on and that
+                // whole approach is dead -- or GetFaction does not answer for
+                // them. One number settles it.
+                SC_LOG("esync: %s fac=%d hp=%.0f/%.0f applied=%.0f/%.0f caught_up=%d down=%d "
                        "hostdown=%d dead=%d owned=%d tgt=%s",
-                       entry.name, GetHealth(fighter), state.health, state.damage_applied,
+                       entry.name, GetFaction(entry.actor), GetHealth(fighter), state.health, state.damage_applied,
                        entry.reported_total,
                        state.damage_applied + 0.05f >= entry.reported_total ? 1 : 0,
                        IsDown(fighter) ? 1 : 0, knocked_down ? 1 : 0, dead ? 1 : 0,
