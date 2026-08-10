@@ -1036,6 +1036,11 @@ void PumpRemoteOrders() {
         // task creates a valid delayed action from this exact enemy, so attacks
         // work from the first frame of a room even if the joining player has
         // not thrown a punch yet.
+        // An enemy thinking for itself here is already swinging on its own
+        // schedule. Replaying the host's copy of that swing on top gives it two
+        // attacks for one, a beat apart -- which is what "their attacks are
+        // unsynced with host and peer" describes.
+        if (EnemyRunsLocalBrain(actor_hash)) continue;
         if (ApplyEnemyAttack(actor_hash, attack_index, attack_depth)) {
             ++coop::GetStats().attacks_echoed;
         }

@@ -47,6 +47,11 @@ bool ApplyMirroredEnemyTargetForAttack(std::uint32_t hash);
 // stopping upright.
 void NoteEnemyDeathAnimation(std::uint32_t hash, ue::UObject* animation);
 
+// True when this enemy is running its own behaviour tree on this machine
+// (peer_fights_locally). Its attacks are real and local, so the host's echoed
+// copy of them must be dropped rather than played on top.
+bool EnemyRunsLocalBrain(std::uint32_t hash);
+
 // Everything Sifu's own AI attack launcher needs for one replicated swing.
 // `target` is the joining machine's body corresponding to the host's selected
 // player and may be null when the host had no readable lock. The other three

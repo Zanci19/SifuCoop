@@ -140,10 +140,19 @@ struct Config {
     // already decided -- each player resolves their own damage, because only a
     // running Sifu can adjudicate its own hitboxes and parry windows.
     //
-    // DEFAULT OFF. Those enemies stop being position-authoritative, so the two
-    // machines will disagree about where they are standing while it is on. That
-    // is the trade, and it is worth measuring before it becomes the default.
-    bool peer_fights_locally = false;
+    // DEFAULT ON, after a session that showed the alternative is not a fight at
+    // all: replayed enemy swings morph straight through the joining player, and
+    // every blow they land counts as an ambush that breaks structure outright.
+    //
+    // The cost is real and worth stating: an enemy fighting the joining player
+    // is no longer position-authoritative from the host, so the two machines
+    // will disagree about exactly where it stands. That is the right way round.
+    // Each player already resolves their own damage in this design, and the
+    // machine that must see an enemy accurately is the one it is fighting --
+    // enemies fighting the host stay host-driven, so nothing about the host's
+    // own fight changes. Set peer_fights_locally=0 to go back to a body that
+    // stands in the right place and cannot fight.
+    bool peer_fights_locally = true;
 
     bool fix_room_clear = false;      // nudge the local room-clear % to the host's
     // fix_room_clear is a real (if optional) mutation of the joiner's own game

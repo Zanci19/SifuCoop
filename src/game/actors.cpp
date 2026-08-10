@@ -550,6 +550,33 @@ bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
     // asserting relationships against it. Both ends are checked, because either
     // one can be the dead one.
     if (!ue::IsValidObject(social) || !ue::IsValidObject(toward)) return false;
+
+    // ...and IsValid is not enough on a level restart.
+    //
+    // The second crash here read 0xFFFFFFFFFFFFFFFF inside SetRelationship
+    // itself (SocialComponent.cpp:246), which is an empty map indexed with -1,
+    // not a freed one. That is the opposite end of the actor's life from the
+    // first crash: these are brand-new bodies whose social component exists but
+    // whose relationship storage has not been built yet, and this side was
+    // asserting against them within a frame or two of the world appearing.
+    //
+    // Both failures are the same rule in the end -- only talk to a settled
+    // world. The gate lives here rather than in the callers because there are
+    // now several of them and forgetting it crashes the game rather than
+    // producing a wrong colour somewhere.
+    static ue::UObject* seen_world = nullptr;
+    static DWORD world_settled_at = 0;
+    ue::UObject* world = ue::GetWorld();
+    if (!world) return false;
+    const DWORD now = GetTickCount();
+    if (world != seen_world) {
+        seen_world = world;
+        world_settled_at = now;
+        return false;
+    }
+    constexpr DWORD kWorldSettleMs = 5000;
+    if (now - world_settled_at < kWorldSettleMs) return false;
+
     if (g_set_relationship) {
         g_set_relationship(social, toward, static_cast<std::uint8_t>(value));
         return true;

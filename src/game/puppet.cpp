@@ -1929,6 +1929,11 @@ void TickPuppet() {
 
         ue::UObject* visual_actor = actor_hash ? FindEnemyByHash(actor_hash) : g_puppet;
         if (!visual_actor) continue;
+        // Same reason the echoed order is dropped for these: the body is
+        // animating its own swing already, and layering the host's copy of it
+        // through the Cinematic slot puts a second, differently-timed strike
+        // over the top.
+        if (actor_hash && EnemyRunsLocalBrain(actor_hash)) continue;
 
         wchar_t wide[192] = {};
         MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, 192);

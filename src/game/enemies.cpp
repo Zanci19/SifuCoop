@@ -1170,13 +1170,6 @@ void ApplyRemoteEnemies() {
         entry.seen_from_host = true;
         entry.ever_seen_from_host = true;
         entry.active = (state.flags & net::kEnemyActive) != 0;
-        // Apply the target before this frame's queued attack events run. This
-        // swaps host/peer perspective as documented in protocol.h, so a swing
-        // meant for the joining player cannot land on their host puppet.
-        ApplyMirroredTarget(entry, state.flags);
-
-        // Stop its brain once. Repeating every frame would be wasted work and
-        // would fight the engine if it ever legitimately restarts logic.
         // Enemies the host says are fighting THIS player are handed back to
         // their own brains, when that has been asked for. The host's director
         // will never allocate an attacker to the puppet standing in for this
@@ -1189,12 +1182,30 @@ void ApplyRemoteEnemies() {
             if (fights_us) {
                 if (StartBrain(entry.actor)) {
                     entry.ai_stopped = false;
+                    // Hand it a fight it already knows about. Otherwise the
+                    // first thing its restarted brain sees is a player who
+                    // appeared from nowhere, and Sifu treats that as an ambush:
+                    // structure broken outright and wide open to a takedown,
+                    // which is exactly what was reported.
+                    WakeEnemyPerception(entry.ai_fighting);
                     SC_LOG("enemies: %s handed to local AI -- it is fighting you", entry.name);
                 }
             } else {
                 entry.ai_stopped = false;  // make the next stop actually run
                 SC_LOG("enemies: %s returned to the host's drive", entry.name);
             }
+        }
+
+        // Only force a mirrored target onto a body that is NOT thinking for
+        // itself. Overwriting the target of an enemy running its own behaviour
+        // tree fights that tree every frame, and an enemy whose lock keeps being
+        // yanked swings where it was told to rather than where its opponent is
+        // -- which is what "their attacks morph through the client" looks like.
+        if (!fights_us) {
+            // Applied before this frame's queued attack events run: it swaps
+            // host/peer perspective as documented in protocol.h, so a swing
+            // meant for the joining player cannot land on their host puppet.
+            ApplyMirroredTarget(entry, state.flags);
         }
 
         if (config.suppress_client_ai && !fights_us) {
@@ -1626,6 +1637,14 @@ std::uint32_t EnemyHashForHealthComponent(const void* health_component) {
 // animation always arrives before the sweep that reports the body dead --
 // UHealthComponent::Kill sends it, and the enemy is only published as dead on
 // the following sweep.
+// True when this body is thinking for itself on this machine. Its swings are
+// its own, so the host's echoed attack for it must not be replayed on top --
+// that is two attacks for one, out of step with each other and with the host.
+bool EnemyRunsLocalBrain(std::uint32_t hash) {
+    const int index = FindTracked(hash);
+    return index >= 0 && g_tracked[index].local_brain;
+}
+
 void NoteEnemyDeathAnimation(std::uint32_t hash, ue::UObject* animation) {
     if (!animation) return;
     const int index = FindTracked(hash);
