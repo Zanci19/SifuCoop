@@ -150,6 +150,9 @@ struct Tracked {
     bool hostile_confirmed = false;
     // Running its own behaviour tree locally rather than following the host.
     bool local_brain = false;
+    // When the host first stopped saying this enemy fights the peer. Ownership
+    // is held for a few seconds past that, so a flickering flag cannot thrash it.
+    DWORD not_ours_since = 0;
     // The exact death sequence the host's lethal hit selected, handed over by
     // the Kill hook through the animation channel. Sifu picks this per
     // archetype, direction and killing move, so it is the difference between a
@@ -821,6 +824,7 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
             // and the very next frame stops it again -- the handover would last
             // until the first unmatched enemy and no longer.
             entry.local_brain = previous[k].local_brain;
+            entry.not_ours_since = previous[k].not_ours_since;
             break;
         }
     }
@@ -1261,8 +1265,52 @@ void ApplyRemoteEnemies() {
         // will never allocate an attacker to the puppet standing in for this
         // player, so the only place a real fight can happen for them is here,
         // where they are player zero and a legitimate target like any other.
-        const bool fights_us =
+        // Ownership is LATCHED, and that is the whole of three separate bugs.
+        //
+        // kEnemyTargetsPeer is sampled from the host's AI several times a second
+        // and flickers -- an enemy mid-swing routinely reads as targeting nobody.
+        // Deriving ownership straight from it meant the brain was restarted and
+        // stopped again over and over, and with it the drive authority and the
+        // position publisher. That is exactly "peer can sometimes attack, often
+        // not" and "positions are sometimes synced, often not": nothing was
+        // broken, everything was oscillating.
+        //
+        // It is also the likeliest source of the director crash. Sifu's own
+        // SuspiciousBTService, in a tree WE restarted, calls SwitchToAlerted,
+        // which has the director redistribute combat roles, which walks the
+        // ticket manager's weak pointers. Starting and stopping the same brain a
+        // few times a second is our doing, and it leaves that bookkeeping
+        // half-built.
+        //
+        // So: claimed the moment the host says this enemy is fighting the peer,
+        // and released only after it has said otherwise for a while -- or at
+        // once when the body dies or leaves the fight, because then the host's
+        // death handling has to own it again immediately.
+        const bool host_says_ours =
             config.peer_fights_locally && (state.flags & net::kEnemyTargetsPeer) != 0;
+        // `dead` proper is decided further down; this needs the same answer
+        // earlier, and it is the same two facts off the same packet.
+        const bool host_says_dead = (state.flags & net::kEnemyDead) != 0 ||
+                                    (state.max_health > 0.f && state.health <= 0.5f);
+        const bool must_release = host_says_dead || !entry.active;
+
+        if (host_says_ours && !must_release) {
+            entry.not_ours_since = 0;
+        } else if (entry.local_brain && entry.not_ours_since == 0) {
+            entry.not_ours_since = GetTickCount();
+        }
+
+        constexpr DWORD kReleaseAfterMs = 3000;
+        bool fights_us = entry.local_brain;
+        if (!entry.local_brain && host_says_ours && !must_release) {
+            fights_us = true;
+        } else if (entry.local_brain && must_release) {
+            fights_us = false;
+        } else if (entry.local_brain && entry.not_ours_since != 0 &&
+                   GetTickCount() - entry.not_ours_since >= kReleaseAfterMs) {
+            fights_us = false;
+        }
+
         if (fights_us != entry.local_brain) {
             entry.local_brain = fights_us;
             if (fights_us) {
@@ -1271,13 +1319,13 @@ void ApplyRemoteEnemies() {
                     // Hand it a fight it already knows about. Otherwise the
                     // first thing its restarted brain sees is a player who
                     // appeared from nowhere, and Sifu treats that as an ambush:
-                    // structure broken outright and wide open to a takedown,
-                    // which is exactly what was reported.
+                    // structure broken outright and wide open to a takedown.
                     WakeEnemyPerception(entry.ai_fighting, /*force_behaviour=*/true);
                     SC_LOG("enemies: %s handed to local AI -- it is fighting you", entry.name);
                 }
             } else {
                 entry.ai_stopped = false;  // make the next stop actually run
+                entry.not_ours_since = 0;
                 SC_LOG("enemies: %s returned to the host's drive", entry.name);
             }
         }
