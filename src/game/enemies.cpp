@@ -1525,11 +1525,17 @@ void ApplyRemoteEnemies() {
                 ue::UObject* death_world = ue::GetWorld();
                 ue::UObject* killer =
                     death_world ? ue::GetPlayerCharacter(death_world, 0) : nullptr;
-                if (!KillWithAnimation(fighter, killer,
-                                       have_death_anim ? entry.pending_death_anim : nullptr) &&
-                    GetHealth(fighter) > 0.5f) {
+                const bool killed = KillWithAnimation(
+                    fighter, killer, have_death_anim ? entry.pending_death_anim : nullptr);
+                if (!killed && GetHealth(fighter) > 0.5f) {
                     ApplyDamage(fighter, GetHealth(fighter) + 1.f);
                 }
+                // Measured, because "dead=1 down=0" says the body never went to
+                // the floor and nothing so far says which call failed to put it
+                // there.
+                SC_LOG("death: %s kill=%d anim=%d health_comp=%d -> down=%d", entry.name,
+                       killed ? 1 : 0, have_death_anim ? 1 : 0, fighter.health ? 1 : 0,
+                       IsDown(fighter) ? 1 : 0);
             }
             entry.pending_death_anim = nullptr;
             // Only for a REVIVAL now. Asserting the down state on a death used
@@ -1594,13 +1600,21 @@ void ApplyRemoteEnemies() {
             const DWORD esync_now = GetTickCount();
             if (esync_now - entry.last_esync_ms >= 1000) {
                 entry.last_esync_ms = esync_now;
+                // `tgt` is the one field that separates "the host never told us"
+                // from "we were told and did not claim it". The host's own
+                // census reports up to five enemies on the second player while
+                // the client claims none, and only this says which half is
+                // lying.
+                const char* tgt = (state.flags & net::kEnemyTargetsPeer) ? "peer"
+                                 : (state.flags & net::kEnemyTargetsHost) ? "host"
+                                                                          : "none";
                 SC_LOG("esync: %s hp=%.0f/%.0f applied=%.0f/%.0f caught_up=%d down=%d "
-                       "hostdown=%d dead=%d owned=%d",
+                       "hostdown=%d dead=%d owned=%d tgt=%s",
                        entry.name, GetHealth(fighter), state.health, state.damage_applied,
                        entry.reported_total,
                        state.damage_applied + 0.05f >= entry.reported_total ? 1 : 0,
                        IsDown(fighter) ? 1 : 0, knocked_down ? 1 : 0, dead ? 1 : 0,
-                       entry.local_brain ? 1 : 0);
+                       entry.local_brain ? 1 : 0, tgt);
             }
         }
 
