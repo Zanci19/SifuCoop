@@ -496,3 +496,53 @@ about where they are standing. That is the trade, and why it is off. Turn it on 
   nothing at all).
 - **Corpses / death animation on the joiner** is implemented but **unverified**: no enemy
   died in any of the three logged sessions, so there is no evidence either way yet.
+
+---
+
+## 14. THE LISTEN SERVER IS NOT POSSIBLE — settled 2026-08-10, do not retry
+
+`UWorld::Listen` is a **stub with no body** in the shipped executable. It was folded by
+the linker's identical-code-folding into the same address as every other trivial
+`return false;` function in the binary:
+
+```
+0x0085E7C0  shared by 82,450 symbols   <- UWorld::Listen
+0x00A58420  unique                     <- UIpNetDriver::InitListen
+0x01A33D60  unique                     <- AThePlainesGameMode::PostLogin
+0x0394F630  unique                     <- UWorld::ServerTravel
+0x019BC9E0  unique                     <- AFightingCharacter::GetLifetimeReplicatedProps
+```
+
+Count the symbols sharing an address: one means a real function, tens of thousands means
+ICF collapsed an empty body. Everything *around* networking survived the shipping build —
+the IP net driver can listen, the game mode can accept a login, characters really do declare
+replicated properties — but the single function that turns a loaded map into a server does
+nothing and returns false.
+
+That is why every route failed identically, and why none of the fixes along the way changed
+the outcome: `UEngine::LoadMap` calls `World->Listen(URL)`, gets false, and finishes loading
+the map as an ordinary standalone level. Confirmed with the driver active, the port free
+(7778), and the option verifiably delivered through `UGameplayStatics::OpenLevel`'s real
+`Options` parameter. The map reloads every time; the world is never networked.
+
+**The mistake to learn from:** `AFightingCharacter::GetLifetimeReplicatedProps` existing was
+treated as strong evidence that native co-op was reachable. It is a real function and the
+characters do replicate — but that says nothing about whether the server side survived
+packaging. The inference chain skipped the one function that had to exist, and the check
+that settled it (symbol count at the address) costs one `awk` line and should have been the
+first thing done, not the last.
+
+**What would still be theoretically possible**, and is not recommended: hand-building the
+listen server — `GEngine->CreateNamedNetDriver`, `UIpNetDriver::InitListen` (real), then
+assigning the driver to the world and setting its net mode by hand. That reimplements
+engine bookkeeping `LoadMap` normally does, needs an `FURL` built by hand, and a world
+member offset that is not in the reflection tables. High risk, and it would have to be right
+about several unverifiable things at once.
+
+**Consequence:** the UDP mirror is the architecture, not a stopgap. Perfect enemy parity
+between the two machines is not achievable — two simulations can be made to agree closely
+and never exactly. Effort is better spent making the mirror feel good than chasing identity
+it cannot reach.
+
+`native_network` is back to 0. The code and the two menu buttons are left in place, behind
+that switch, so nobody has to rediscover any of this.
