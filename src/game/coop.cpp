@@ -15,6 +15,9 @@ Config g_config;
 Stats g_stats;
 
 bool g_native_network_at_startup = false;
+// Whether the engine had the IpNetDriver config when it started, as opposed to
+// us having just written it for next time.
+bool g_native_driver_ready = false;
 const char* kSection = "coop";
 
 bool ReadBool(const char* key, bool fallback, const char* ini) {
@@ -76,6 +79,18 @@ void EnsureNativeIpNetDriverConfig() {
     }
 
     constexpr const char* kEngineSection = "/Script/Engine.Engine";
+
+    // Was it already there when the engine read its config, or are we writing it
+    // for the first time right now? That is the difference between "you can test
+    // this" and "this cannot possibly work yet", and getting it wrong already
+    // cost one test: the file was written during the very session it was then
+    // tested in, so the engine had read the old config before the file existed
+    // and the world could never have gone into listen mode.
+    char existing[512] = {};
+    GetPrivateProfileStringA(kEngineSection, "+NetDriverDefinitions", "", existing,
+                             sizeof(existing), ini);
+    g_native_driver_ready = strstr(existing, "IpNetDriver") != nullptr;
+
     const bool cleared = WritePrivateProfileStringA(kEngineSection, "!NetDriverDefinitions",
                                                     "ClearArray", ini) != FALSE;
     const bool wrote = WritePrivateProfileStringA(
@@ -84,8 +99,14 @@ void EnsureNativeIpNetDriverConfig() {
         "DriverClassNameFallback=\"OnlineSubsystemUtils.IpNetDriver\")",
         ini) != FALSE;
     if (cleared && wrote) {
-        SC_LOG("native-net: UIpNetDriver written to %s -- RESTART THE GAME ONCE for it to "
-               "take effect; hosting and joining by IP cannot work before that", ini);
+        if (g_native_driver_ready) {
+            SC_LOG("native-net: UIpNetDriver is ACTIVE for this session -- hosting and "
+                   "joining by IP can be tested now");
+        } else {
+            SC_LOG("native-net: UIpNetDriver written to %s, but this session already read "
+                   "the old config -- RESTART THE GAME ONCE. Testing before that cannot "
+                   "work and will report standalone", ini);
+        }
     } else {
         SC_LOG("native-net: could not write UIpNetDriver config (error=%lu)",
                static_cast<unsigned long>(GetLastError()));
@@ -97,6 +118,7 @@ void EnsureNativeIpNetDriverConfig() {
 Config& Get() { return g_config; }
 Stats& GetStats() { return g_stats; }
 bool NativeNetworkActive() { return g_native_network_at_startup; }
+bool NativeDriverReady() { return g_native_driver_ready; }
 
 void IniPath(char* out, int out_size) {
     if (!out || out_size <= 0) return;

@@ -242,6 +242,16 @@ void DrawLobbyTab(const MenuStatus& status) {
         ImGui::Separator();
         ImGui::TextUnformatted("UE4 listen server (experimental)");
         ImGui::TextDisabled("One simulation for both machines. Host first, then join.");
+        // Sifu's default net driver routes an `open` through EOS P2P, so the mod
+        // writes an IpNetDriver config -- which the engine only reads at startup.
+        // Pressing these before that restart cannot work and reports standalone,
+        // which is exactly how one test was already wasted. Say so instead.
+        if (!coop::NativeDriverReady()) {
+            ImGui::TextUnformatted("RESTART THE GAME ONCE first:");
+            ImGui::TextDisabled("the IpNetDriver config was written this session, and the");
+            ImGui::TextDisabled("engine read the old one before it existed.");
+        }
+        ImGui::BeginDisabled(!coop::NativeDriverReady());
         if (ImGui::Button("Host as listen server", ImVec2(180, 0))) {
             MenuRequests r;
             r.native_host = true;
@@ -253,6 +263,7 @@ void DrawLobbyTab(const MenuStatus& status) {
             r.native_join = true;
             PostRequests(r);
         }
+        ImGui::EndDisabled();
     }
 
     // A standing invite from the host. It is deliberately an offer rather than

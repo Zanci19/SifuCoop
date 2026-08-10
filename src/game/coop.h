@@ -278,6 +278,11 @@ Stats& GetStats();
 // live custom-mirror session from switching to the engine path after it has
 // already created its synthetic local player.
 bool NativeNetworkActive();
+
+// True when the engine started WITH the IpNetDriver config, so hosting and
+// joining by IP can actually work. False means the config was only just
+// written and the game needs one restart first.
+bool NativeDriverReady();
 // Reads SifuCoop.ini next to the executable. Missing keys keep their defaults,
 // so an ini written by an older build still works.
 void Load();
