@@ -1170,9 +1170,16 @@ void UpdateRates(DWORD now) {
 
 bool StartSession() {
     char host[128] = {};
+    // native_network no longer turns this off.
+    //
+    // It used to return here, which made enabling the engine path silently
+    // disconnect the working one -- the mirror never started, so nothing
+    // connected at all and the native path only does something when someone
+    // presses host or join in the menu. The two are additive: this keeps
+    // running, and the engine attempt is an extra thing that can be tried on
+    // top of a session that already works.
     if (coop::Get().native_network) {
-        SC_LOG("net: custom UDP mirror disabled (UE4 native networking selected)");
-        return false;
+        SC_LOG("net: UDP mirror starting as usual; UE4 native networking is also available");
     }
     int port = kDefaultPort;
     bool is_host = false;
