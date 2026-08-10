@@ -27,6 +27,7 @@ bool CoopGameplayActive();
 // sample is played on the peer's puppet only; it never invokes Sifu's attack
 // component, so it cannot create a hitbox or apply damage.
 void NotifyLocalAttackForCosmetic();
+void NotifyLocalSequenceSent();
 
 // Steers an actor toward a target using the game's movement component, so it
 // produces real locomotion animation. Shared with enemy replication -- an

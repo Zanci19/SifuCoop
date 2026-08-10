@@ -190,11 +190,12 @@ const char* GetPublicAddress();
 // peer's puppet without running the attack, so it cannot spawn a hitbox or
 // damage anyone. Their damage already resolved on their own machine.
 void SendMontageState(const char* montage_path, float position);
-void SendAnimationSequence(const char* asset_path);
+void SendAnimationSequence(const char* asset_path, std::uint32_t actor_hash = 0,
+                           float position = 0.f);
 
-// One pending animation from the peer, if any. Returns false when there is
-// nothing new -- this is edge-triggered, not a poll of current state.
-bool PopMontageState(char* out_path, int out_size, float* out_position, bool* out_raw_sequence);
+// Oldest pending animation from the peer, if any.
+bool PopMontageState(char* out_path, int out_size, float* out_position, bool* out_raw_sequence,
+                     std::uint32_t* out_actor_hash);
 
 int GetRoundTripMs();
 

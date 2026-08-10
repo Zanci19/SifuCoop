@@ -29,7 +29,7 @@ constexpr std::uint32_t kMagic = 0x53434F50;  // 'SCOP'
 // MEANING changes: `sequence` is now per packet type rather than one counter for
 // the whole socket, and a v11 peer's numbering would read as constant loss.
 // Peers refuse to talk across a mismatch rather than misinterpreting each other.
-constexpr std::uint16_t kProtocolVersion = 12;
+constexpr std::uint16_t kProtocolVersion = 13;
 
 // AUTHENTICATION
 //
@@ -297,6 +297,7 @@ struct MontagePacket {
     PacketHeader header;
     float position = 0.f;              // playback position when captured, for seeking
     std::uint8_t kind = 0;             // 0 = UAnimMontage, 1 = raw UAnimationAsset
+    std::uint32_t actor_hash = 0;       // 0 = remote player, otherwise replicated enemy
     std::uint8_t reserved[3] = {};
     char montage_path[192] = {};       // portable path of the animation asset
 };
@@ -308,6 +309,7 @@ static_assert(sizeof(SnapshotPacket) == 24 + 36 + 12 + 4, "snapshot layout chang
 static_assert(sizeof(OrderEventPacket) == 24 + 16, "order event layout changed");
 static_assert(sizeof(EnemyEntry) == 56, "enemy entry layout changed");
 static_assert(sizeof(RunStatePacket) == 24 + 4 + 4 + 4 + 192, "run state layout changed");
+static_assert(sizeof(MontagePacket) == 228, "montage packet layout changed");
 static_assert(sizeof(EnemyStatePacket) <= kMaxPacketSize, "enemy packet exceeds the buffer");
 static_assert(sizeof(EnemyDamagePacket) <= kMaxPacketSize, "damage packet exceeds the buffer");
 

@@ -62,6 +62,13 @@ void SetGuard(const Fighter& fighter, float guard);
 // rebuilt, but this overload takes a plain float.
 void ApplyDamage(const Fighter& fighter, float amount);
 
+// Runs Sifu's own kill path with the death sequence the killing machine
+// selected, so a replicated corpse falls the way it was hit instead of
+// stopping upright. False when the build did not expose Kill, when no
+// animation was carried, or with no instigator to attribute it to.
+bool KillWithAnimation(const Fighter& fighter, ue::UObject* instigator,
+                       ue::UObject* death_animation);
+
 bool IsDown(const Fighter& fighter);
 bool IsDead(const Fighter& fighter);
 

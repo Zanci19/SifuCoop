@@ -116,10 +116,29 @@ WANTED = {
     "UOrderComponent_PlayOrder": ["?PlayOrder@UOrderComponent@@QEAA"],
     "UAttackComponent_PrepareToLaunchAttack": ["?PrepareToLaunchAttack@UAttackComponent@@QEAA"],
     "UAttackComponent_StaticClass": ["?StaticClass@UAttackComponent@@SA"],
+    "UAIFightingComponent_GetAttackHandler": [
+        "?GetAttackHandler@UAIFightingComponent@@QEBAAEAVFAIAttackHandler"
+    ],
+    "FAIAttackHandler_PrepareNextAttack": ["?PrepareNextAttack@FAIAttackHandler@@AEAA_NXZ"],
+    # Builds a fresh delayed action from one AI fighter's own ability state.
+    # This is the safe receiving-side entry point for host enemy attacks.
+    "UAttackBTTask_LaunchAttack": [
+        "?LaunchAttack@UAttackBTTask@@CAEAEAVAFightingCharacter"
+    ],
+    # The AI launcher copies its handler target through this method immediately
+    # before PrepareToLaunchAttack. Hooking it lets a stopped client AI use the
+    # host's mirrored target without touching FAIAttackHandler private memory.
+    "UAttackComponent_SetNextAttackTarget": ["?SetNextAttackTarget@UAttackComponent@@QEAA"],
     # The actual "perform this attack" call, downstream of move selection.
     "UAttackComponent_LaunchAttack": ["?LaunchAttack@UAttackComponent@@AEAA"],
     "OrderAttack_GetAnimPlayed": ["?GetAnimPlayed@OrderAttack@@UEBAPEAVUAnimSequence@@XZ"],
     "OrderAttack_OnStart": ["?OnStart@OrderAttack@@UEAAXXZ"],
+    # Shared base update used by enemy animation instances. Raw sequences are
+    # layered through USCAnimInstance's Cinematic slot; its weight must be
+    # restored after this update, immediately before graph evaluation.
+    "USCAnimInstance_NativeUpdateAnimation": [
+        "?NativeUpdateAnimation@USCAnimInstance@@UEAAXM@Z"
+    ],
     "UPlayerAnim_NativeUpdateAnimation": ["?NativeUpdateAnimation@UPlayerAnim@@EEAAXM@Z"],
     # Exact locomotion-state setter. FSpeedState is five bytes (four booleans
     # plus ESpeedState); writing only the booleans left the graph's enum at V0.
@@ -148,6 +167,12 @@ WANTED = {
     ],
     # Host-side aggro handoff when damage arrived from the joining player.
     "UAttackComponent_SetTarget": ["?SetTarget@UAttackComponent@@QEAAXPEAVAActor@@@Z"],
+    # BPF_ServerChangeRelationship dispatched successfully but did not mutate
+    # the authoritative relationship on either shipped build. This native
+    # setter updates the social map and broadcasts its change callback.
+    "USocialComponent_SetRelationship": [
+        "?SetRelationship@USocialComponent@@QEAAXPEAVAActor@@W4ERelationshipTypes@@@Z"
+    ],
     # THE move selector. Returns the attack id that ends up in the delayed
     # action struct, so overriding its return value is how a specific move is
     # chosen -- the struct itself is downstream and ignores what we write.
@@ -175,6 +200,8 @@ WANTED = {
     # How the host applies the damage its peer dealt: a plain float, so there is
     # no FDamageInfos to reconstruct (its damage value is not even reflected).
     "UHealthComponent_BPF_ApplyDamage": ["?BPF_ApplyDamage@UHealthComponent@@QEAAXM@Z"],
+    # Carries the exact death UAnimSequence selected from the lethal hit.
+    "UHealthComponent_Kill": ["?Kill@UHealthComponent@@UEAAXW4EApplyDamageBehavior@@"],
     # (BPF_SetCanBeDamaged is inlined away -- only its exec thunk survives, so
     # invincibility goes through AFightingCharacter::BPF_SetInvincibility.)
     "UHealthComponent_IsDead": ["?IsDead@UHealthComponent@@UEBA_NXZ"],

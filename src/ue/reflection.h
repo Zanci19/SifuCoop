@@ -59,10 +59,11 @@ bool ReadAnimState(UObject* actor, AnimState* out);
 // Plays `montage` on `actor` and seeks it to `position`.
 bool ApplyAnimState(UObject* actor, const AnimState& state);
 
-// Plays a raw UAnimationAsset directly on the mesh, without entering Sifu's
-// UAttackComponent. This is the safe path for a peer's strike: it produces a
-// visible swing but no hitbox, target selection, damage or combat state.
-bool PlayAnimationAsset(UObject* actor, UObject* animation_asset);
+// Plays a raw UAnimationAsset as a dynamic montage through the player
+// AnimBlueprint's Cinematic slot, without entering Sifu's UAttackComponent.
+// This produces a visible strike but no hitbox, target selection or damage,
+// and it never tears down the locomotion graph.
+bool PlayAnimationAsset(UObject* actor, UObject* animation_asset, float start_at = 0.f);
 
 // Restores the mesh to its AnimBlueprint after PlayAnimationAsset. UE switches
 // the component to single-node mode while a raw sequence is playing.

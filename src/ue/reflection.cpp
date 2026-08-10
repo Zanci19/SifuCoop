@@ -262,22 +262,41 @@ bool ApplyAnimState(UObject* actor, const AnimState& state) {
     return true;
 }
 
-bool PlayAnimationAsset(UObject* actor, UObject* animation_asset) {
+bool PlayAnimationAsset(UObject* actor, UObject* animation_asset, float start_at) {
     if (!animation_asset) return false;
-    UObject* mesh = GetSkeletalMeshComponent(actor);
-    if (!mesh) return false;
-    // USkeletalMeshComponent::PlayAnimation(UAnimationAsset*, bool bLooping).
-    // Two parameters, and that is all -- the three extra bools this struct used
-    // to carry do not exist on this function in UE 4.26, so setting
-    // "bPreventAnimScriptInstanceClear" was writing into space the engine never
-    // reads. It did not prevent anything: single-node mode clears the animation
-    // blueprint instance every time, which is why the graph has to be put back
-    // deliberately afterwards. See RestoreAnimationBlueprint.
+    UObject* anim_instance = GetAnimInstance(actor);
+    if (!anim_instance) return false;
+
+    // The shipped player AnimBlueprint contains full-body AnimNode_Slot nodes
+    // named Cinematic and Cinematic2. Playing a raw sequence as a dynamic
+    // montage through that graph preserves locomotion; PlayAnimation switches
+    // the mesh to single-node mode and destroys the AnimBlueprint instance.
     struct Params {
-        UObject* NewAnimToPlay;
-        bool bLooping;
-    } params = {animation_asset, false};
-    return CallFunction(mesh, L"PlayAnimation", &params);
+        UObject* Asset;
+        FName SlotNodeName;
+        float BlendInTime;
+        float BlendOutTime;
+        float InPlayRate;
+        std::int32_t LoopCount;
+        float BlendOutTriggerTime;
+        float InTimeToStartMontageAt;
+        UObject* ReturnValue;
+    } params = {};
+    params.Asset = animation_asset;
+    params.SlotNodeName = MakeName(L"Cinematic");
+    params.BlendInTime = 0.03f;
+    params.BlendOutTime = 0.08f;
+    params.InPlayRate = 1.f;
+    params.LoopCount = 1;
+    params.BlendOutTriggerTime = -1.f;
+    // Join an action already in progress at the point the sender had reached,
+    // rather than restarting it. A fall replayed from the top after the body
+    // has already hit the floor reads as a second, phantom knockdown.
+    params.InTimeToStartMontageAt = start_at > 0.f ? start_at : 0.f;
+    if (!CallFunction(anim_instance, L"PlaySlotAnimationAsDynamicMontage", &params)) {
+        return false;
+    }
+    return params.ReturnValue != nullptr;
 }
 
 void* GetAnimInstanceClass(UObject* actor) {

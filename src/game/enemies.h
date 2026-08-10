@@ -35,11 +35,31 @@ ue::UObject* FindEnemyByHash(std::uint32_t hash);
 // table lookup rather than a walk back up to the actor, because it runs on the
 // hot path of every attack in the level.
 std::uint32_t EnemyHashForAttackComponent(const void* attack_component);
+std::uint32_t EnemyHashForHealthComponent(const void* health_component);
 
 // Sets the joining machine's attack component target to the body equivalent to
 // the target the host selected. Called immediately before replaying an enemy
 // order, so an old target can never redirect the hitbox to the wrong player.
 bool ApplyMirroredEnemyTargetForAttack(std::uint32_t hash);
+
+// Hands the animation channel's death sequence to the enemy it belongs to, so
+// the body falls the way the host's killing blow made it fall rather than
+// stopping upright.
+void NoteEnemyDeathAnimation(std::uint32_t hash, ue::UObject* animation);
+
+// Everything Sifu's own AI attack launcher needs for one replicated swing.
+// `target` is the joining machine's body corresponding to the host's selected
+// player and may be null when the host had no readable lock. The other three
+// fields must all be present for a real local attack order to be created.
+struct EnemyAttackContext {
+    ue::UObject* actor = nullptr;
+    ue::UObject* attack_component = nullptr;
+    ue::UObject* ai_fighting = nullptr;
+    ue::UObject* target = nullptr;
+};
+
+bool PrepareMirroredEnemyAttack(std::uint32_t hash, EnemyAttackContext* out);
+
 // Rows for the overlay's live sync table.
 struct EnemyRow {
     std::uint32_t hash;

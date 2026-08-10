@@ -567,16 +567,20 @@ void FillHeader(PacketHeader* header, PacketType type) {
 // meaningless to a new one: without this, a reconnect interpolates the puppet
 // from wherever the last peer was standing, and a stale sequence number can
 // silently discard every packet of the new session.
-// Edge-triggered: only the newest montage matters, and a queue would replay a
-// backlog of stale animations after any stall.
-char g_montage_path[192] = {};
-float g_montage_position = 0.f;
-bool g_montage_is_raw_sequence = false;
-bool g_have_montage = false;
+struct PendingAnimation {
+    char path[192] = {};
+    float position = 0.f;
+    std::uint32_t actor_hash = 0;
+    bool raw_sequence = false;
+};
+constexpr int kAnimationQueueSize = 32;
+PendingAnimation g_animation_queue[kAnimationQueueSize] = {};
+int g_animation_read = 0;
+int g_animation_write = 0;
 
 void ResetLevelSyncState();
 void ResetPeerState() {
-    g_have_montage = false;
+    g_animation_read = g_animation_write = 0;
     ResetLevelSyncState();
     for (PeerState& state : g_peer_buffer) state.valid = false;
     g_peer_head = 0;
@@ -875,10 +879,16 @@ void HandlePong(const PingPacket& packet) {
 }
 
 void HandleMontage(const MontagePacket& packet) {
-    lstrcpynA(g_montage_path, packet.montage_path, sizeof(g_montage_path));
-    g_montage_position = packet.position;
-    g_montage_is_raw_sequence = packet.kind == 1;
-    g_have_montage = true;
+    const int next = (g_animation_write + 1) % kAnimationQueueSize;
+    if (next == g_animation_read) {
+        g_animation_read = (g_animation_read + 1) % kAnimationQueueSize;
+    }
+    PendingAnimation& pending = g_animation_queue[g_animation_write];
+    lstrcpynA(pending.path, packet.montage_path, sizeof(pending.path));
+    pending.position = packet.position;
+    pending.actor_hash = packet.actor_hash;
+    pending.raw_sequence = packet.kind == 1;
+    g_animation_write = next;
 }
 
 void HandleRunState(const RunStatePacket& packet) {
@@ -1542,21 +1552,29 @@ void SendMontageState(const char* montage_path, float position) {
     SendPacket(&packet, sizeof(packet));
 }
 
-void SendAnimationSequence(const char* asset_path) {
+void SendAnimationSequence(const char* asset_path, std::uint32_t actor_hash, float position) {
     if (!g_connected || !asset_path || !asset_path[0]) return;
     MontagePacket packet = {};
     FillHeader(&packet.header, PacketType::MontageState);
     packet.kind = 1;
+    // Where the sender already is in it. A strike sends 0 and starts from the
+    // top; an action sampled mid-play sends its cursor so the peer joins it at
+    // the same point instead of restarting a fall that is half over.
+    packet.position = position;
     lstrcpynA(packet.montage_path, asset_path, sizeof(packet.montage_path));
+    packet.actor_hash = actor_hash;
     SendPacket(&packet, sizeof(packet));
 }
 
-bool PopMontageState(char* out_path, int out_size, float* out_position, bool* out_raw_sequence) {
-    if (!g_have_montage || !out_path || out_size <= 0) return false;
-    g_have_montage = false;
-    lstrcpynA(out_path, g_montage_path, out_size);
-    if (out_position) *out_position = g_montage_position;
-    if (out_raw_sequence) *out_raw_sequence = g_montage_is_raw_sequence;
+bool PopMontageState(char* out_path, int out_size, float* out_position, bool* out_raw_sequence,
+                     std::uint32_t* out_actor_hash) {
+    if (g_animation_read == g_animation_write || !out_path || out_size <= 0) return false;
+    const PendingAnimation& pending = g_animation_queue[g_animation_read];
+    lstrcpynA(out_path, pending.path, out_size);
+    if (out_position) *out_position = pending.position;
+    if (out_raw_sequence) *out_raw_sequence = pending.raw_sequence;
+    if (out_actor_hash) *out_actor_hash = pending.actor_hash;
+    g_animation_read = (g_animation_read + 1) % kAnimationQueueSize;
     return true;
 }
 

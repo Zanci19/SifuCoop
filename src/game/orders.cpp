@@ -180,6 +180,67 @@ using GeNextAttackIDFn = int(__fastcall*)(const void* self, const void* characte
 
 GeNextAttackIDFn g_original_next_attack_id = nullptr;
 
+// Sifu's AI task constructs a fresh FDelayedActionAttack from the destination
+// enemy's own ability system and combo state. This is the only safe replay
+// source: a delayed action copied from another fighter contains a private
+// ability id at +0x24 and PrepareToLaunchAttack rejects it immediately.
+using LaunchAIAttackFn = unsigned char(__fastcall*)(void* character, void* attack_component,
+                                                    void* blackboard,
+                                                    void* ai_fighting_component);
+using GetAttackHandlerFn = void*(__fastcall*)(void* ai_fighting_component);
+using PrepareNextAIAttackFn = unsigned char(__fastcall*)(void* attack_handler);
+using SetNextAttackTargetFn = void(__fastcall*)(void* attack_component, void* target);
+
+LaunchAIAttackFn g_launch_ai_attack = nullptr;
+GetAttackHandlerFn g_get_attack_handler = nullptr;
+PrepareNextAIAttackFn g_prepare_next_ai_attack = nullptr;
+SetNextAttackTargetFn g_original_set_next_attack_target = nullptr;
+void* g_replay_attack_component = nullptr;
+void* g_replay_attack_target = nullptr;
+
+void __fastcall SetNextAttackTargetHook(void* attack_component, void* target) {
+    // UAttackBTTask::LaunchAttack normally copies FAIAttackHandler's local
+    // target into the attack component. The joining side's brain is stopped,
+    // so that handler can be stale. Substitute the host-mirrored body only for
+    // the one synchronous replay call that armed this override.
+    if (attack_component == g_replay_attack_component && g_replay_attack_target) {
+        target = g_replay_attack_target;
+    }
+    g_original_set_next_attack_target(attack_component, target);
+}
+
+// The lethal-hit path already selected the archetype-, direction- and move-
+// specific defender sequence. Observe it instead of guessing a generic corpse
+// animation. Only the host publishes it; client health reconciliation re-enters
+// Kill and must not echo the event back.
+using HealthKillFn = void(__fastcall*)(void* health_component, std::int32_t behavior,
+                                      ue::UObject* instigator, ue::UObject* death_animation,
+                                      bool option_a, bool option_b);
+HealthKillFn g_original_health_kill = nullptr;
+
+void __fastcall HealthKillHook(void* health_component, std::int32_t behavior,
+                               ue::UObject* instigator, ue::UObject* death_animation,
+                               bool option_a, bool option_b) {
+    std::uint32_t actor_hash = 0;
+    char death_path[192] = {};
+    if (net::GetRole() == net::Role::Host && net::IsConnected() &&
+        coop::Get().echo_enemy_attacks && death_animation) {
+        actor_hash = EnemyHashForHealthComponent(health_component);
+        if (!actor_hash ||
+            !ue::GetObjectPathName(death_animation, death_path, sizeof(death_path))) {
+            actor_hash = 0;
+        }
+    }
+
+    g_original_health_kill(health_component, behavior, instigator, death_animation,
+                           option_a, option_b);
+
+    if (actor_hash && death_path[0]) {
+        net::SendAnimationSequence(death_path, actor_hash);
+        SC_LOG("death: exact enemy sequence sent actor=%08X", actor_hash);
+    }
+}
+
 // Armed just before a replayed attack is triggered, and consumed by the very
 // next decision for that character. Deliberately one-shot and character-scoped
 // so it can never leak into the local player's own combos.
@@ -407,15 +468,6 @@ constexpr int kDeferredPlayerOrderCount = 16;
 DeferredPlayerOrder g_deferred_player_orders[kDeferredPlayerOrderCount] = {};
 int g_deferred_player_order_count = 0;
 
-struct DeferredEnemyOrder {
-    std::uint32_t actor_hash = 0;
-    std::uint32_t type = 0;
-    std::int32_t index = 0;
-    std::int32_t depth = 0;
-};
-constexpr int kDeferredEnemyOrderCount = 32;
-DeferredEnemyOrder g_deferred_enemy_orders[kDeferredEnemyOrderCount] = {};
-int g_deferred_enemy_order_count = 0;
 using PrepareAttackFn = unsigned char(__fastcall*)(void* self, const void* delayed_action);
 
 // DelayedActionAttack::ToString was tried and must not be tried again.
@@ -439,56 +491,43 @@ OrderAttackOnStartFn g_original_order_attack_on_start = nullptr;
 struct PendingCosmeticSequence {
     const void* order = nullptr;
     DWORD armed_ms = 0;
+    std::uint32_t actor_hash = 0;
 };
 
 constexpr int kPendingCosmeticSequenceCount = 16;
 PendingCosmeticSequence g_pending_cosmetic_sequences[kPendingCosmeticSequenceCount] = {};
 
-// Some player moves on the Steam build reach PrepareToLaunchAttack and OnStart
-// without crossing the observed LaunchAttack entry point. Keep a tiny local-only
-// handoff window so OnStart can still identify that attack's finished sequence.
-// It is cosmetic-only: this path sends an asset name, never replays UAttack.
-DWORD g_local_cosmetic_sequence_until = 0;
-
-void ArmCosmeticSequence(const void* order) {
+void ArmCosmeticSequence(const void* order, std::uint32_t actor_hash) {
     if (!order) return;
     const DWORD now = GetTickCount();
     for (PendingCosmeticSequence& pending : g_pending_cosmetic_sequences) {
         if (pending.order == order || pending.order == nullptr || now - pending.armed_ms > 1000) {
-            pending = {order, now};
+            pending = {order, now, actor_hash};
             return;
         }
     }
-    g_pending_cosmetic_sequences[0] = {order, now};
+    g_pending_cosmetic_sequences[0] = {order, now, actor_hash};
 }
 
 void __fastcall OrderAttackOnStartHook(void* order) {
     g_original_order_attack_on_start(order);
-    if (!order || g_mirroring || !net::IsConnected() || !coop::Get().remote_player_attacks ||
+    if (!order || g_mirroring || !net::IsConnected() ||
         offsets::OrderAttack_GetAnimPlayed == 0) {
         return;
     }
 
+    std::uint32_t actor_hash = 0;
     bool armed = false;
     for (PendingCosmeticSequence& pending : g_pending_cosmetic_sequences) {
         if (pending.order != order) continue;
+        actor_hash = pending.actor_hash;
         pending = {};
         armed = true;
         break;
     }
-    const DWORD now = GetTickCount();
-    if (!armed && g_local_cosmetic_sequence_until && now < g_local_cosmetic_sequence_until) {
-        // PrepareToLaunchAttack already proved that the local player is the
-        // source. This covers the storefront path whose LaunchAttack observer
-        // does not see the player order, while preserving the exact-order path
-        // above whenever it is available.
-        g_local_cosmetic_sequence_until = 0;
-        armed = true;
-        SC_LOG("attack: cosmetic sequence sourced from local prepare handoff");
-    } else if (g_local_cosmetic_sequence_until && now >= g_local_cosmetic_sequence_until) {
-        g_local_cosmetic_sequence_until = 0;
-    }
     if (!armed) return;
+    if (actor_hash == 0 && !coop::Get().remote_player_attacks) return;
+    if (actor_hash != 0 && !coop::Get().echo_enemy_attacks) return;
 
     using GetAnimPlayedFn = ue::UObject*(__fastcall*)(const void*);
     auto get_anim =
@@ -499,8 +538,9 @@ void __fastcall OrderAttackOnStartHook(void* order) {
         SC_LOG("attack: OrderAttack OnStart had no portable sequence");
         return;
     }
-    net::SendAnimationSequence(path);
-    SC_LOG("attack: cosmetic sequence sent after OnStart");
+    net::SendAnimationSequence(path, actor_hash);
+    if (actor_hash == 0) NotifyLocalSequenceSent();
+    SC_LOG("attack: cosmetic sequence sent after OnStart actor=%08X", actor_hash);
 }
 
 // Read-only. The OrderAttack's vtable identifies its concrete type, and any
@@ -526,16 +566,14 @@ extern "C" void sifucoop_on_launch_attack(void* self, const void* order_ref,
 
     // This is pre-start, so GetAnimPlayed is expected to be null here. Arm the
     // object instead; OrderAttack::OnStart sends the sequence after Sifu fills it.
-    const DWORD now = GetTickCount();
     const bool exact_local_component = self == LocalPlayerAttackComponent();
-    const bool local_prepare_handoff = g_local_cosmetic_sequence_until &&
-                                       now < g_local_cosmetic_sequence_until;
-    if ((exact_local_component || local_prepare_handoff) && net::IsConnected() &&
+    if (exact_local_component && net::IsConnected() &&
         coop::Get().remote_player_attacks) {
-        ArmCosmeticSequence(order);
-        if (!exact_local_component && local_prepare_handoff) {
-            SC_LOG("attack: LaunchAttack source fallback armed");
-        }
+        ArmCosmeticSequence(order, 0);
+    } else if (!g_mirroring && net::GetRole() == net::Role::Host &&
+               net::IsConnected() && coop::Get().echo_enemy_attacks) {
+        const std::uint32_t enemy_hash = EnemyHashForAttackComponent(self);
+        if (enemy_hash != 0) ArmCosmeticSequence(order, enemy_hash);
     }
 
     if (log_this) {
@@ -609,10 +647,8 @@ extern "C" void sifucoop_on_prepare_attack(void* self, const void* delayed_actio
         }
         if (from_local_player) {
             if (net::IsConnected() && coop::Get().remote_player_attacks) {
-                // Both raw OrderAttack sequences and regular montages are
-                // possible here. The latter is sampled in TickPuppet; the
-                // former is claimed by OnStart through this local window.
-                g_local_cosmetic_sequence_until = GetTickCount() + 750;
+                // LaunchAttack identifies the exact player OrderAttack; TickPuppet
+                // samples regular montages as a fallback for non-sequence moves.
                 NotifyLocalAttackForCosmetic();
             }
             if (ue::GetObjectPathName(tree, g_last_intent.tree_path,
@@ -790,7 +826,6 @@ void InvalidateAttackTemplate() {
     g_have_template = false;
     g_template_from_player = false;
     g_deferred_player_order_count = 0;
-    g_deferred_enemy_order_count = 0;
     g_last_intent.valid = false;
     if (had_template) {
         SC_LOG("order: attack template invalidated (pawn changed)");
@@ -849,6 +884,62 @@ bool ApplyAttackTo(ue::UObject* actor, std::int32_t attack_index, std::int32_t a
     // character did next.
     g_forced_character = nullptr;
     g_forced_attack_id = -1;
+    return true;
+}
+
+// Replays a host enemy swing by asking the destination enemy's own AI task to
+// build it. Unlike ApplyAttackTo (kept for explicit player-versus diagnostics),
+// this never copies FDelayedActionAttack across fighters. The resulting local
+// OrderAttack drives the real animation, hitbox, parry and avoid windows.
+bool ApplyEnemyAttack(std::uint32_t actor_hash, std::int32_t attack_index,
+                      std::int32_t attack_depth) {
+    (void)attack_depth;
+    if (!g_launch_ai_attack || !g_get_attack_handler || !g_prepare_next_ai_attack) return false;
+
+    EnemyAttackContext context = {};
+    if (!PrepareMirroredEnemyAttack(actor_hash, &context)) return false;
+    void* attack_handler = g_get_attack_handler(context.ai_fighting);
+    if (!attack_handler) return false;
+
+    g_forced_character = context.actor;
+    g_forced_attack_id = attack_index;
+    g_replay_attack_component = context.attack_component;
+    g_replay_attack_target = context.target;
+
+    // The PDB signature includes a UBlackboardComponent reference, but the
+    // shipped function does not read R8 anywhere on this path. All state it
+    // consumes comes from the character, attack component and AI fighting
+    // component, and it creates the delayed action itself on the stack. Since
+    // this peer's behavior-tree brain is stopped, explicitly run the handler's
+    // selection step first; that seeds the combo manager's pending attack that
+    // the BT task normally inherits from an earlier AI tick.
+    g_mirroring = true;
+    const unsigned char prepared = g_prepare_next_ai_attack(attack_handler);
+    const unsigned char result = prepared
+        ? g_launch_ai_attack(context.actor, context.attack_component, nullptr,
+                             context.ai_fighting)
+        : 0;
+    g_mirroring = false;
+
+    g_replay_attack_component = nullptr;
+    g_replay_attack_target = nullptr;
+    g_forced_character = nullptr;
+    g_forced_attack_id = -1;
+
+    if (!result) {
+        static unsigned long long rejected = 0;
+        if (++rejected <= 10 || coop::Get().verbose_orders) {
+            SC_LOG("remote: enemy %08X native attack %s rejected (index=0x%X)",
+                   actor_hash, prepared ? "launch" : "selection", attack_index);
+        }
+        return false;
+    }
+
+    static unsigned long long applied = 0;
+    if (++applied <= 20 || coop::Get().verbose_orders) {
+        SC_LOG("remote: enemy %08X native attack launched (index=0x%X target=%s)",
+               actor_hash, attack_index, context.target ? "mirrored" : "local lock");
+    }
     return true;
 }
 
@@ -924,20 +1015,6 @@ void PumpRemoteOrders() {
     }
 
     while (net::PopOrderEvent(&actor_hash, &order_type, &attack_index, &attack_depth)) {
-    if (g_have_template && g_deferred_enemy_order_count > 0) {
-        SC_LOG("remote: replaying %d enemy attacks held until local template",
-               g_deferred_enemy_order_count);
-        for (int i = 0; i < g_deferred_enemy_order_count; ++i) {
-            const DeferredEnemyOrder& deferred = g_deferred_enemy_orders[i];
-            ue::UObject* enemy = FindEnemyByHash(deferred.actor_hash);
-            if (!enemy) continue;
-            ApplyMirroredEnemyTargetForAttack(deferred.actor_hash);
-            if (ApplyAttackTo(enemy, deferred.index, deferred.depth)) {
-                ++coop::GetStats().attacks_echoed;
-            }
-        }
-        g_deferred_enemy_order_count = 0;
-    }
         if (actor_hash == 0) {
             if (replay_player) {
                 if (g_have_template) {
@@ -955,34 +1032,11 @@ void PumpRemoteOrders() {
         // An enemy's swing, relayed by the host. Only the joining side ever
         // receives these -- the host is the one deciding them.
         if (!coop::Get().echo_enemy_attacks) continue;
-        if (!g_have_template) {
-            if (g_deferred_enemy_order_count < kDeferredEnemyOrderCount) {
-                g_deferred_enemy_orders[g_deferred_enemy_order_count++] =
-                    {actor_hash, order_type, attack_index, attack_depth};
-            }
-            WarnNoTemplate();
-            continue;
-        }
-        ue::UObject* enemy = FindEnemyByHash(actor_hash);
-        if (!enemy) continue;
-        // A replayed attack creates a real local hitbox, so the host's chosen
-        // target is applied first where there IS one -- otherwise a stale lock
-        // can send a swing meant for the joining player into their host puppet
-        // instead.
-        //
-        // But a missing target is not a reason to drop the attack. The host
-        // reads its enemies' targets through BPF_GetTargetForAction, which
-        // frequently answers "none" even for an enemy that is mid-swing (the
-        // live log shows whole rooms reporting no target at all). Refusing
-        // every one of those meant enemy attacks essentially never played on the
-        // joining machine -- half of "the animations aren't playing". With no
-        // target flag we simply leave the local body's own lock alone and let
-        // the swing land wherever it lands, which is what the host's copy did.
-        if (!ApplyMirroredEnemyTargetForAttack(actor_hash) && coop::Get().verbose_orders) {
-            SC_LOG("remote: enemy %08X attacked with no mirrored target -- "
-                   "playing it on its existing lock", actor_hash);
-        }
-        if (ApplyAttackTo(enemy, attack_index, attack_depth)) {
+        // This path deliberately has no local-template prerequisite. Sifu's AI
+        // task creates a valid delayed action from this exact enemy, so attacks
+        // work from the first frame of a room even if the joining player has
+        // not thrown a punch yet.
+        if (ApplyEnemyAttack(actor_hash, attack_index, attack_depth)) {
             ++coop::GetStats().attacks_echoed;
         }
     }
@@ -1009,7 +1063,7 @@ void ReplayAttackOnPuppet() {
 // F6 on the nearest enemy instead of the puppet: the same path the joining
 // side runs for every enemy swing, testable with one machine and one keypress.
 void ReplayAttackOnNearestEnemy() {
-    if (!g_have_template) {
+    if (!g_last_intent.valid) {
         SC_LOG("replay: no attack captured yet -- throw a punch first");
         return;
     }
@@ -1037,7 +1091,7 @@ void ReplayAttackOnNearestEnemy() {
         SC_LOG("replay: no active enemy nearby");
         return;
     }
-    const bool ok = ApplyAttackTo(enemy, g_last_intent.index, g_last_intent.depth);
+    const bool ok = ApplyEnemyAttack(best_hash, g_last_intent.index, g_last_intent.depth);
     SC_LOG("replay: enemy %08X at %.0f units -> %s", best_hash, best_distance,
            ok ? "attacking" : "FAILED");
 }
@@ -1098,6 +1152,39 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
     } else {
         SC_LOG("order: move selector hook FAILED -- attacks will not match");
     }
+
+    if (offsets::UHealthComponent_Kill != 0) {
+        auto* health_kill = reinterpret_cast<void*>(base + offsets::UHealthComponent_Kill);
+        if (MH_CreateHook(health_kill, reinterpret_cast<void*>(&HealthKillHook),
+                          reinterpret_cast<void**>(&g_original_health_kill)) == MH_OK &&
+            MH_EnableHook(health_kill) == MH_OK) {
+            SC_LOG("death: exact sequence observer ACTIVE at %p", health_kill);
+        } else {
+            g_original_health_kill = nullptr;
+            SC_LOG("death: exact sequence observer FAILED -- generic down fallback remains");
+        }
+    }
+
+    g_launch_ai_attack = reinterpret_cast<LaunchAIAttackFn>(
+        base + offsets::UAttackBTTask_LaunchAttack);
+
+    g_get_attack_handler = reinterpret_cast<GetAttackHandlerFn>(
+        base + offsets::UAIFightingComponent_GetAttackHandler);
+    g_prepare_next_ai_attack = reinterpret_cast<PrepareNextAIAttackFn>(
+        base + offsets::FAIAttackHandler_PrepareNextAttack);
+    auto* set_next_target = reinterpret_cast<void*>(
+        base + offsets::UAttackComponent_SetNextAttackTarget);
+    if (MH_CreateHook(set_next_target, reinterpret_cast<void*>(&SetNextAttackTargetHook),
+                      reinterpret_cast<void**>(&g_original_set_next_attack_target)) == MH_OK &&
+        MH_EnableHook(set_next_target) == MH_OK) {
+        SC_LOG("order: mirrored enemy target hook ACTIVE at %p", set_next_target);
+    } else {
+        g_original_set_next_attack_target = nullptr;
+        SC_LOG("order: mirrored enemy target hook FAILED -- attacks use local AI lock");
+    }
+
+    SC_LOG("order: native per-enemy attack replay ready at %p",
+           reinterpret_cast<void*>(g_launch_ai_attack));
 
     auto* launch = reinterpret_cast<void*>(base + offsets::UAttackComponent_LaunchAttack);
     if (MH_CreateHook(launch, reinterpret_cast<void*>(&sifucoop_launch_attack_detour),

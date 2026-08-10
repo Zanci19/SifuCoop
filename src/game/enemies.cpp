@@ -38,10 +38,14 @@ using GetAllActorsFn = void(__fastcall*)(const ue::UObject* world_context, void*
 using StaticClassFn = void*(__fastcall*)();
 
 using SetAttackTargetFn = void(__fastcall*)(ue::UObject*, ue::UObject*);
+using GetTargetableActorComponentFn = ue::UObject*(__fastcall*)(const ue::UObject*);
+using RegisterTargetableActorFn = void(__fastcall*)(ue::UObject*);
 GetAllActorsFn g_get_all_actors = nullptr;
 StaticClassFn g_fighting_character_class = nullptr;
 
 SetAttackTargetFn g_set_attack_target = nullptr;
+GetTargetableActorComponentFn g_get_targetable_actor_component = nullptr;
+RegisterTargetableActorFn g_register_targetable_actor = nullptr;
 TArrayRaw g_actors;
 TArrayRaw g_spawners;
 void* g_ai_spawner_class = nullptr;
@@ -144,6 +148,12 @@ struct Tracked {
     // to tell it again. See MaintainPeerHostility.
     DWORD next_hostility_ms = 0;
     bool hostile_confirmed = false;
+    // The exact death sequence the host's lethal hit selected, handed over by
+    // the Kill hook through the animation channel. Sifu picks this per
+    // archetype, direction and killing move, so it is the difference between a
+    // body that falls the way it was hit and one that simply stops.
+    ue::UObject* pending_death_anim = nullptr;
+    DWORD pending_death_anim_ms = 0;
 };
 
 Tracked g_tracked[net::kMaxTrackedEnemies];
@@ -205,6 +215,12 @@ void KeepClientBrainStopped(Tracked& entry, DWORD now) {
     if (entry.ai_stopped && now - entry.last_ai_stop_ms < kRetryMs) return;
     entry.last_ai_stop_ms = now;
     if (StopBrain(entry.actor)) entry.ai_stopped = true;
+}
+
+void RegisterEnemyTargetable(ue::UObject* actor) {
+    if (!actor || !g_get_targetable_actor_component || !g_register_targetable_actor) return;
+    ue::UObject* targetable = g_get_targetable_actor_component(actor);
+    if (targetable) g_register_targetable_actor(targetable);
 }
 
 // Map the host's target to the equivalent body on the joining machine. The host
@@ -461,6 +477,13 @@ void MaintainPeerHostility(ue::UObject* peer) {
         }
         --budget;
         const bool held = AssertHostileToward(entry, peer);
+        // Wake perception on the same cadence, not only once the remote player
+        // has already hit something. Detection that starts on the first blow is
+        // detection that arrives too late: every opening strike counted as an
+        // ambush, which in Sifu breaks structure outright and leaves the enemy
+        // open to an instant takedown. Being aware of him beforehand is what
+        // turns that into an ordinary exchange.
+        if (held) WakeEnemyPerception(entry.ai_fighting);
         entry.next_hostility_ms = now + (held ? 5000 : 1000);
         if (held == entry.hostile_confirmed) continue;
         entry.hostile_confirmed = held;
@@ -1169,13 +1192,14 @@ void ApplyRemoteEnemies() {
         const bool should_be_present = entry.active && !dead;
         if (should_be_present && (!entry.present || entry.parked || first_host_state)) {
             SetActorPresent(entry.actor, true);
+            RegisterEnemyTargetable(entry.actor);
             entry.present = true;
             entry.parked = false;
         }
 
         Fighter fighter = ResolveFighter(entry.actor);
         const bool locally_dead_before_sync =
-            fighter.health && GetHealth(fighter) <= 0.5f;
+            fighter.health && (GetHealth(fighter) <= 0.5f || IsDead(fighter));
 
         // Order matters here. Local damage has to be read *before* the host's
         // health is written on top, or the write itself would be mistaken for
@@ -1183,6 +1207,7 @@ void ApplyRemoteEnemies() {
         // reported and the enemy would be unkillable from this side.
         if (config.report_damage) AccumulateLocalDamage(entry, fighter);
 
+        const bool host_caught_up = state.damage_applied + 0.05f >= entry.reported_total;
         if (config.sync_enemy_vitals && fighter.health) {
             // Only accept the host's number once it accounts for everything we
             // have told it about. Until then its value is stale-high and would
@@ -1195,7 +1220,6 @@ void ApplyRemoteEnemies() {
             // satisfied this test immediately after every new hit, so the
             // enemy's health visibly sprang back up before settling. Never
             // reset one side of a comparison without the other.
-            const bool host_caught_up = state.damage_applied + 0.05f >= entry.reported_total;
             if (host_caught_up) {
                 const float local_health = GetHealth(fighter);
                 // Directly writing a lower health value bypasses Sifu's hit and
@@ -1260,13 +1284,20 @@ void ApplyRemoteEnemies() {
         // so the old edge-only test never called SetDown(false): health rose,
         // but the actor stayed in Sifu's dead state. First authoritative live
         // state now explicitly revives such a body after restoring its health.
-        if (!dead && first_host_state && locally_dead_before_sync) {
+        if (!dead && locally_dead_before_sync) {
             entry.was_down = false;
+            if (GetHealth(fighter) <= 0.5f) {
+                const float revive_health =
+                    host_caught_up && state.health > 1.f ? state.health : 1.f;
+                SetHealth(fighter, revive_health);
+                entry.last_local_health = revive_health;
+            }
             SetDown(fighter, false);
             SetActorPresent(entry.actor, true);
+            RegisterEnemyTargetable(entry.actor);
             entry.present = true;
             entry.parked = false;
-            SC_LOG("enemies: revived %s from the joiner's stale save", entry.name);
+            SC_LOG("enemies: revived and re-registered %s from client-only death", entry.name);
         } else if (entry.was_down != dead) {
             entry.was_down = dead;
             // A death is not a knockdown, and InternalSetDownState only knows
@@ -1278,13 +1309,27 @@ void ApplyRemoteEnemies() {
             // past zero and the game plays the fall it would have played if the
             // killing blow had landed here. Only when it is not already dead
             // locally, because a corpse must not be killed twice.
-            if (dead && fighter.health && GetHealth(fighter) > 0.5f) {
+            // Prefer Sifu's own kill path, with the animation the host's lethal
+            // hit selected. ApplyDamage reaches zero health but leaves the
+            // choice of death animation to a path that never ran on this
+            // machine, which is why the body stopped upright instead of falling
+            // the way it was hit.
+            const DWORD death_now = GetTickCount();
+            const bool have_death_anim =
+                entry.pending_death_anim && death_now - entry.pending_death_anim_ms <= 2000;
+            if (dead && fighter.health && have_death_anim) {
+                ue::UObject* death_world = ue::GetWorld();
+                ue::UObject* killer =
+                    death_world ? ue::GetPlayerCharacter(death_world, 0) : nullptr;
+                KillWithAnimation(fighter, killer, entry.pending_death_anim);
+            } else if (dead && fighter.health && GetHealth(fighter) > 0.5f) {
                 ApplyDamage(fighter, GetHealth(fighter) + 1.f);
             }
-            // Still asserted afterwards: if the health path did not take the
-            // body down (an archetype that survives zero, a pooled body with no
-            // health component) the down state is better than a live corpse.
-            if (!dead || GetHealth(fighter) > 0.5f) SetDown(fighter, dead);
+            entry.pending_death_anim = nullptr;
+            // Always assert the visual state on the edge. Testing health here
+            // skipped this call exactly when ApplyDamage successfully reached
+            // zero, leaving a dead enemy upright.
+            SetDown(fighter, dead);
             if (config.verbose_enemies) {
                 SC_LOG("enemies: %s %s", entry.name, dead ? "DIED" : "recycled alive");
             }
@@ -1503,6 +1548,14 @@ void InitEnemies(std::uintptr_t base) {
     g_set_attack_target = offsets::UAttackComponent_SetTarget
         ? reinterpret_cast<SetAttackTargetFn>(base + offsets::UAttackComponent_SetTarget)
         : nullptr;
+    g_get_targetable_actor_component = offsets::UTargetableActorHelper_GetTargetableActorComponent
+        ? reinterpret_cast<GetTargetableActorComponentFn>(
+              base + offsets::UTargetableActorHelper_GetTargetableActorComponent)
+        : nullptr;
+    g_register_targetable_actor = offsets::USCActorManager_RegisterTargetableActor
+        ? reinterpret_cast<RegisterTargetableActorFn>(
+              base + offsets::USCActorManager_RegisterTargetableActor)
+        : nullptr;
     g_ai_fighting_class =
         offsets::UAIFightingComponent_StaticClass
             ? reinterpret_cast<StaticClassFn>(base + offsets::UAIFightingComponent_StaticClass)
@@ -1526,11 +1579,51 @@ std::uint32_t EnemyHashForAttackComponent(const void* attack_component) {
     }
     return 0;
 }
+
+std::uint32_t EnemyHashForHealthComponent(const void* health_component) {
+    if (!health_component || !TrackingIsCurrent()) return 0;
+    for (int i = 0; i < g_tracked_count; ++i) {
+        if (ResolveFighter(g_tracked[i].actor).health == health_component) {
+            return g_tracked[i].wire_hash ? g_tracked[i].wire_hash : g_tracked[i].hash;
+        }
+    }
+    return 0;
+}
+// Remember the death sequence the host's lethal hit chose, so the death edge
+// can hand it straight back to Sifu's own kill path a moment later. The
+// animation always arrives before the sweep that reports the body dead --
+// UHealthComponent::Kill sends it, and the enemy is only published as dead on
+// the following sweep.
+void NoteEnemyDeathAnimation(std::uint32_t hash, ue::UObject* animation) {
+    if (!animation) return;
+    const int index = FindTracked(hash);
+    if (index < 0) return;
+    g_tracked[index].pending_death_anim = animation;
+    g_tracked[index].pending_death_anim_ms = GetTickCount();
+}
+
 bool ApplyMirroredEnemyTargetForAttack(std::uint32_t hash) {
     if (!TrackingIsCurrent()) return false;
     const int index = FindTracked(hash);
     if (index < 0) return false;
     return ApplyMirroredTarget(g_tracked[index], g_tracked[index].host_target_flags);
+}
+
+bool PrepareMirroredEnemyAttack(std::uint32_t hash, EnemyAttackContext* out) {
+    if (!out) return false;
+    *out = {};
+    if (!TrackingIsCurrent()) return false;
+    const int index = FindTracked(hash);
+    if (index < 0) return false;
+
+    Tracked& entry = g_tracked[index];
+    out->actor = entry.actor;
+    out->attack_component = entry.attack_component;
+    out->ai_fighting = entry.ai_fighting;
+    if (ApplyMirroredTarget(entry, entry.host_target_flags)) {
+        out->target = entry.mirrored_target;
+    }
+    return out->actor && out->attack_component && out->ai_fighting;
 }
 
 int GetEnemyRows(EnemyRow* out, int max_out) {

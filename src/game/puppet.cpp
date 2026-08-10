@@ -49,10 +49,12 @@ using GetTargetableActorComponentFn = ue::UObject*(__fastcall*)(const ue::UObjec
 using RegisterTargetableActorFn = void(__fastcall*)(ue::UObject*);
 
 PlayerAnimUpdateFn g_original_player_anim_update = nullptr;
+PlayerAnimUpdateFn g_original_sc_anim_update = nullptr;
 PlayerAnimSetSpeedStateFn g_set_player_anim_speed_state = nullptr;
 GetTargetableActorComponentFn g_get_targetable_actor_component = nullptr;
 RegisterTargetableActorFn g_register_targetable_actor = nullptr;
 std::uintptr_t g_player_anim_update_target = 0;
+std::uintptr_t g_sc_anim_update_target = 0;
 ue::UObject* g_puppet_anim_instance = nullptr;
 ue::FVector g_puppet_presentation_velocity = {};
 bool g_have_puppet_presentation_velocity = false;
@@ -72,10 +74,17 @@ bool g_lobby_was_connected = false;
 // window so TickPuppet samples the resulting montage on its next frames and
 // sends it even when it is the same asset as the preceding strike.
 DWORD g_cosmetic_attack_montage_until = 0;
-DWORD g_raw_sequence_restore_at = 0;
-// The puppet's animation blueprint class, captured while it still has one.
-// Single-node attack playback clears the instance; this is what names it back.
-void* g_puppet_anim_class = nullptr;
+DWORD g_puppet_cinematic_until = 0;
+bool g_puppet_cinematic_needs_clear = false;
+
+struct CosmeticCinematic {
+    std::uint32_t actor_hash = 0;
+    DWORD until = 0;
+    ue::UObject* anim_instance = nullptr;
+};
+constexpr int kCosmeticCinematicCount = 16;
+CosmeticCinematic g_enemy_cinematics[kCosmeticCinematicCount] = {};
+
 bool g_arrival_teleport_pending = false;
 
 
@@ -116,14 +125,68 @@ constexpr std::uintptr_t kAnimVelocityMaxV1 = 0x0FC8;        // ...V1Anim
 constexpr std::uintptr_t kAnimVelocityMaxV2 = 0x0FCC;        // ...V2Anim
 constexpr std::uintptr_t kAnimBlendspaceAngle = 0x0FD4;      // m_fBlendspaceAngle
 constexpr std::uintptr_t kAnimWantedSpeed = 0x15E4;          // m_fWantedSpeed
+constexpr std::uintptr_t kAnimLastActionAnim = 0x0E68;       // m_LastActionAnim
+constexpr std::uintptr_t kAnimLastActionCursor = 0x0E74;     // m_fLastActionAnimCursor
 constexpr std::uintptr_t kAnimMoveStatus = 0x1C29;           // m_MoveStatus
 constexpr std::uintptr_t kAnimSpeedState = 0x1C2D;           // m_SpeedState
 constexpr std::uintptr_t kAnimSpeedStateAlphaV0 = 0x1C44;    // m_fSpeedStateAlphaV0..V3
+
+// USCAnimInstance offsets from the shipped PDB. The raw attack sequence is
+// played in the Cinematic slot, but the slot contributes nothing unless these
+// graph inputs select and blend it.
+constexpr std::uintptr_t kAnimCinematicOverallWeight = 0x0378;
+constexpr std::uintptr_t kAnimCinematicLayerCursor = 0x037C;
 
 float ReadFloatAt(const std::uint8_t* bytes, std::uintptr_t offset) {
     float value = 0.f;
     std::memcpy(&value, bytes + offset, sizeof(value));
     return value;
+}
+
+void WriteCinematicWeight(std::uint8_t* bytes, float weight) {
+    const float cinematic_layer = 0.f;
+    std::memcpy(bytes + kAnimCinematicOverallWeight, &weight, sizeof(weight));
+    std::memcpy(bytes + kAnimCinematicLayerCursor, &cinematic_layer, sizeof(cinematic_layer));
+}
+
+DWORD AnimationDeadline(ue::UObject* animation) {
+    float seconds = ue::GetAnimationAssetLength(animation);
+    if (seconds < 0.1f) seconds = 0.5f;
+    if (seconds > 10.f) seconds = 10.f;
+    return GetTickCount() + static_cast<DWORD>((seconds + 0.12f) * 1000.f);
+}
+
+void ArmEnemyCinematic(std::uint32_t actor_hash, DWORD until) {
+    if (!actor_hash) return;
+    const DWORD now = GetTickCount();
+    for (CosmeticCinematic& active : g_enemy_cinematics) {
+        if (active.actor_hash == actor_hash || !active.actor_hash || now >= active.until) {
+            active = {actor_hash, until, nullptr};
+            return;
+        }
+    }
+    g_enemy_cinematics[0] = {actor_hash, until, nullptr};
+}
+
+void TickEnemyCinematics() {
+    const DWORD now = GetTickCount();
+    for (CosmeticCinematic& active : g_enemy_cinematics) {
+        if (!active.actor_hash) continue;
+        ue::UObject* actor = FindEnemyByHash(active.actor_hash);
+        ue::UObject* anim_instance = actor ? ue::GetAnimInstance(actor) : nullptr;
+        if (!anim_instance) {
+            active = {};
+            continue;
+        }
+        auto* bytes = reinterpret_cast<std::uint8_t*>(anim_instance);
+        active.anim_instance = anim_instance;
+        if (now < active.until) {
+            WriteCinematicWeight(bytes, 1.f);
+        } else {
+            WriteCinematicWeight(bytes, 0.f);
+            active = {};
+        }
+    }
 }
 
 // Which locomotion band a speed falls in, using Sifu's OWN thresholds.
@@ -196,12 +259,28 @@ int SpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
     return held;
 }
 
+void __fastcall SCAnimUpdateHook(ue::UObject* anim_instance, float delta_seconds) {
+    if (g_original_sc_anim_update) g_original_sc_anim_update(anim_instance, delta_seconds);
+
+    // TickEnemyCinematics used to write this during UGameEngine::Tick. Enemy
+    // NativeUpdateAnimation then reset the graph inputs before evaluation, so
+    // PlaySlotAnimationAsDynamicMontage succeeded while the slot stayed at
+    // zero weight. Restore it after Sifu's update, at the same pre-evaluation
+    // boundary that fixed remote-player animations.
+    const DWORD now = GetTickCount();
+    for (CosmeticCinematic& active : g_enemy_cinematics) {
+        if (active.anim_instance != anim_instance || now >= active.until) continue;
+        WriteCinematicWeight(reinterpret_cast<std::uint8_t*>(anim_instance), 1.f);
+        break;
+    }
+}
+
 void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_seconds) {
     // Do not call reflection here: nested ProcessEvent in this traversal-
     // sensitive update caused the Steam AV. Everything below is either a memcpy
     // at a reflected offset or a native setter.
-    const bool inject = anim_instance && anim_instance == g_puppet_anim_instance &&
-                        g_have_puppet_presentation_velocity;
+    const bool is_puppet_anim = anim_instance && anim_instance == g_puppet_anim_instance;
+    const bool inject = is_puppet_anim && g_have_puppet_presentation_velocity;
     auto* bytes = reinterpret_cast<std::uint8_t*>(anim_instance);
     float speed = 0.f;
     if (inject) {
@@ -248,6 +327,17 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
         std::memcpy(bytes + kAnimWantedSpeed, &speed, sizeof(speed));
     }
     if (g_original_player_anim_update) g_original_player_anim_update(anim_instance, delta_seconds);
+
+    if (is_puppet_anim) {
+        const DWORD now = GetTickCount();
+        if (now < g_puppet_cinematic_until) {
+            WriteCinematicWeight(bytes, 1.f);
+            g_puppet_cinematic_needs_clear = true;
+        } else if (g_puppet_cinematic_needs_clear) {
+            WriteCinematicWeight(bytes, 0.f);
+            g_puppet_cinematic_needs_clear = false;
+        }
+    }
 
     if (!inject) return;
 
@@ -336,6 +426,21 @@ void EnsurePlayerAnimHook() {
     } else {
         g_original_player_anim_update = nullptr;
         SC_LOG("puppet: UPlayerAnim pre-evaluation hook FAILED");
+    }
+}
+
+void EnsureSCAnimHook() {
+    static bool attempted = false;
+    if (attempted || !IsOrderHookInstalled() || !g_sc_anim_update_target) return;
+    attempted = true;
+    if (MH_CreateHook(reinterpret_cast<void*>(g_sc_anim_update_target),
+                      reinterpret_cast<void*>(&SCAnimUpdateHook),
+                      reinterpret_cast<void**>(&g_original_sc_anim_update)) == MH_OK &&
+        MH_EnableHook(reinterpret_cast<void*>(g_sc_anim_update_target)) == MH_OK) {
+        SC_LOG("enemy anim: USCAnimInstance pre-evaluation hook ACTIVE");
+    } else {
+        g_original_sc_anim_update = nullptr;
+        SC_LOG("enemy anim: USCAnimInstance pre-evaluation hook FAILED");
     }
 }
 
@@ -514,11 +619,6 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
         g_puppet_presentation_velocity = presentation_velocity;
         g_have_puppet_presentation_velocity = true;
         g_puppet_anim_instance = ue::GetAnimInstance(target_actor);
-        // Remembered while a graph still exists, because after a strike there
-        // is nothing left to read it from.
-        if (g_puppet_anim_instance && !g_puppet_anim_class) {
-            g_puppet_anim_class = ue::GetAnimInstanceClass(target_actor);
-        }
         // Re-resolved whenever the driven body changes. Both components are
         // rebuilt on respawn and travel, so this is never held across one.
         static ue::UObject* resolved_for = nullptr;
@@ -1396,6 +1496,9 @@ bool CoopGameplayActive() { return CoopBodiesMayExist(); }
 void InitPuppet(std::uintptr_t base) {
     g_spawn_actor = reinterpret_cast<SpawnActorFn>(base + offsets::UWorld_SpawnActor_VecRot);
     g_player_anim_update_target = base + offsets::UPlayerAnim_NativeUpdateAnimation;
+    g_sc_anim_update_target = offsets::USCAnimInstance_NativeUpdateAnimation
+        ? base + offsets::USCAnimInstance_NativeUpdateAnimation
+        : 0;
     g_set_player_anim_speed_state = offsets::UPlayerAnim_BPF_SetSpeedState
         ? reinterpret_cast<PlayerAnimSetSpeedStateFn>(
               base + offsets::UPlayerAnim_BPF_SetSpeedState)
@@ -1578,9 +1681,10 @@ void DespawnPuppet() {
     g_puppet_anim_instance = nullptr;
     g_have_puppet_presentation_velocity = false;
     g_puppet_presentation_targets = {};
-    g_puppet_anim_class = nullptr;
-    g_raw_sequence_restore_at = 0;
     g_cosmetic_attack_montage_until = 0;
+    g_puppet_cinematic_until = 0;
+    g_puppet_cinematic_needs_clear = false;
+    for (CosmeticCinematic& active : g_enemy_cinematics) active = {};
     g_puppet_auto_spawned = false;
     g_friendly_applied_for = nullptr;
     g_friendly_verified = false;
@@ -1593,8 +1697,14 @@ void NotifyLocalAttackForCosmetic() {
     g_cosmetic_attack_montage_until = GetTickCount() + 750;
 }
 
+void NotifyLocalSequenceSent() {
+    // The exact raw sequence supersedes the montage fallback for this strike.
+    g_cosmetic_attack_montage_until = 0;
+}
+
 void TickPuppet() {
     EnsurePlayerAnimHook();
+    EnsureSCAnimHook();
     ue::UObject* world = ue::GetWorld();
     if (!world) return;
     ue::UObject* player = ue::GetPlayerCharacter(world, 0);
@@ -1615,9 +1725,10 @@ void TickPuppet() {
         g_puppet_anim_instance = nullptr;
         g_have_puppet_presentation_velocity = false;
         g_puppet_presentation_targets = {};
-        g_puppet_anim_class = nullptr;
-        g_raw_sequence_restore_at = 0;
         g_cosmetic_attack_montage_until = 0;
+        g_puppet_cinematic_until = 0;
+        g_puppet_cinematic_needs_clear = false;
+        for (CosmeticCinematic& active : g_enemy_cinematics) active = {};
         if (g_puppet) {
             SC_LOG("puppet: level changed -- forgetting the old remote character");
             g_puppet = nullptr;
@@ -1708,6 +1819,49 @@ void TickPuppet() {
     }
     net::TickSession(local);
 
+    // Everything the local player is ANIMATING, not only what they attacked
+    // with.
+    //
+    // OrderAttack::OnStart carries strikes and nothing else, which is why the
+    // partner still had no blocks, no parries, no hit reactions, no takedown
+    // and no fall -- every one of those is a different order type, and most of
+    // them do not override GetAnimPlayed at all, so there was nothing to send.
+    //
+    // UPlayerAnim::m_LastActionAnim is the animation the graph is playing for
+    // the current action, whatever produced it, with its cursor beside it. One
+    // edge-triggered read covers all of them at once. Player-only: the field is
+    // declared on UPlayerAnim, and USCAnimInstance (the enemies' base) has no
+    // equivalent -- their swings keep coming from the order path and their
+    // deaths from the Kill hook.
+    if (coop::Get().sync_montages && net::IsConnected()) {
+        ue::UObject* anim_instance = ue::GetAnimInstance(player);
+        if (anim_instance) {
+            const auto* bytes = reinterpret_cast<const std::uint8_t*>(anim_instance);
+            ue::UObject* action = nullptr;
+            std::memcpy(&action, bytes + kAnimLastActionAnim, sizeof(action));
+            float cursor = 0.f;
+            std::memcpy(&cursor, bytes + kAnimLastActionCursor, sizeof(cursor));
+
+            static ue::UObject* last_action_sent = nullptr;
+            if (action && action != last_action_sent) {
+                last_action_sent = action;
+                char action_path[192] = {};
+                if (ue::GetObjectPathName(action, action_path, sizeof(action_path))) {
+                    // Sent on the raw-sequence channel so the receiver layers it
+                    // through the Cinematic slot rather than replacing the
+                    // locomotion graph.
+                    net::SendAnimationSequence(action_path, 0, cursor);
+                    static unsigned int actions_sent = 0;
+                    if (++actions_sent <= 5 || coop::Get().verbose_orders) {
+                        SC_LOG("action: sent '%s' cursor=%.2f", action_path, cursor);
+                    }
+                }
+            } else if (!action) {
+                last_action_sent = nullptr;
+            }
+        }
+    }
+
     // Cosmetic animation mirroring. Regular changes cover dodges/traversal.
     // An attack order also arms a short capture window: repeated punches often
     // reuse one montage asset, so an edge-trigger alone drops every strike after
@@ -1742,66 +1896,67 @@ void TickPuppet() {
             }
         }
     }
-    // Apply the peer's animation to their puppet as a PURE VISUAL: it animates
-    // the motion without running the attack, so no hitbox is spawned and it
-    // cannot damage anyone. Their damage already resolved on their machine.
-    if (g_puppet) {
+    // Real remote enemy orders run first so their local hitbox/parry windows are
+    // active before the matching cosmetic sequence is layered onto the actor.
+    PumpRemoteOrders();
+    TickEnemyCinematics();
+
+    // Drain a bounded burst. A single latest-value slot lost punches whenever
+    // two attacks arrived in one frame; every attack start is an event.
+    for (int event = 0; event < 8; ++event) {
         char path[192] = {};
         float position = 0.f;
         bool raw_sequence = false;
-        if (net::PopMontageState(path, sizeof(path), &position, &raw_sequence)) {
-            wchar_t wide[192] = {};
-            MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, 192);
-            if (ue::UObject* animation = ue::FindObjectByPath(wide)) {
-                // A raw sequence takes the whole body, so it cannot share the
-                // character with a run cycle. Sifu's player AnimBlueprint has no
-                // montage slot to play it through -- the exported graph has none
-                // -- so the only two options are "replace the animation graph"
-                // or "do not play it", and replacing it while the peer is
-                // sprinting is what made their character stop dead mid-stride.
-                // Standing and walking strikes still play, which is nearly all
-                // of them.
-                const float peer_speed =
-                    sqrtf(g_puppet_presentation_velocity.X * g_puppet_presentation_velocity.X +
-                          g_puppet_presentation_velocity.Y * g_puppet_presentation_velocity.Y);
-                if (raw_sequence && peer_speed >= 475.f) {
-                    static DWORD last_skip_log = 0;
-                    const DWORD skip_now = GetTickCount();
-                    if (skip_now - last_skip_log >= 5000) {
-                        last_skip_log = skip_now;
-                        SC_LOG("attack: skipped a cosmetic sequence at speed %.0f -- it would "
-                               "replace the run cycle", peer_speed);
-                    }
-                } else if (raw_sequence) {
-                    if (ue::PlayAnimationAsset(g_puppet, animation)) {
-                        const float seconds = ue::GetAnimationAssetLength(animation);
-                        // A bad/missing asset must never leave the puppet's
-                        // AnimBlueprint disabled indefinitely.
-                        g_raw_sequence_restore_at = GetTickCount() +
-                            static_cast<DWORD>((seconds > .05f ? seconds : .5f) * 1000.f);
-                        SC_LOG("attack: cosmetic sequence playing");
+        std::uint32_t actor_hash = 0;
+        if (!net::PopMontageState(path, sizeof(path), &position, &raw_sequence,
+                                  &actor_hash)) {
+            break;
+        }
+
+        ue::UObject* visual_actor = actor_hash ? FindEnemyByHash(actor_hash) : g_puppet;
+        if (!visual_actor) continue;
+
+        wchar_t wide[192] = {};
+        MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, 192);
+        ue::UObject* animation = ue::FindObjectByPath(wide);
+        if (!animation) continue;
+
+        if (raw_sequence) {
+            if (ue::PlayAnimationAsset(visual_actor, animation, position)) {
+                const DWORD until = AnimationDeadline(animation);
+                ue::UObject* anim_instance = ue::GetAnimInstance(visual_actor);
+                if (actor_hash == 0) {
+                    g_puppet_anim_instance = anim_instance;
+                    g_puppet_cinematic_until = until;
+                    g_puppet_cinematic_needs_clear = true;
+                    if (anim_instance) {
+                        WriteCinematicWeight(reinterpret_cast<std::uint8_t*>(anim_instance), 1.f);
                     }
                 } else {
-                    ue::AnimState state;
-                    state.montage = animation;
-                    state.position = position;
-                    ue::ApplyAnimState(g_puppet, state);
+                    // Might be a swing, might be the sequence the host's lethal
+                    // hit chose. Keep it either way: the death edge arrives on
+                    // the next sweep and asks for it by hash, and a swing that
+                    // is never claimed simply expires.
+                    NoteEnemyDeathAnimation(actor_hash, animation);
+                    ArmEnemyCinematic(actor_hash, until);
+                    if (anim_instance) {
+                        WriteCinematicWeight(reinterpret_cast<std::uint8_t*>(anim_instance), 1.f);
+                    }
+                }
+                SC_LOG("attack: cosmetic sequence playing actor=%08X", actor_hash);
+            } else {
+                static DWORD last_failed_log = 0;
+                const DWORD failed_now = GetTickCount();
+                if (failed_now - last_failed_log >= 5000) {
+                    last_failed_log = failed_now;
+                    SC_LOG("attack: cosmetic sequence could not start actor=%08X", actor_hash);
                 }
             }
-        }
-    }
-    if (g_puppet && g_raw_sequence_restore_at && GetTickCount() >= g_raw_sequence_restore_at) {
-        const bool back = ue::RestoreAnimationBlueprint(g_puppet, g_puppet_anim_class);
-        g_raw_sequence_restore_at = 0;
-        // The cached instance belonged to the graph that was just torn down.
-        // Clearing it makes the drive re-resolve, which is what re-arms the
-        // velocity and speed-state injection for the new one.
-        g_puppet_anim_instance = nullptr;
-        static bool warned = false;
-        if (!back && !warned) {
-            warned = true;
-            SC_LOG("puppet: animation blueprint did NOT come back after a cosmetic "
-                   "sequence -- the body will stay in its bind pose");
+        } else if (actor_hash == 0) {
+            ue::AnimState state;
+            state.montage = animation;
+            state.position = position;
+            ue::ApplyAnimState(g_puppet, state);
         }
     }
 
@@ -1838,9 +1993,6 @@ void TickPuppet() {
     UpdateLobby(player);
     ReconcileJoinerArrival(player);
 
-    // Everything the peer did since the last frame: their own moves onto the
-    // puppet, and the host's enemy swings onto our driven enemies.
-    PumpRemoteOrders();
 
     // The second player's pawn is rebuilt by the game mode on death, on aging and
     // on every level change, so it is re-resolved here rather than trusted. This

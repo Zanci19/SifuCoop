@@ -26,6 +26,7 @@ inline std::uint32_t ASCCharacterImpostor_BPE_MimicCharacter = 0;
 inline std::uint32_t ASCCharacterImpostor_StaticClass = 0;
 inline std::uint32_t ASCPlayerController_BeginPlay = 0;
 inline std::uint32_t DelayedActionAttack_ToString = 0;
+inline std::uint32_t FAIAttackHandler_PrepareNextAttack = 0;
 inline std::uint32_t FComboTransitions_GeNextAttackID = 0;
 inline std::uint32_t FName_FromWide = 0;
 inline std::uint32_t GEngine = 0;
@@ -46,13 +47,16 @@ inline std::uint32_t OrderBase_GetType = 0;
 inline std::uint32_t OrderBase_LoadFrom = 0;
 inline std::uint32_t OrderBase_SaveTo = 0;
 inline std::uint32_t StaticFindObjectSafe = 0;
+inline std::uint32_t UAIFightingComponent_GetAttackHandler = 0;
 inline std::uint32_t UAIFightingComponent_StaticClass = 0;
 inline std::uint32_t UAnimInstance_Montage_GetPosition = 0;
 inline std::uint32_t UAnimInstance_Montage_Play = 0;
+inline std::uint32_t UAttackBTTask_LaunchAttack = 0;
 inline std::uint32_t UAttackComponent_BPF_OverrideCombo = 0;
 inline std::uint32_t UAttackComponent_Get = 0;
 inline std::uint32_t UAttackComponent_LaunchAttack = 0;
 inline std::uint32_t UAttackComponent_PrepareToLaunchAttack = 0;
+inline std::uint32_t UAttackComponent_SetNextAttackTarget = 0;
 inline std::uint32_t UAttackComponent_SetTarget = 0;
 inline std::uint32_t UAttackComponent_StaticClass = 0;
 inline std::uint32_t UBehaviorTreeComponent_StopLogic = 0;
@@ -73,6 +77,7 @@ inline std::uint32_t UGameplayStatics_GetPlayerCharacter = 0;
 inline std::uint32_t UGameplayStatics_OpenLevel = 0;
 inline std::uint32_t UHealthComponent_BPF_ApplyDamage = 0;
 inline std::uint32_t UHealthComponent_IsDead = 0;
+inline std::uint32_t UHealthComponent_Kill = 0;
 inline std::uint32_t UObjectBaseUtility_GetPathName = 0;
 inline std::uint32_t UObject_FindFunction = 0;
 inline std::uint32_t UObject_ProcessEvent = 0;
@@ -82,8 +87,10 @@ inline std::uint32_t UPlayerAnim_BPF_SetSpeedState = 0;
 inline std::uint32_t UPlayerAnim_NativeUpdateAnimation = 0;
 inline std::uint32_t UReplaySystem_GetPlayingPlayerCharacter = 0;
 inline std::uint32_t USCActorManager_RegisterTargetableActor = 0;
+inline std::uint32_t USCAnimInstance_NativeUpdateAnimation = 0;
 inline std::uint32_t USceneComponent_K2_GetComponentLocation = 0;
 inline std::uint32_t USkeletalMeshComponent_StaticClass = 0;
+inline std::uint32_t USocialComponent_SetRelationship = 0;
 inline std::uint32_t UStatsComponent_BPF_GetCharacterAge = 0;
 inline std::uint32_t UStatsComponent_Get = 0;
 inline std::uint32_t UTargetableActorHelper_GetTargetableActorComponent = 0;
@@ -96,12 +103,12 @@ struct BuildEntry {
     std::uint32_t time_date_stamp;
     std::uint32_t size_of_image;
     const char* name;
-    std::uint32_t values[85];
+    std::uint32_t values[92];
 };
 
 inline constexpr BuildEntry kBuilds[] = {
-    {0x68400CB9, 0x064DB000, "epic", {0x03287EC0, 0x0328FD30, 0x00A5FE10, 0x019A96F0, 0x0487D430, 0x01A7AB80, 0x02BC2FA0, 0x019B48C0, 0x019B58F0, 0x019B5960, 0x019BC680, 0x019C4FF0, 0x019C7AA0, 0x01C5D2A0, 0x01A1FD90, 0x037562A0, 0x00C657A0, 0x00C632D0, 0x01A21240, 0x01A6C9B0, 0x01959BE0, 0x01E7B2C0, 0x05EBD0E8, 0x05EC09E8, 0x00001308, 0x000012A8, 0x00001350, 0x00001530, 0x0000039C, 0x00000608, 0x00000198, 0x00000160, 0x00000138, 0x00000140, 0x01AD3470, 0x01ADC9C0, 0x01AFFE70, 0x015F6FA0, 0x01B15A40, 0x0207C2A0, 0x01BF3B00, 0x032C78D0, 0x032C7DD0, 0x0192B650, 0x01933920, 0x0193D710, 0x01943EB0, 0x01946C80, 0x01C13DC0, 0x03BEF6B0, 0x03C61040, 0x01A5C0D0, 0x01A630F0, 0x01A63AA0, 0x01A6C380, 0x01C37B50, 0x033D0260, 0x01959BF0, 0x01C4E5B0, 0x038EB700, 0x01ABA350, 0x034EFE30, 0x03508690, 0x0350AD00, 0x03516DC0, 0x01A499D0, 0x01A63A80, 0x020714D0, 0x02055490, 0x020595C0, 0x01ADAA60, 0x01AE4F20, 0x0192BBF0, 0x0193E250, 0x01B5B760, 0x018638B0, 0x0195EAC0, 0x00C5FCF0, 0x01B848D0, 0x01B92950, 0x0195EF30, 0x019E4290, 0x01BC1460, 0x035D84F0, 0x035D9030}},
-    {0x68409AB0, 0x06295000, "steam", {0x030CD890, 0x030D5700, 0x00902540, 0x017E8F10, 0x0468BE80, 0x018BADB0, 0x02A06AF0, 0x017F40E0, 0x017F5110, 0x017F5180, 0x017FBEA0, 0x01804810, 0x018072C0, 0x01A9D9E0, 0x0185F830, 0x0359C360, 0x00AA0D60, 0x00A9E5E0, 0x01860CE0, 0x018ACAB0, 0x01799400, 0x01CBC490, 0x05C98FA8, 0x05C9C8A8, 0x00001308, 0x000012A8, 0x00001350, 0x00001530, 0x0000039C, 0x00000608, 0x00000198, 0x00000160, 0x00000138, 0x00000140, 0x019136A0, 0x0191CBF0, 0x019400D0, 0x01434720, 0x01955CA0, 0x01EBE130, 0x01A34270, 0x0310D2B0, 0x0310D7B0, 0x0176AE60, 0x01773130, 0x0177CF30, 0x017836D0, 0x017864A0, 0x01A54530, 0x03A35BB0, 0x03AA75E0, 0x0189C1D0, 0x018A31F0, 0x018A3BA0, 0x018AC480, 0x01A782C0, 0x03215C80, 0x01799410, 0x01A8ECF0, 0x037317D0, 0x018FA580, 0x03335C10, 0x0334E470, 0x03350AE0, 0x0335CBA0, 0x01889930, 0x018A3B80, 0x01EB3360, 0x01E971D0, 0x01E9B300, 0x0191AC90, 0x01925150, 0x0176B400, 0x0177DA70, 0x0199BA90, 0x016A2F90, 0x0179E2E0, 0x00A9B000, 0x019C4EE0, 0x019D2F60, 0x0179E750, 0x01823AB0, 0x01A01AA0, 0x0341E2E0, 0x0341EE20}},
+    {0x68400CB9, 0x064DB000, "epic", {0x03287EC0, 0x0328FD30, 0x00A5FE10, 0x019A96F0, 0x0487D430, 0x01A7AB80, 0x02BC2FA0, 0x019B48C0, 0x019B58F0, 0x019B5960, 0x019BC680, 0x019C4FF0, 0x019C7AA0, 0x01C5D2A0, 0x01A1FD90, 0x037562A0, 0x00C657A0, 0x00C632D0, 0x01A21240, 0x01A6C9B0, 0x01897150, 0x01959BE0, 0x01E7B2C0, 0x05EBD0E8, 0x05EC09E8, 0x00001308, 0x000012A8, 0x00001350, 0x00001530, 0x0000039C, 0x00000608, 0x00000198, 0x00000160, 0x00000138, 0x00000140, 0x01AD3470, 0x01ADC9C0, 0x01AFFE70, 0x015F6FA0, 0x01B15A40, 0x0207C2A0, 0x018B1560, 0x01BF3B00, 0x032C78D0, 0x032C7DD0, 0x018E87F0, 0x0192B650, 0x01933920, 0x0193D710, 0x01943EB0, 0x019469F0, 0x01946C80, 0x01C13DC0, 0x03BEF6B0, 0x03C61040, 0x01A5C0D0, 0x01A630F0, 0x01A63AA0, 0x01A6C380, 0x01C37B50, 0x033D0260, 0x01959BF0, 0x01C4E5B0, 0x038EB700, 0x01ABA350, 0x034EFE30, 0x03508690, 0x0350AD00, 0x03516DC0, 0x01A499D0, 0x01A63A80, 0x01A643F0, 0x020714D0, 0x02055490, 0x020595C0, 0x01ADAA60, 0x01AE4F20, 0x0192BBF0, 0x0193E250, 0x01B5B760, 0x018638B0, 0x00BE6DE0, 0x0195EAC0, 0x00C5FCF0, 0x01B779B0, 0x01B848D0, 0x01B92950, 0x0195EF30, 0x019E4290, 0x01BC1460, 0x035D84F0, 0x035D9030}},
+    {0x68409AB0, 0x06295000, "steam", {0x030CD890, 0x030D5700, 0x00902540, 0x017E8F10, 0x0468BE80, 0x018BADB0, 0x02A06AF0, 0x017F40E0, 0x017F5110, 0x017F5180, 0x017FBEA0, 0x01804810, 0x018072C0, 0x01A9D9E0, 0x0185F830, 0x0359C360, 0x00AA0D60, 0x00A9E5E0, 0x01860CE0, 0x018ACAB0, 0x016D6830, 0x01799400, 0x01CBC490, 0x05C98FA8, 0x05C9C8A8, 0x00001308, 0x000012A8, 0x00001350, 0x00001530, 0x0000039C, 0x00000608, 0x00000198, 0x00000160, 0x00000138, 0x00000140, 0x019136A0, 0x0191CBF0, 0x019400D0, 0x01434720, 0x01955CA0, 0x01EBE130, 0x016F0CC0, 0x01A34270, 0x0310D2B0, 0x0310D7B0, 0x01727F80, 0x0176AE60, 0x01773130, 0x0177CF30, 0x017836D0, 0x01786210, 0x017864A0, 0x01A54530, 0x03A35BB0, 0x03AA75E0, 0x0189C1D0, 0x018A31F0, 0x018A3BA0, 0x018AC480, 0x01A782C0, 0x03215C80, 0x01799410, 0x01A8ECF0, 0x037317D0, 0x018FA580, 0x03335C10, 0x0334E470, 0x03350AE0, 0x0335CBA0, 0x01889930, 0x018A3B80, 0x018A44F0, 0x01EB3360, 0x01E971D0, 0x01E9B300, 0x0191AC90, 0x01925150, 0x0176B400, 0x0177DA70, 0x0199BA90, 0x016A2F90, 0x00A202E0, 0x0179E2E0, 0x00A9B000, 0x019B7FB0, 0x019C4EE0, 0x019D2F60, 0x0179E750, 0x01823AB0, 0x01A01AA0, 0x0341E2E0, 0x0341EE20}},
 };
 
 inline constexpr int kBuildCount = sizeof(kBuilds) / sizeof(kBuilds[0]);
@@ -134,6 +141,7 @@ inline const char* SelectBuild(std::uint32_t time_date_stamp,
         ASCCharacterImpostor_StaticClass = entry.values[i++];
         ASCPlayerController_BeginPlay = entry.values[i++];
         DelayedActionAttack_ToString = entry.values[i++];
+        FAIAttackHandler_PrepareNextAttack = entry.values[i++];
         FComboTransitions_GeNextAttackID = entry.values[i++];
         FName_FromWide = entry.values[i++];
         GEngine = entry.values[i++];
@@ -154,13 +162,16 @@ inline const char* SelectBuild(std::uint32_t time_date_stamp,
         OrderBase_LoadFrom = entry.values[i++];
         OrderBase_SaveTo = entry.values[i++];
         StaticFindObjectSafe = entry.values[i++];
+        UAIFightingComponent_GetAttackHandler = entry.values[i++];
         UAIFightingComponent_StaticClass = entry.values[i++];
         UAnimInstance_Montage_GetPosition = entry.values[i++];
         UAnimInstance_Montage_Play = entry.values[i++];
+        UAttackBTTask_LaunchAttack = entry.values[i++];
         UAttackComponent_BPF_OverrideCombo = entry.values[i++];
         UAttackComponent_Get = entry.values[i++];
         UAttackComponent_LaunchAttack = entry.values[i++];
         UAttackComponent_PrepareToLaunchAttack = entry.values[i++];
+        UAttackComponent_SetNextAttackTarget = entry.values[i++];
         UAttackComponent_SetTarget = entry.values[i++];
         UAttackComponent_StaticClass = entry.values[i++];
         UBehaviorTreeComponent_StopLogic = entry.values[i++];
@@ -181,6 +192,7 @@ inline const char* SelectBuild(std::uint32_t time_date_stamp,
         UGameplayStatics_OpenLevel = entry.values[i++];
         UHealthComponent_BPF_ApplyDamage = entry.values[i++];
         UHealthComponent_IsDead = entry.values[i++];
+        UHealthComponent_Kill = entry.values[i++];
         UObjectBaseUtility_GetPathName = entry.values[i++];
         UObject_FindFunction = entry.values[i++];
         UObject_ProcessEvent = entry.values[i++];
@@ -190,8 +202,10 @@ inline const char* SelectBuild(std::uint32_t time_date_stamp,
         UPlayerAnim_NativeUpdateAnimation = entry.values[i++];
         UReplaySystem_GetPlayingPlayerCharacter = entry.values[i++];
         USCActorManager_RegisterTargetableActor = entry.values[i++];
+        USCAnimInstance_NativeUpdateAnimation = entry.values[i++];
         USceneComponent_K2_GetComponentLocation = entry.values[i++];
         USkeletalMeshComponent_StaticClass = entry.values[i++];
+        USocialComponent_SetRelationship = entry.values[i++];
         UStatsComponent_BPF_GetCharacterAge = entry.values[i++];
         UStatsComponent_Get = entry.values[i++];
         UTargetableActorHelper_GetTargetableActorComponent = entry.values[i++];

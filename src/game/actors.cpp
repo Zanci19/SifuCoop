@@ -28,6 +28,8 @@ using SetInvincibilityFn = void(__fastcall*)(ue::UObject* actor, bool invincible
 using BrainClassFn = void*(__fastcall*)();
 using GetMovementComponentFn = ue::UObject*(__fastcall*)(const ue::UObject* actor);
 using RequestDirectMoveFn = void(__fastcall*)(ue::UObject* component, const ue::FVector& velocity, bool force_max_speed);
+using SetRelationshipFn = void(__fastcall*)(ue::UObject* social, ue::UObject* toward,
+                                             std::uint8_t relationship);
 
 GetHealthComponentFn g_get_health = nullptr;
 GetAttackComponentFn g_get_attack = nullptr;
@@ -43,6 +45,12 @@ SetInvincibilityFn g_set_invincibility = nullptr;
 BrainClassFn g_brain_class = nullptr;
 GetMovementComponentFn g_get_movement_component = nullptr;
 RequestDirectMoveFn g_request_direct_move = nullptr;
+SetRelationshipFn g_set_relationship = nullptr;
+// UHealthComponent::Kill(EApplyDamageBehavior, AActor* instigator,
+//                        UAnimSequence* death_animation, bool, bool).
+using HealthKillFn = void(__fastcall*)(ue::UObject*, std::int32_t, ue::UObject*, ue::UObject*,
+                                       bool, bool);
+HealthKillFn g_health_kill = nullptr;
 // UFightingMovementComponent::SetSpeedState(ESpeedState). See the note on
 // SetMovementSpeedState below for why this, and not the anim instance, is the
 // thing that has to be written.
@@ -102,6 +110,13 @@ void InitActors(std::uintptr_t base) {
             ? reinterpret_cast<SetSpeedStateFn>(
                   base + offsets::UFightingMovementComponent_SetSpeedState)
             : nullptr;
+    g_set_relationship = offsets::USocialComponent_SetRelationship
+        ? reinterpret_cast<SetRelationshipFn>(
+              base + offsets::USocialComponent_SetRelationship)
+        : nullptr;
+    g_health_kill = offsets::UHealthComponent_Kill
+                        ? reinterpret_cast<HealthKillFn>(base + offsets::UHealthComponent_Kill)
+                        : nullptr;
 
     // Only the offsets that would silently corrupt a read are treated as
     // mandatory; the rest degrade to "that feature is off".
@@ -154,6 +169,24 @@ void SetGuard(const Fighter& fighter, float guard) {
     if (!value) return;
     if (guard < 0.f) guard = 0.f;
     *value = guard;
+}
+
+// Kill a body the way the machine that owns it killed it.
+//
+// ApplyDamage past zero reaches death but leaves the animation to a selection
+// step that only runs on the killing machine, so a replicated corpse stopped
+// upright. Sifu carries the chosen sequence into UHealthComponent::Kill, and
+// the host's hook forwards exactly that asset -- this hands it back to the
+// same function on the other side.
+bool KillWithAnimation(const Fighter& fighter, ue::UObject* instigator,
+                       ue::UObject* death_animation) {
+    if (!fighter.health || !g_health_kill || !death_animation) return false;
+    // Behaviour 0 is the ordinary lethal case. The instigator is only used for
+    // attribution and direction; a live local body is passed rather than null
+    // because the callee dereferences it.
+    if (!instigator) return false;
+    g_health_kill(fighter.health, 0, instigator, death_animation, false, false);
+    return true;
 }
 
 void ApplyDamage(const Fighter& fighter, float amount) {
@@ -486,6 +519,11 @@ bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
     // asserting relationships against it. Both ends are checked, because either
     // one can be the dead one.
     if (!ue::IsValidObject(social) || !ue::IsValidObject(toward)) return false;
+    if (g_set_relationship) {
+        g_set_relationship(social, toward, static_cast<std::uint8_t>(value));
+        return true;
+    }
+
     struct Params {
         ue::UObject* Actor;
         std::uint8_t eRelation;
