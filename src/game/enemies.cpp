@@ -1496,7 +1496,23 @@ void ApplyRemoteEnemies() {
                 // told they had landed a blow. The joiner's whole session shows
                 // `dmg out=0` and no first-hit line at all.
                 if (state.guard + 0.05f < GetGuard(fighter)) SetGuard(fighter, state.guard);
-                entry.last_local_health = state.health;
+                // What the body ACTUALLY has now, not what we asked for.
+                //
+                // This recorded state.health, and ApplyDamage does not land on
+                // that number: Sifu runs the amount through armour and
+                // multipliers, so the real health ends up lower. Next frame
+                // AccumulateLocalDamage compares the actual value against this
+                // higher one, reads the difference as a fresh hit by THIS
+                // player, and reports it. The host applies that phantom damage,
+                // publishes an even lower number, and the whole thing goes round
+                // again.
+                //
+                // That loop is the 252 damage one grunt absorbed against a pool
+                // of 240, and it is why the joining player's attacks start
+                // passing through an enemy the host has also hit: the local copy
+                // reaches zero long before the host's does, and a body that is
+                // dead here has no collision left to hit.
+                entry.last_local_health = GetHealth(fighter);
                 entry.host_applied = state.damage_applied;
             }
         }
@@ -1574,9 +1590,15 @@ void ApplyRemoteEnemies() {
                 if (!killed && GetHealth(fighter) > 0.5f) {
                     ApplyDamage(fighter, GetHealth(fighter) + 1.f);
                 }
-                // Measured, because "dead=1 down=0" says the body never went to
-                // the floor and nothing so far says which call failed to put it
-                // there.
+                // The measurement came back "kill=1 ... -> down=0" for every
+                // death: Sifu's own Kill runs, returns success, and leaves the
+                // body upright. So Kill decides that a character is dead; it is
+                // the down-state machine that puts one on the floor, and taking
+                // that call out of this path -- on the grounds that it produced
+                // a knockdown pose rather than a death -- removed the only thing
+                // that was laying anyone down. A knockdown pose is wrong; a
+                // corpse standing up is worse.
+                if (!IsDown(fighter)) SetDown(fighter, true);
                 SC_LOG("death: %s kill=%d anim=%d health_comp=%d -> down=%d", entry.name,
                        killed ? 1 : 0, have_death_anim ? 1 : 0, fighter.health ? 1 : 0,
                        IsDown(fighter) ? 1 : 0);
