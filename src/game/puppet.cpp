@@ -1354,7 +1354,14 @@ void UpdateLobby(ue::UObject* player) {
             coop::IniPath(ini, sizeof(ini));
             char address[128] = {};
             GetPrivateProfileStringA("net", "host", "", address, sizeof(address), ini);
-            const int port = GetPrivateProfileIntA("net", "port", 7777, ini);
+            const int mirror_port = GetPrivateProfileIntA("net", "port", 7777, ini);
+            // A DIFFERENT port from the UDP mirror, and this is why the listen
+            // server never came up: the mirror binds `port` before anyone can
+            // press these buttons, so UIpNetDriver::InitListen was asked for a
+            // socket that was already taken. It fails quietly, UWorld::Listen
+            // gives up, and the world stays standalone -- which is precisely
+            // what the log reported. Overridable, because a firewall may care.
+            const int port = GetPrivateProfileIntA("net", "native_port", mirror_port + 1, ini);
             if (requests.native_host) {
                 native_net::HostCurrentLevel(port);
             } else {

@@ -88,6 +88,8 @@ bool HostCurrentLevel(int port) {
     char command[256] = {};
     _snprintf(command, sizeof(command) - 1, "open %s?listen?port=%d", level, port);
     LogNetMode("before hosting");
+    SC_LOG("native-net: listening on port %d (the UDP mirror keeps its own port; two "
+           "sockets cannot share one)", port);
     const bool ok = ue::ExecuteConsoleCommand(command);
     SC_LOG("native-net: host command '%s' -> %s", command, ok ? "dispatched" : "FAILED");
     if (ok) ReportShortly("after hosting");
