@@ -178,102 +178,6 @@ bool TrackingIsCurrent() {
            g_tracked_world == ue::GetWorld();
 }
 
-// Read the attack component's selected target through its reflected Blueprint
-// accessor. The layout is from the shipped PDB and contains no game-object
-// field offset guesses.
-ue::UObject* ReadAttackTarget(ue::UObject* attack_component, std::uint8_t action_type) {
-    if (!attack_component) return nullptr;
-    struct Params {
-        std::uint8_t action_type;
-        std::uint8_t force_out_of_date;
-        std::uint8_t pad[6];
-        ue::UObject* ReturnValue;
-    } params = {};
-    params.action_type = action_type;
-    if (!ue::CallFunction(attack_component, L"BPF_GetTargetForAction", &params)) return nullptr;
-    return params.ReturnValue;
-}
-
-constexpr std::uint8_t kEnemyTargetMask =
-    net::kEnemyTargetsHost | net::kEnemyTargetsPeer;
-
-std::uint8_t HostTargetFlags(ue::UObject* attack_component, ue::UObject* host_player,
-                             ue::UObject* peer_player) {
-    // The target API is action-specific. Passing the zero-initialised enum only
-    // asks for one action slot, which the log proved was idle even while the
-    // enemy was attacking. Probe the compact action enum instead of inventing a
-    // private offset or guessing a "current target" field. The getter is
-    // read-only; invalid enum values simply have no target.
-    for (std::uint8_t action_type = 0; action_type < 8; ++action_type) {
-        const ue::UObject* target = ReadAttackTarget(attack_component, action_type);
-        if (target == host_player) return net::kEnemyTargetsHost;
-        if (target && peer_player && target == peer_player) return net::kEnemyTargetsPeer;
-    }
-    return 0;
-}
-
-void KeepClientBrainStopped(Tracked& entry, DWORD now) {
-    // Level scripts can restart an AI brain after it was initially stopped.
-    // A host-authoritative replica must never resume local decision making, or
-    // its own AI will fight the network driver and create a private encounter.
-    constexpr DWORD kRetryMs = 750;
-    if (entry.ai_stopped && now - entry.last_ai_stop_ms < kRetryMs) return;
-    entry.last_ai_stop_ms = now;
-    if (StopBrain(entry.actor)) entry.ai_stopped = true;
-}
-
-void RegisterEnemyTargetable(ue::UObject* actor) {
-    if (!actor || !g_get_targetable_actor_component || !g_register_targetable_actor) return;
-    ue::UObject* targetable = g_get_targetable_actor_component(actor);
-    if (targetable) g_register_targetable_actor(targetable);
-}
-
-// Map the host's target to the equivalent body on the joining machine. The host
-// player is represented by this client's puppet, while the host's remote-player
-// body is represented by this client's physical player.
-bool ApplyMirroredTarget(Tracked& entry, std::uint8_t flags) {
-    flags &= kEnemyTargetMask;
-    entry.host_target_flags = flags;
-    if (flags == 0 || (flags == kEnemyTargetMask) || !entry.attack_component) return false;
-
-    ue::UObject* world = ue::GetWorld();
-    ue::UObject* desired = nullptr;
-    if (flags == net::kEnemyTargetsHost) {
-        desired = GetPuppet();
-    } else if (world) {
-        desired = ue::GetPlayerCharacter(world, 0);
-    }
-    if (!desired) return false;
-
-    if (entry.mirrored_target == desired) return true;
-
-    // Lock-move target is only locomotion assistance; it does not change the
-    // attack component's actual target. The old code therefore aimed real
-    // replayed hitboxes at stale/null actors. Set both through Sifu's APIs.
-    bool applied = false;
-    if (g_set_attack_target) {
-        g_set_attack_target(entry.attack_component, desired);
-        applied = true;
-    }
-
-    struct Params {
-        ue::UObject* current_attacked;
-    } params = {};
-    params.current_attacked = desired;
-    if (ue::CallFunction(entry.attack_component, L"BPF_UpdateLockMoveTarget", &params)) {
-        applied = true;
-    }
-    if (!applied) {
-        SC_LOG("targets: %s could not apply mirrored target", entry.name);
-        return false;
-    }
-
-    entry.mirrored_target = desired;
-    SC_LOG("targets: %s mirrored to %s", entry.name,
-           flags == net::kEnemyTargetsHost ? "host puppet" : "local player");
-    return true;
-}
-
 // UAttackComponent::m_Target, an FWeakObjectPtr {int32 ObjectIndex; int32 Serial},
 // offset straight out of Unreal's property table for UAttackComponent. This is
 // who the enemy has actually decided to fight.
@@ -533,6 +437,92 @@ void MaintainPeerHostility(ue::UObject* peer) {
                    active, relationship::Name(g_hostile_value));
         }
     }
+}
+
+constexpr std::uint8_t kEnemyTargetMask =
+    net::kEnemyTargetsHost | net::kEnemyTargetsPeer;
+
+std::uint8_t HostTargetFlags(ue::UObject* attack_component, ue::UObject* host_player,
+                             ue::UObject* peer_player) {
+    // Reads m_Target, the same field the targets census reads -- and that
+    // difference was the whole of "the peer never gets a real fight".
+    //
+    // This used to probe BPF_GetTargetForAction across eight action slots. The
+    // census was moved off that call precisely because it answers "nobody" for
+    // enemies that are demonstrably mid-swing, and the two then disagreed
+    // flatly: the census reported an enemy on the second player in 24 of 38
+    // samples while this function put the flag on the wire almost never. The
+    // joining machine keys ownership off that flag, so it claimed an enemy only
+    // when the eight-second aggro lease forced the flag by hand -- twice in a
+    // whole session. Everything downstream followed: no local fight, no position
+    // authority, nothing to publish back.
+    const std::int32_t target = TargetIndexOf(attack_component);
+    if (target < 0) return 0;
+    if (target == InternalIndexOf(host_player)) return net::kEnemyTargetsHost;
+    if (peer_player && target == InternalIndexOf(peer_player)) return net::kEnemyTargetsPeer;
+    return 0;
+}
+
+void KeepClientBrainStopped(Tracked& entry, DWORD now) {
+    // Level scripts can restart an AI brain after it was initially stopped.
+    // A host-authoritative replica must never resume local decision making, or
+    // its own AI will fight the network driver and create a private encounter.
+    constexpr DWORD kRetryMs = 750;
+    if (entry.ai_stopped && now - entry.last_ai_stop_ms < kRetryMs) return;
+    entry.last_ai_stop_ms = now;
+    if (StopBrain(entry.actor)) entry.ai_stopped = true;
+}
+
+void RegisterEnemyTargetable(ue::UObject* actor) {
+    if (!actor || !g_get_targetable_actor_component || !g_register_targetable_actor) return;
+    ue::UObject* targetable = g_get_targetable_actor_component(actor);
+    if (targetable) g_register_targetable_actor(targetable);
+}
+
+// Map the host's target to the equivalent body on the joining machine. The host
+// player is represented by this client's puppet, while the host's remote-player
+// body is represented by this client's physical player.
+bool ApplyMirroredTarget(Tracked& entry, std::uint8_t flags) {
+    flags &= kEnemyTargetMask;
+    entry.host_target_flags = flags;
+    if (flags == 0 || (flags == kEnemyTargetMask) || !entry.attack_component) return false;
+
+    ue::UObject* world = ue::GetWorld();
+    ue::UObject* desired = nullptr;
+    if (flags == net::kEnemyTargetsHost) {
+        desired = GetPuppet();
+    } else if (world) {
+        desired = ue::GetPlayerCharacter(world, 0);
+    }
+    if (!desired) return false;
+
+    if (entry.mirrored_target == desired) return true;
+
+    // Lock-move target is only locomotion assistance; it does not change the
+    // attack component's actual target. The old code therefore aimed real
+    // replayed hitboxes at stale/null actors. Set both through Sifu's APIs.
+    bool applied = false;
+    if (g_set_attack_target) {
+        g_set_attack_target(entry.attack_component, desired);
+        applied = true;
+    }
+
+    struct Params {
+        ue::UObject* current_attacked;
+    } params = {};
+    params.current_attacked = desired;
+    if (ue::CallFunction(entry.attack_component, L"BPF_UpdateLockMoveTarget", &params)) {
+        applied = true;
+    }
+    if (!applied) {
+        SC_LOG("targets: %s could not apply mirrored target", entry.name);
+        return false;
+    }
+
+    entry.mirrored_target = desired;
+    SC_LOG("targets: %s mirrored to %s", entry.name,
+           flags == net::kEnemyTargetsHost ? "host puppet" : "local player");
+    return true;
 }
 
 bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
@@ -1490,19 +1480,30 @@ void ApplyRemoteEnemies() {
             const DWORD death_now = GetTickCount();
             const bool have_death_anim =
                 entry.pending_death_anim && death_now - entry.pending_death_anim_ms <= 2000;
-            if (dead && fighter.health && have_death_anim) {
+            // Always Sifu's own kill path, with the chosen animation when the
+            // host managed to send one and without when it did not.
+            //
+            // The old shape only reached Kill if an animation had arrived, and
+            // otherwise tried ApplyDamage -- which was skipped in turn whenever
+            // health had already been synced to zero, so the common case ran
+            // neither and the body was left standing while SetDown put it in a
+            // knockdown pose. Five deaths in six went that way.
+            if (dead && fighter.health) {
                 ue::UObject* death_world = ue::GetWorld();
                 ue::UObject* killer =
                     death_world ? ue::GetPlayerCharacter(death_world, 0) : nullptr;
-                KillWithAnimation(fighter, killer, entry.pending_death_anim);
-            } else if (dead && fighter.health && GetHealth(fighter) > 0.5f) {
-                ApplyDamage(fighter, GetHealth(fighter) + 1.f);
+                if (!KillWithAnimation(fighter, killer,
+                                       have_death_anim ? entry.pending_death_anim : nullptr) &&
+                    GetHealth(fighter) > 0.5f) {
+                    ApplyDamage(fighter, GetHealth(fighter) + 1.f);
+                }
             }
             entry.pending_death_anim = nullptr;
-            // Always assert the visual state on the edge. Testing health here
-            // skipped this call exactly when ApplyDamage successfully reached
-            // zero, leaving a dead enemy upright.
-            SetDown(fighter, dead);
+            // Only for a REVIVAL now. Asserting the down state on a death used
+            // to be the belt-and-braces that quietly became the only thing
+            // running, and a forced knockdown is exactly the pose that reads as
+            // "dead but still standing".
+            if (!dead) SetDown(fighter, false);
             if (config.verbose_enemies) {
                 SC_LOG("enemies: %s %s", entry.name, dead ? "DIED" : "recycled alive");
             }

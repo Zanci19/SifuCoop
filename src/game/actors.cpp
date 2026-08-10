@@ -180,7 +180,15 @@ void SetGuard(const Fighter& fighter, float guard) {
 // same function on the other side.
 bool KillWithAnimation(const Fighter& fighter, ue::UObject* instigator,
                        ue::UObject* death_animation) {
-    if (!fighter.health || !g_health_kill || !death_animation) return false;
+    // A null animation is allowed, and that is not a loophole -- it is what the
+    // host itself passes for most kills. The exact-sequence hook only fires when
+    // Sifu's hit path chose one, which it does not for damage applied through
+    // BPF_ApplyDamage: the host sent an animation for one death out of six in a
+    // logged session, and the other five are precisely the ones the peer killed.
+    // The host's own bodies fall correctly on those five, so making the same
+    // call with the same null argument is what reproduces that, rather than
+    // falling back to a forced down-state that never looked like dying.
+    if (!fighter.health || !g_health_kill) return false;
     // Behaviour 0 is the ordinary lethal case. The instigator is only used for
     // attribution and direction; a live local body is passed rather than null
     // because the callee dereferences it.
