@@ -85,13 +85,18 @@ bool HostCurrentLevel(int port) {
 
     // UE4 URL options are separated by '?'. `listen` makes the reloaded map a
     // listen server; `port` is consumed by UIpNetDriver::InitListen.
-    char command[256] = {};
-    _snprintf(command, sizeof(command) - 1, "open %s?listen?port=%d", level, port);
+    char options[64] = {};
+    _snprintf(options, sizeof(options) - 1, "listen?port=%d", port);
     LogNetMode("before hosting");
     SC_LOG("native-net: listening on port %d (the UDP mirror keeps its own port; two "
            "sockets cannot share one)", port);
-    const bool ok = ue::ExecuteConsoleCommand(command);
-    SC_LOG("native-net: host command '%s' -> %s", command, ok ? "dispatched" : "FAILED");
+    // UGameplayStatics::OpenLevel rather than the `open` console command. The
+    // console route reloaded the map and lost the listen option every time --
+    // driver active, port free, world still standalone -- because Sifu's
+    // shipping build takes that command through its own level flow.
+    const bool ok = ue::OpenLevelWithOptions(level, options);
+    SC_LOG("native-net: host '%s' options '%s' -> %s", level, options,
+           ok ? "dispatched" : "FAILED");
     if (ok) ReportShortly("after hosting");
     if (!ok) coop::ReportProblem("could not start the engine listen server");
     return ok;
@@ -103,6 +108,8 @@ bool JoinHost(const char* address, int port) {
         return false;
     }
 
+    // Joining is a travel to an ADDRESS, not to a map, so OpenLevel is not the
+    // right call here -- the console remains the only reachable route for it.
     char command[96] = {};
     _snprintf(command, sizeof(command) - 1, "open %s:%d", address, port);
     LogNetMode("before joining");

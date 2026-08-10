@@ -163,7 +163,7 @@ bool GetCurrentLevelPath(char* out, int out_size) {
     return out[0] != '\0';
 }
 
-bool OpenLevel(const char* level_path) {
+bool OpenLevelWithOptions(const char* level_path, const char* options_text) {
     if (!g_ready || !g_open_level || !level_path || !level_path[0]) return false;
 
     UObject* world = GetWorld();
@@ -176,16 +176,37 @@ bool OpenLevel(const char* level_path) {
 
     // FString Options, passed by value: 16 bytes, so the ABI passes it by
     // address. Zeroed is a valid empty FString -- null data, zero length.
+    //
+    // Filling it in is what the console route could not do. `open <map>?listen`
+    // reloaded the map and dropped the option: Sifu's shipping build routes that
+    // command through its own level flow, so the world came back standalone
+    // every time however the port was chosen. OpenLevel takes the options as a
+    // real parameter, and it is the call the game itself uses, so nothing can
+    // rewrite it on the way through.
     struct FString {
         wchar_t* data;
         std::int32_t num;
         std::int32_t max;
     } options = {};
 
-    SC_LOG("level: opening '%s'", level_path);
+    wchar_t options_wide[256] = {};
+    if (options_text && options_text[0]) {
+        const int chars =
+            MultiByteToWideChar(CP_UTF8, 0, options_text, -1, options_wide, 256);
+        if (chars > 0) {
+            options.data = options_wide;
+            options.num = chars;   // includes the terminator, as FString counts it
+            options.max = chars;
+        }
+    }
+
+    SC_LOG("level: opening '%s' options '%s'", level_path,
+           options_text && options_text[0] ? options_text : "(none)");
     g_open_level(world, name, false, &options);
     return true;
 }
+
+bool OpenLevel(const char* level_path) { return OpenLevelWithOptions(level_path, nullptr); }
 
 bool ExecuteConsoleCommand(const char* command, UObject* specific_player) {
     if (!command || !command[0]) return false;
