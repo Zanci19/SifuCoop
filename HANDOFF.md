@@ -442,3 +442,57 @@ Build warning-clean, keep the crypto vectors passing, put anything risky/unverif
 default-off config toggle with an honest comment, and clearly separate "verified live" from
 "implemented but untested" from "researched only" in every status you write.
 ```
+
+---
+
+## 13. STATE AT 2026-08-10 07:40 (written while the owner was away)
+
+Deployed to the **Epic** folder only. The Steam machine was unreachable (`Z:` not mounted),
+so it is still on the previous build — **redeploy it before the next two-machine test**:
+
+```
+.\build.ps1 -GameDir "Z:\Program Files (x86)\Steam\steamapps\common\Sifu\Sifu\Binaries\Win64" -LocalBuildName steam -Deploy
+```
+
+### Fixed this pass
+
+- **The action mirror fired once per session.** `UPlayerAnim::m_LastActionAnim` is a *last*
+  action: it keeps pointing at its asset after the action ends, and a repeated move never
+  changes the pointer, so an edge trigger on the pointer alone almost never fires. Today's
+  log across three sessions of fighting contains exactly one `action: sent`. It now triggers
+  on a new asset **or** a cursor that has gone backwards.
+- **What that one line told us:** the asset was a death animation
+  (`MC_man_barehands_death_high_east_FL_light_60fps`). So `m_LastActionAnim` carries deaths
+  and takedowns — which is what the channel was added for — but does **not** appear to carry
+  ordinary strikes. Those still come from the order path.
+
+### New, default OFF: `peer_fights_locally`
+
+The first route to "the client gets a real fight" that does not go through the host's
+director. Only a `DirectOpponent` may swing; that ticket is allocated per target; the puppet
+standing in for the joining player is not a target the host's director will ever allocate one
+to. Forcing it there is what crashed in `AddRemoveCandidate` on death cleanup and parked four
+of five enemies as `NonOpponent`.
+
+On the joining machine that player **is** player zero — a legitimate target its own director
+allocates attackers to normally. So for enemies the host reports with `kEnemyTargetsPeer`,
+the joiner stops driving their transform and restarts their behaviour tree.
+
+The cost: those bodies stop being position-authoritative, so the two machines will disagree
+about where they are standing. That is the trade, and why it is off. Turn it on with
+`peer_fights_locally=1` on the JOINING machine and watch for
+`enemies: <name> handed to local AI`.
+
+### Still open, with what is known
+
+- **Enemy blocks and parries do not replicate.** `m_LastActionAnim` is declared on
+  `UPlayerAnim`; `USCAnimInstance` (the enemies' base) has no equivalent — it was dumped and
+  checked. It does have `m_ActionToActionBlendForRep` / `m_LocoToActionBlendForRep`, whose
+  names suggest replication state; that is the first place to look next.
+- **Hit reaction animations.** Needs `UHitComponent::BPF_GenerateFakeImpact`, whose
+  `FHitRequest` reaches `FHitBox -> FHitboxDataRow -> TSet`. §7b already established those
+  cannot be rebuilt from outside the owning process. The reachable half is done: the enemy
+  registers being hit (`mirror_hit_reactions`, which until this week was an ini key read by
+  nothing at all).
+- **Corpses / death animation on the joiner** is implemented but **unverified**: no enemy
+  died in any of the three logged sessions, so there is no evidence either way yet.
