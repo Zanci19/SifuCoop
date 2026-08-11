@@ -227,7 +227,11 @@ struct Config {
     //
     // Kept as a switch so the finding is not lost. Do not turn it on except to
     // study that crash.
-    bool force_enemy_engage = false;
+    // Sets the AI's OWN enemy, which is what grants a combat role -- the attack
+    // component's target only decides where they walk. Requires the partner to
+    // be registered with the director first (director_targets_partner), which is
+    // what its earlier crash was missing.
+    bool force_enemy_engage = true;
 
     bool puppet_invincible = true;
     // The puppet ignores pawn collision so two player capsules do not shove

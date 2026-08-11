@@ -582,10 +582,24 @@ bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
     // director cannot fully account for takes the room out of combat rather
     // than sharing it.
     //
-    // Left in the file behind force_enemy_engage (default 0) because the finding
-    // is real and the roles line is what proved it. The right form of this needs
-    // the puppet to be a legitimate director candidate first, not a ticket
-    // forced onto one.
+    // ...and the prerequisite that note asked for now exists, so it is ON.
+    //
+    // "The right form of this needs the puppet to be a legitimate director
+    // candidate first, not a ticket forced onto one." That was the correct
+    // diagnosis and it has now been acted on: MaintainPartnerAsDirectorTarget
+    // registers the partner through the director's own front door, and a live
+    // session confirmed it runs without crashing.
+    //
+    // Why BOTH halves are needed, which took far too long to see. There are two
+    // separate fields and the two census lines read one each:
+    //   - the ATTACK COMPONENT's target, set by g_set_attack_target below, is
+    //     what `targets:` counts;
+    //   - the AI's own enemy, read by ReadAIEnemy, is what `roles:` counts, and
+    //     it is set by nothing in this mod except the call below.
+    // So every fix so far moved `targets` to the partner while `roles` stayed at
+    // zero, and the enemies duly walked over to the partner and stood there. Aim
+    // without permission. Registering the target creates the ticket manager;
+    // this call is what puts the enemy into it.
     if (coop::Get().force_enemy_engage && entry.ai_fighting &&
         ReadAIEnemy(entry.ai_fighting) != desired) {
         ForceEnemy(entry.ai_fighting, desired, kBehaviorAlerted);
