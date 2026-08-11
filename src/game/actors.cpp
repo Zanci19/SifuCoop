@@ -51,6 +51,15 @@ SetRelationshipFn g_set_relationship = nullptr;
 using HealthKillFn = void(__fastcall*)(ue::UObject*, std::int32_t, ue::UObject*, ue::UObject*,
                                        bool, bool);
 HealthKillFn g_health_kill = nullptr;
+// The PRESENTATION half of going down and getting up.
+//
+// InternalSetDownState changes the state; these two are what UE runs on a
+// machine that did not do the killing, to make the body actually fall and
+// actually stand back up. Without native replication they never fire on their
+// own, which is why a corpse here reported down=1 and stayed on its feet.
+using HealthNotifyFn = void(__fastcall*)(ue::UObject*);
+HealthNotifyFn g_on_rep_set_is_down = nullptr;
+HealthNotifyFn g_on_character_stands_up = nullptr;
 // UFightingMovementComponent::SetSpeedState(ESpeedState). See the note on
 // SetMovementSpeedState below for why this, and not the anim instance, is the
 // thing that has to be written.
@@ -117,6 +126,16 @@ void InitActors(std::uintptr_t base) {
     g_health_kill = offsets::UHealthComponent_Kill
                         ? reinterpret_cast<HealthKillFn>(base + offsets::UHealthComponent_Kill)
                         : nullptr;
+    g_on_rep_set_is_down =
+        offsets::UCharacterHealthComponent_OnRepSetIsDown
+            ? reinterpret_cast<HealthNotifyFn>(
+                  base + offsets::UCharacterHealthComponent_OnRepSetIsDown)
+            : nullptr;
+    g_on_character_stands_up =
+        offsets::UCharacterHealthComponent_OnCharacterStandsUp
+            ? reinterpret_cast<HealthNotifyFn>(
+                  base + offsets::UCharacterHealthComponent_OnCharacterStandsUp)
+            : nullptr;
 
     // Only the offsets that would silently corrupt a read are treated as
     // mandatory; the rest degrade to "that feature is off".
@@ -210,6 +229,23 @@ bool IsDown(const Fighter& fighter) {
 bool IsDead(const Fighter& fighter) {
     if (!fighter.health || !g_is_dead) return false;
     return g_is_dead(fighter.health);
+}
+
+// Runs the callback UE would have run on a replication client.
+//
+// Found by asking what actually puts a body on the floor rather than what
+// marks it dead: UCharacterHealthComponent has OnRepSetIsDown, the OnRep_ for
+// its down flag, and an OnCharacterStandsUp to match. On a real client UE
+// calls those when the flag arrives, and everything visible about falling
+// lives in them. This mod sets the flag itself, so it has to make the call
+// itself too -- which is why every death read down=1 and stood upright.
+void NotifyDownStateChanged(const Fighter& fighter, bool down) {
+    if (!fighter.health) return;
+    if (down) {
+        if (g_on_rep_set_is_down) g_on_rep_set_is_down(fighter.health);
+    } else if (g_on_character_stands_up) {
+        g_on_character_stands_up(fighter.health);
+    }
 }
 
 void SetDown(const Fighter& fighter, bool down) {

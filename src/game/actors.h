@@ -76,6 +76,14 @@ bool IsDead(const Fighter& fighter);
 // leaves the character standing.
 void SetDown(const Fighter& fighter, bool down);
 
+// Plays the visible half of going down or standing up.
+//
+// SetDown changes the state; this runs the OnRep_ callbacks UE would run on a
+// machine that received that change over the network. Without it a body is
+// marked down and never falls, which is exactly what the joiner measured:
+// down=1 on every death, all of them still standing.
+void NotifyDownStateChanged(const Fighter& fighter, bool down);
+
 // --- Identity and behaviour ------------------------------------------------
 
 int GetFaction(ue::UObject* actor);

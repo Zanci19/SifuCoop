@@ -1599,6 +1599,12 @@ void ApplyRemoteEnemies() {
                 // that was laying anyone down. A knockdown pose is wrong; a
                 // corpse standing up is worse.
                 if (!IsDown(fighter)) SetDown(fighter, true);
+                // And then PLAY it. The flag was already being set correctly
+                // -- every death measured down=1 -- and the body stood there
+                // anyway, because the callback that turns that flag into a
+                // fall is the one UE runs on a replication client, and there
+                // is no replication here to run it.
+                NotifyDownStateChanged(fighter, true);
                 SC_LOG("death: %s kill=%d anim=%d health_comp=%d -> down=%d", entry.name,
                        killed ? 1 : 0, have_death_anim ? 1 : 0, fighter.health ? 1 : 0,
                        IsDown(fighter) ? 1 : 0);
@@ -1608,7 +1614,22 @@ void ApplyRemoteEnemies() {
             // to be the belt-and-braces that quietly became the only thing
             // running, and a forced knockdown is exactly the pose that reads as
             // "dead but still standing".
-            if (!dead) SetDown(fighter, false);
+            if (!dead) {
+                SetDown(fighter, false);
+                NotifyDownStateChanged(fighter, false);
+                // Give it its collision back, unconditionally.
+                //
+                // Sifu retires a dying body's collision, and our own bookkeeping
+                // never noticed: entry.present was still true from before the
+                // death, so the restore below -- which only fires when we think
+                // presence is missing -- was skipped. The body came back, was
+                // visible, was a valid target, and every attack went straight
+                // through it. Asking for presence again costs two reflected
+                // calls on an edge that happens once per revival.
+                SetActorPresent(entry.actor, true);
+                entry.present = true;
+                entry.parked = false;
+            }
             if (config.verbose_enemies) {
                 SC_LOG("enemies: %s %s", entry.name, dead ? "DIED" : "recycled alive");
             }
@@ -1711,7 +1732,8 @@ void ApplyRemoteEnemies() {
         // permanent. Only the down/death state machine is left alone.
         if (!dead && !knocked_down && IsDown(fighter) && config.sync_enemies) {
             SetDown(fighter, false);
-            entry.was_down = false;
+            entry.was_down = false;
+            NotifyDownStateChanged(fighter, false);
             if (config.verbose_enemies) {
                 SC_LOG("enemies: %s was floored locally but the host has it up -- restored",
                        entry.name);

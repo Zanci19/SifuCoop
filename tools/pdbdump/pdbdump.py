@@ -204,6 +204,18 @@ WANTED = {
     "UHealthComponent_Kill": ["?Kill@UHealthComponent@@UEAAXW4EApplyDamageBehavior@@"],
     # (BPF_SetCanBeDamaged is inlined away -- only its exec thunk survives, so
     # invincibility goes through AFightingCharacter::BPF_SetInvincibility.)
+    # The presentation half of dying, and the reason a replicated corpse stands
+    # up straight. InternalSetDownState changes the STATE; OnRepSetIsDown is
+    # what UE runs on a machine that did not do the killing to make the body
+    # actually go to the floor. Without native replication it never fires, so
+    # the mod has to call it itself. OnCharacterStandsUp is its counterpart for
+    # a body coming back up.
+    "UCharacterHealthComponent_OnRepSetIsDown": [
+        "?OnRepSetIsDown@UCharacterHealthComponent@@AEAAXXZ"
+    ],
+    "UCharacterHealthComponent_OnCharacterStandsUp": [
+        "?OnCharacterStandsUp@UCharacterHealthComponent@@AEAAXXZ"
+    ],
     "UHealthComponent_IsDead": ["?IsDead@UHealthComponent@@UEBA_NXZ"],
     # The real StopLogic: UBrainComponent's is an empty base that ICF folded
     # onto several unrelated stubs, so it is only useful through reflection
