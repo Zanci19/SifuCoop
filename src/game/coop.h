@@ -150,6 +150,27 @@ struct Config {
     // enemies fighting the host stay host-driven, so nothing about the host's
     // own fight changes. Set peer_fights_locally=0 to go back to a body that
     // stands in the right place and cannot fight.
+    // Let the joining machine SIMULATE every enemy, not just the ones fighting
+    // it -- host still owns health and death.
+    //
+    // This is the answer to "on the client they stand there, do not react to
+    // hits and do not fall over when killed". Sifu animates a character through
+    // Orders, and Orders come from its brain. suppress_client_ai stops that
+    // brain, so those bodies have no mechanism to play a hit reaction or a death
+    // at all; they move only because this mod writes their position and speed
+    // by hand. The proof is already in the game: the enemies the joiner claims,
+    // and therefore gives a brain back to, animate perfectly.
+    //
+    // There is nothing to mirror instead. USCAnimInstance -- the enemies'
+    // animation base -- carries no current-action asset the way UPlayerAnim does,
+    // so there is no equivalent of the player's action channel to build.
+    //
+    // With this on, every enemy thinks for itself on both machines and the host
+    // stays authoritative for health, damage and death. Position is corrected on
+    // drift rather than driven every frame, because driving a body that is
+    // walking under its own power makes it slide through its own attacks.
+    bool client_simulates_enemies = true;
+
     bool peer_fights_locally = true;
 
     bool fix_room_clear = false;      // nudge the local room-clear % to the host's

@@ -92,6 +92,8 @@ void Load() {
     g_config.mirror_peer_vitals = ReadBool("mirror_peer_vitals",
                                            g_config.mirror_peer_vitals, ini);
     g_config.sync_run_state = ReadBool("sync_run_state", g_config.sync_run_state, ini);
+    g_config.client_simulates_enemies =
+        ReadBool("client_simulates_enemies", g_config.client_simulates_enemies, ini);
     g_config.peer_fights_locally =
         ReadBool("peer_fights_locally", g_config.peer_fights_locally, ini);
     g_config.mirror_hit_reactions =
@@ -155,6 +157,7 @@ void Save() {
     WriteBool("report_damage", g_config.report_damage, ini);
     WriteBool("mirror_peer_vitals", g_config.mirror_peer_vitals, ini);
     WriteBool("sync_run_state", g_config.sync_run_state, ini);
+    WriteBool("client_simulates_enemies", g_config.client_simulates_enemies, ini);
     WriteBool("peer_fights_locally", g_config.peer_fights_locally, ini);
     WriteBool("mirror_hit_reactions", g_config.mirror_hit_reactions, ini);
     WriteBool("fix_room_clear", g_config.fix_room_clear, ini);

@@ -1387,8 +1387,26 @@ void ApplyRemoteEnemies() {
             ApplyMirroredTarget(entry, state.flags);
         }
 
-        if (config.suppress_client_ai && !fights_us) {
+        // A body with no brain cannot animate, so give every enemy its brain.
+        //
+        // This is what "on the client they stand there, do not react to hits and
+        // do not fall over" comes down to. Sifu animates through Orders and
+        // Orders come from the brain; a stopped one leaves the body with no
+        // mechanism to play a reaction or a death at all, and no field to mirror
+        // instead -- USCAnimInstance carries no current-action asset the way the
+        // player's animation instance does. The enemies this side already claims
+        // animate correctly, and the only difference is that they have a brain.
+        const bool local_ai = config.client_simulates_enemies || fights_us;
+
+        if (config.suppress_client_ai && !local_ai) {
             KeepClientBrainStopped(entry, GetTickCount());
+        } else if (local_ai && entry.ai_stopped) {
+            if (StartBrain(entry.actor)) {
+                entry.ai_stopped = false;
+                if (config.verbose_enemies) {
+                    SC_LOG("enemies: %s thinking for itself here", entry.name);
+                }
+            }
         }
 
         // Death and knockdown are now distinct on the wire. Everything below
@@ -1655,7 +1673,7 @@ void ApplyRemoteEnemies() {
         // back only when the gap becomes larger than a fight can explain. Far
         // enough apart and they are not describing the same enemy any more,
         // which is worse than a correction.
-        if (fights_us && !dead && !knocked_down && config.sync_enemies) {
+        if (local_ai && !dead && !knocked_down && config.sync_enemies) {
             ue::FVector here = {};
             if (ue::GetActorLocation(entry.actor, &here)) {
                 const float dx = state.x - here.X;
@@ -1740,7 +1758,7 @@ void ApplyRemoteEnemies() {
             }
         }
 
-        if (!dead && config.sync_enemies && !fights_us) {
+        if (!dead && config.sync_enemies && !local_ai) {
             const ue::FVector target = {state.x, state.y, state.z};
             const ue::FRotator facing = {0.f, state.yaw, 0.f};
             const ue::FVector velocity = {state.velocity_x, state.velocity_y, state.velocity_z};
