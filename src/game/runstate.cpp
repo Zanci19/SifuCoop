@@ -11,6 +11,7 @@
 #include "../net/session.h"
 #include "../ue/reflection.h"
 #include "coop.h"
+#include "player2.h"
 #include "puppet.h"
 
 namespace sifucoop::game {
@@ -20,6 +21,26 @@ namespace ue = sifucoop::ue;
 namespace net = sifucoop::net;
 namespace coop = sifucoop::coop;
 namespace offsets = sifucoop::offsets;
+
+// Never write cosmetics onto the local player.
+//
+// Reported after the first version of this shipped: on the joiner, whose player
+// is 20, BOTH bodies started showing the host's age. The write was landing on
+// the local character. ApplyPeerVitals has carried the guard against exactly
+// this since it was written -- "Sifu's game mode has been observed handing the
+// second player the FIRST player's character, and it does that on respawn and
+// travel as well as at creation" -- and these two writes were added without it.
+//
+// Both directions of the same test, for the same reason it is done twice there:
+// GetPlayerCharacter(0) can lag the possession by a frame.
+bool IsSafeToDress(ue::UObject* puppet) {
+    if (!puppet) return false;
+    ue::UObject* world = ue::GetWorld();
+    ue::UObject* local_player = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
+    if (local_player && puppet == local_player) return false;
+    if (puppet == PrimaryPlayerPawn()) return false;
+    return true;
+}
 
 // player -> UStatsComponent -> character age. Both are reflection getters, so
 // this reads real data without dereferencing any unknown field. Returns -1 when
@@ -52,7 +73,7 @@ int ReadLocalAge(ue::UObject* player) {
 // the puppet and nowhere else: the local player's age is their own run and must
 // never be written from the network.
 bool WritePuppetAge(ue::UObject* puppet, int years) {
-    if (!puppet || years < 0) return false;
+    if (!puppet || years < 0 || !IsSafeToDress(puppet)) return false;
     struct StatsRet {
         ue::UObject* ReturnValue;
     } stats = {};
@@ -105,7 +126,7 @@ int ReadLocalOutfit(ue::UObject* player) {
 // Aimed at the PUPPET only, exactly like the age write. The second argument is
 // an optional material override; passing null means "just the outfit".
 bool WritePuppetOutfit(ue::UObject* puppet, int index) {
-    if (!puppet || index < 0) return false;
+    if (!puppet || index < 0 || !IsSafeToDress(puppet)) return false;
     ue::UObject* comp = PlayerFightingComponent(puppet);
     if (!comp) return false;
     // Three parameters, from the decorated name:
@@ -273,7 +294,14 @@ void TickRunState(ue::UObject* player) {
         if (puppet && net::GetPeerRunState(&ages) && ages.age_valid && ages.age >= 0) {
             static ue::UObject* aged_puppet = nullptr;
             static int aged_to = INT_MIN;
-            if (puppet != aged_puppet || ages.age != aged_to) {
+            if (!IsSafeToDress(puppet)) {
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    SC_LOG("run: refused to age that body -- it is the one controller 0 is "
+                           "possessing, so it is YOURS, not your partner's");
+                }
+            } else if (puppet != aged_puppet || ages.age != aged_to) {
                 const bool ok = WritePuppetAge(puppet, ages.age);
                 aged_puppet = puppet;
                 aged_to = ages.age;
@@ -295,7 +323,8 @@ void TickRunState(ue::UObject* player) {
         if (outfit_puppet && net::GetPeerRunState(&outfit_state) && outfit_state.outfit_valid) {
             static ue::UObject* dressed_puppet = nullptr;
             static int dressed_as = INT_MIN;
-            if (outfit_puppet != dressed_puppet || outfit_state.outfit_index != dressed_as) {
+            if (IsSafeToDress(outfit_puppet) &&
+                (outfit_puppet != dressed_puppet || outfit_state.outfit_index != dressed_as)) {
                 const bool ok = WritePuppetOutfit(outfit_puppet, outfit_state.outfit_index);
                 dressed_puppet = outfit_puppet;
                 dressed_as = outfit_state.outfit_index;

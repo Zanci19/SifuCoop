@@ -304,6 +304,41 @@ bool PlayAnimationAsset(UObject* actor, UObject* animation_asset, float start_at
     return params.ReturnValue != nullptr;
 }
 
+// What CLASS an object is, as a path name.
+//
+// Added after feeding a UPoseAsset to PlaySlotAnimationAsDynamicMontage, which
+// takes a UAnimSequenceBase. UPoseAsset is not one -- it derives from
+// UAnimationAsset on a different branch -- so the engine built a dynamic
+// montage around the wrong type and corrupted the heap when it tore it down:
+//
+//   FMallocBinned2::Free() reading 0x3
+//   FPoseDataContainer::~FPoseDataContainer()
+//   UPoseAsset::`scalar deleting destructor'
+//   FAnimMontageInstance::Advance()
+//
+// A field matched by NAME is not a type. Anything handed to the animation
+// system from a raw field read has to be asked what it is first.
+//
+// Safe only for pointers that really are UObjects: this walks ClassPrivate and
+// then the class's own path name, exactly as GetObjectPathName does. Do not
+// call it to TEST whether an arbitrary pointer is an object -- that is the
+// mistake that crashed the order scan.
+bool GetObjectClassPathName(UObject* object, char* out, int out_size) {
+    if (!object || !out || out_size <= 0) return false;
+    out[0] = 0;
+    auto* klass = *reinterpret_cast<UObject**>(reinterpret_cast<std::uintptr_t>(object) + 0x10);
+    if (!klass) return false;
+    return GetObjectPathName(klass, out, out_size);
+}
+
+bool ObjectClassIs(UObject* object, const char* leaf_name) {
+    char path[160] = {};
+    if (!GetObjectClassPathName(object, path, sizeof(path))) return false;
+    const char* dot = strrchr(path, '.');
+    const char* leaf = dot ? dot + 1 : path;
+    return lstrcmpA(leaf, leaf_name) == 0;
+}
+
 void* GetAnimInstanceClass(UObject* actor) {
     UObject* instance = GetAnimInstance(actor);
     if (!instance) return nullptr;

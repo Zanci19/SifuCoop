@@ -101,6 +101,12 @@ UObject* GetAnimInstance(UObject* actor);
 // Writes `object`'s full path name into `out` as UTF-8. False if unavailable.
 bool GetObjectPathName(UObject* object, char* out, int out_size);
 
+// The object's CLASS as a path name, and a leaf-name comparison built on it.
+// Only ever call these on pointers already known to be UObjects -- they are for
+// asking "what IS this", not "is this an object at all".
+bool GetObjectClassPathName(UObject* object, char* out, int out_size);
+bool ObjectClassIs(UObject* object, const char* leaf_name);
+
 // Resolves a path name produced by GetObjectPathName back to a live object.
 UObject* FindObjectByPath(const wchar_t* path_name);
 

@@ -804,9 +804,37 @@ void PumpReactionCaptures() {
                         offsets::M_USCAnimInstance_CachedCurrentPoseAsset,
                     sizeof(pose));
         if (!pose || pose == pending.last_sent) continue;
+        pending.last_sent = pose;
+
+        // ASK WHAT IT IS before sending it anywhere near the animation system.
+        //
+        // This field is a UPoseAsset, and UPoseAsset is not a UAnimSequenceBase
+        // -- which is what PlaySlotAnimationAsDynamicMontage on the receiving
+        // side takes. Handing it one built a dynamic montage around the wrong
+        // type and corrupted the heap when the engine tore it down, mid-fight:
+        //   FMallocBinned2::Free() reading 0x3
+        //   FPoseDataContainer::~FPoseDataContainer()
+        //   FAnimMontageInstance::Advance()
+        // The field was matched by NAME and shipped without checking its TYPE.
+        //
+        // So: only a real UAnimSequence goes on the wire. Anything else is
+        // named in the log once per class, which is how the next route gets
+        // chosen instead of guessed.
+        if (!ue::ObjectClassIs(pose, "AnimSequence")) {
+            static char last_class[160] = {};
+            char class_path[160] = {};
+            if (ue::GetObjectClassPathName(pose, class_path, sizeof(class_path)) &&
+                lstrcmpA(class_path, last_class) != 0) {
+                lstrcpynA(last_class, class_path, sizeof(last_class));
+                SC_LOG("reaction: %s on %08X is a %s, not an AnimSequence -- NOT sent, it "
+                       "cannot be played through the montage slot",
+                       OrderTypeName(pending.order_type), pending.actor_hash, class_path);
+            }
+            continue;
+        }
+
         char path[192] = {};
         if (!ue::GetObjectPathName(pose, path, sizeof(path))) continue;
-        pending.last_sent = pose;
         // Addressed to the enemy. SendMontageState carries no actor and would
         // land the reaction on the remote player's body instead.
         net::SendAnimationSequence(path, pending.actor_hash);

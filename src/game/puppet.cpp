@@ -2059,6 +2059,24 @@ void TickPuppet() {
             continue;
         }
 
+        // Second gate, on the receiving end, because the sender is not the only
+        // thing that can be wrong and the cost of being wrong here is a heap
+        // corruption inside FAnimMontageInstance::Advance rather than a missing
+        // animation. PlaySlotAnimationAsDynamicMontage takes a UAnimSequenceBase;
+        // a UPoseAsset reached it once and took the game down mid-fight.
+        if (raw_sequence && !ue::ObjectClassIs(animation, "AnimSequence")) {
+            static char refused_class[160] = {};
+            char class_path[160] = {};
+            if (ue::GetObjectClassPathName(animation, class_path, sizeof(class_path)) &&
+                lstrcmpA(class_path, refused_class) != 0) {
+                lstrcpynA(refused_class, class_path, sizeof(refused_class));
+                SC_LOG("anim: refused a %s from the peer -- only AnimSequence may go through "
+                       "the Cinematic slot",
+                       class_path);
+            }
+            continue;
+        }
+
         if (raw_sequence) {
             if (ue::PlayAnimationAsset(visual_actor, animation, position)) {
                 const DWORD until = AnimationDeadline(animation);
