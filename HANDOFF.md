@@ -568,3 +568,97 @@ it cannot reach.
 
 `native_network` is back to 0. The code and the two menu buttons are left in place, behind
 that switch, so nobody has to rediscover any of this.
+
+---
+
+## 15. THREE MORE SETTLED FACTS — 2026-08-11, from the live logs
+
+Same rule as §14: each of these is one cheap check that should have been run before anything
+was built on the assumption it disproves. They are recorded so the check is never run a fourth
+time.
+
+### `MultiCastPlayOrder` never fires. The FBuffer route does not exist.
+
+The hook installs on both machines every session (`order: MultiCastPlayOrder hook ACTIVE`) and
+has been called **zero times in every log ever recorded**:
+
+```
+grep -c multicast <both SifuCoop.log files>   ->  0
+```
+
+It is a multicast RPC. There is no net driver, so there is no multicast — the same reason
+`UWorld::Listen` fails in §14. The comment in `orders.cpp` that calls the engine's serialised
+`FBuffer` form "the correct target" for order replication is describing an unreachable path.
+Byte-level `FNetOrderStruct` reconstruction is still abandoned for the reasons already given;
+the difference is that there is now no engine-provided alternative either.
+
+The same fact kills `MulticastChangeRelationship`, which is how `BPF_ServerChangeRelationship`
+forwards. That is why the mod calls `USocialComponent::SetRelationship` natively instead — and
+that function is real (see below).
+
+### Faction is not what Sifu's AI discriminates on.
+
+`esync`'s `fac=` field was added to settle exactly this, and it did, immediately: **every enemy
+reads faction 0, and so does the player** (`enemies: YOU hp=91/114 guard=187 faction=0`).
+
+There is no "enemies' faction" to move the puppet into. Both sides are already in the same one.
+The bystander-faction retry loop searched every active enemy for a faction different from the
+player's, found none, and did nothing — which is why commits `833fa6d` and `f280815` produced
+no observable result of any kind, not even a failure.
+
+`MaintainBystanderFaction` and the enemy-faction search in `ConfigureAsRemote` are **removed**.
+`SetFaction` is kept for Versus, which does rely on the two sides differing. Whatever decides
+that four of five enemies walk to the puppet on the joining machine, it is not faction.
+
+### `ABaseCharacter::UpdateRelationshipToOtherCharacters` is a folded stub.
+
+```
+0085CA30   17,717 symbols   <- ABaseCharacter::UpdateRelationshipToOtherCharacters
+01B779B0   1 symbol         <- USocialComponent::SetRelationship
+01B5B7F0   1 symbol         <- USocialComponent::BPF_GetRelationship
+019B4910   1 symbol         <- AFightingCharacter::BPF_GetRelationship
+019953A0   1 symbol         <- ABaseCharacter::BPF_GetRelationship
+```
+
+Nothing recomputes relationships behind this mod's back. `MaintainFriendlyRelationship`'s
+re-assert timer is defending against a function with no body; the comment claiming a value
+"that holds for one frame is worth nothing" is wrong about the mechanism. The timer is cheap
+and is left in place, but it is not the reason anything fails.
+
+**And the setter is not a no-op.** `USocialComponent::SetRelationship` is real, unfolded, and
+populated in both build tables (`epic 0x01B779B0`, `steam 0x019B7FB0`), and `WriteRelationship`
+prefers that native pointer over reflection. The log line that has been claiming otherwise --
+`relationship write did NOT reach the map: the setter is a no-op here` -- rested on two things
+that were never checked:
+
+- **The readback used the wrong getter.** `ReadRelationship` asks the *actor*, which for a
+  fighter dispatches to `AFightingCharacter::BPF_GetRelationship` — a different function from
+  `USocialComponent::BPF_GetRelationship`, which belongs to the class that owns
+  `m_Relationships` and is where every write goes. There is now a component-side reader
+  (`ReadRelationshipViaComponent`) and both are logged.
+- **The map-size probe is a hardcoded, unverified offset** (`kSocialRelationshipsMap = 0x0318`).
+  A wrong offset reading a plausible constant is indistinguishable from a map that never grows.
+  `RelationshipMapProbeTrusted()` now gates quoting it: the count is evidence only once it has
+  been observed to move.
+
+And it contradicted the *other* user of the same primitive. `AssertHostileToward` reports
+success (`targets: 5 of 5 active enemies hold 'Fight' toward your partner`) using the same
+setter and the same getter. It never sampled before writing, so "reads back Fight after being
+set to Fight" may be a tautology on bodies that were Fight already. Both sites now log
+`before -> asked -> after` on both getters. **One test round decides which measurement was
+lying**, and no more relationship work should be planned until it has.
+
+### Hit reactions are Orders — the FHitRequest wall is not the only door
+
+`OrderReaction` and `OrderTargetReactionBlendSpace` are real Order classes in the shipped
+binary, with `GetSubType`, `IsAMovingOrder` and `GetNetOrderStructRaw`. Hit reactions therefore
+arrive through the `PlayOrder` path this mod already hooks and already replays per enemy. The
+1104-byte `FHitRequest` with unreconstructable `FWeakObjectPtr` serial numbers is the wall in
+front of `BPF_GenerateFakeImpact` specifically — it is not the wall in front of reactions.
+
+One number is missing: which `order_type` is a reaction. The `playorder:` hook used to log its
+first 40 calls per process, which is the menu and a few steps and has never once covered a
+fight. It now keeps a permanent per-type census (`orders: census type:total/player/hit`) and
+logs every order for one second after the local player's health drops. **A type whose count
+rises only inside the hit window is the reaction.** Get that number before writing any replay:
+two guesses at this have already crashed the game.

@@ -209,20 +209,28 @@ const char* Name(int value);
 
 ue::UObject* GetSocialComponent(ue::UObject* character);
 
-// ABaseCharacter::BPF_GetRelationship. kUnknown when it cannot be asked;
-// kNeutral is a real answer and is also what the game returns for a pair it has
-// never heard of, so a readback of Neutral after writing something else means
-// the write did not land.
+// ABaseCharacter::BPF_GetRelationship, through the ACTOR -- which for a fighter
+// means AFightingCharacter's override, a different function from the one below.
+// kUnknown when it cannot be asked; kNeutral is a real answer and is also what
+// the game returns for a pair it has never heard of.
 int ReadRelationship(ue::UObject* from_actor, ue::UObject* to_actor);
+
+// USocialComponent::BPF_GetRelationship, through the COMPONENT that owns
+// m_Relationships -- the map every WriteRelationship targets. When this and the
+// actor-side reader disagree, the actor override is computing its answer from
+// something other than the map, and only this one can say whether a write took.
+int ReadRelationshipViaComponent(ue::UObject* from_actor, ue::UObject* to_actor);
 
 // USocialComponent::BPF_ServerChangeRelationship. Returns whether the call was
 // dispatched -- NOT whether it took effect. Always read it back.
 bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value);
 
-// Number of element slots in the relationship map. Used only as evidence:
-// if a write neither changes the readback nor grows the map, the setter is a
-// no-op and no amount of retrying will help.
+// Number of element slots in the relationship map, read at a HARDCODED and so
+// far unverified offset. Only quote it once RelationshipMapProbeTrusted() says
+// the number has actually been seen to move; a constant read from a wrong
+// offset looks exactly like a map that never grows.
 int RelationshipMapSize(ue::UObject* social);
+bool RelationshipMapProbeTrusted();
 
 // --- Pool ------------------------------------------------------------------
 //

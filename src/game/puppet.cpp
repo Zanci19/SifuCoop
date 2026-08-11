@@ -737,94 +737,35 @@ bool EnsureRemoteVisible(ue::UObject* puppet, bool log_result) {
     return ok;
 }
 
-// Re-applies the bystander faction once there IS a live enemy to copy one from.
+// The bystander-faction experiment is over: faction is not what Sifu's AI
+// discriminates on.
 //
-// The puppet is spawned when the peer connects, which is normally long before
-// any enemy is active, so the faction lookup at spawn finds nothing and falls
-// back to the players' faction -- leaving the body attracting enemies for the
-// whole first fight. Cheap to retry: it stops as soon as it succeeds.
-void MaintainBystanderFaction(ue::UObject* player, ue::UObject* puppet) {
-    if (coop::Get().mode != coop::Mode::Coop) return;
-    if (net::GetRole() != net::Role::Client) return;
-    if (!player || !puppet) return;
-
-    static ue::UObject* settled_for = nullptr;
-    if (settled_for == puppet) return;
-
-    const int player_faction = GetFaction(player);
-    if (player_faction < 0) return;
-    if (GetFaction(puppet) != player_faction) {
-        settled_for = puppet;  // already out of the players' faction
-        return;
-    }
-
-    static DWORD next_attempt = 0;
-    const DWORD now = GetTickCount();
-    if (next_attempt != 0 && now < next_attempt) return;
-    next_attempt = now + 1000;
-
-    EnemyRow rows[64];
-    const int count = GetEnemyRows(rows, 64);
-    for (int i = 0; i < count; ++i) {
-        if (!rows[i].active) continue;
-        ue::UObject* actor = FindEnemyByHash(rows[i].hash);
-        if (!actor || actor == puppet || actor == player) continue;
-        const int faction = GetFaction(actor);
-        if (faction < 0 || faction == player_faction) continue;
-        SetFaction(puppet, faction);
-        settled_for = puppet;
-        SC_LOG("puppet: faction %d applied late -- enemies here will now ignore your "
-               "partner's body and fight you", faction);
-        return;
-    }
-}
+// The idea was that putting the puppet in the enemies' faction would make them
+// ignore it -- the same mechanism that stops one grunt punching another. It
+// never fired, and the reason was invisible until `esync` was made to print
+// `fac=`: every enemy reads faction 0, and so does the player. There is no
+// "enemies' faction" to move the puppet into, because both sides are already in
+// the same one. The retry loop that lived here searched every active enemy for
+// a faction different from the player's, found none, and did nothing, forever.
+//
+// Removed rather than left inert, because a dead code path that looks like a
+// working feature is how this question stayed open for three sessions. See
+// HANDOFF -- the finding is recorded there so it is not tried a fourth time.
 
 void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
     const int player_faction = GetFaction(player);
     const bool coop_mode = coop::Get().mode == coop::Mode::Coop;
 
-    // On the JOINING machine the puppet is put in the ENEMIES' faction, so they
-    // stop treating it as something to fight.
-    //
-    // Declining to register it with the targetable actor manager was not enough
-    // -- the joiner's census still showed up to four of five enemies walking over
-    // to hit it, because registration is only one of the ways Sifu acquires a
-    // target and the body is a player-class pawn in the players' faction either
-    // way. Faction is the game's own answer to "this is not your business", and
-    // it is the same mechanism that stops one grunt punching another.
-    //
-    // Only on the joiner, and the asymmetry is the point: on the host this body
-    // stands in for the other player and enemies SHOULD fight it, because that
-    // is how their fight starts. Here it stands in for the host, whose fight is
-    // resolved on the host's own machine, so every enemy that comes over is
-    // taken from the player actually standing here for nothing in return.
-    const bool as_bystander = coop_mode && net::GetRole() == net::Role::Client;
-    int enemy_faction = -1;
-    if (as_bystander) {
-        EnemyRow rows[64];
-        const int count = GetEnemyRows(rows, 64);
-        for (int i = 0; i < count && enemy_faction < 0; ++i) {
-            if (!rows[i].active) continue;
-            ue::UObject* actor = FindEnemyByHash(rows[i].hash);
-            if (!actor || actor == puppet || actor == player) continue;
-            const int faction = GetFaction(actor);
-            if (faction >= 0 && faction != player_faction) enemy_faction = faction;
-        }
-    }
-
-    if (as_bystander && enemy_faction >= 0) {
-        SetFaction(puppet, enemy_faction);
-        SC_LOG("puppet: faction %d -- your partner's body joins the ENEMIES' faction here "
-               "so they ignore it and fight YOU instead", enemy_faction);
-    } else if (player_faction >= 0) {
+    if (player_faction >= 0) {
         // Faction 0 and 1 are the two sides; picking "the other one" rather
         // than a constant means this still works if the player's faction ever
-        // differs by level.
+        // differs by level. In co-op both players share the level's faction --
+        // which, measurably, the enemies share too, so this decides nothing
+        // about who they attack. It is kept because Versus does rely on it.
         const int target = coop_mode ? player_faction : (player_faction == 1 ? 0 : 1);
         SetFaction(puppet, target);
-        SC_LOG("puppet: faction %d (you are %d) -- %s%s", target, player_faction,
-               coop_mode ? "CO-OP, allied against the level" : "VERSUS, hostile to you",
-               as_bystander ? " (no live enemy to copy a faction from yet)" : "");
+        SC_LOG("puppet: faction %d (you are %d) -- %s", target, player_faction,
+               coop_mode ? "CO-OP, allied against the level" : "VERSUS, hostile to you");
     } else {
         SC_LOG("puppet: could not read your faction -- leaving the puppet's alone");
     }
@@ -973,6 +914,14 @@ bool TrySetRelationshipBothWays(ue::UObject* player, ue::UObject* puppet, int va
     // this build and every retry below is wasted. Saying so in the log is worth
     // more than another silent failure -- this exact write has been reported as
     // succeeding, and read back as Neutral, in every session so far.
+    // Sampled BEFORE the write, because a readback that equals what we asked
+    // for is only evidence if it differed beforehand. The enemy-side user of
+    // this same primitive reports success without this step, writing Fight and
+    // reading back Fight on bodies that were plausibly Fight already -- so the
+    // two halves of this mod reached opposite verdicts about one function.
+    const int was_actor = ReadRelationship(player, puppet);
+    const int was_comp = ReadRelationshipViaComponent(player, puppet);
+
     const int before = RelationshipMapSize(player_social);
     WriteRelationship(player_social, puppet, value);
     WriteRelationship(puppet_social, player, value);
@@ -980,22 +929,33 @@ bool TrySetRelationshipBothWays(ue::UObject* player, ue::UObject* puppet, int va
 
     const int back_player = ReadRelationship(player, puppet);
     const int back_puppet = ReadRelationship(puppet, player);
+    // The component owns the map the write goes into. When it disagrees with
+    // the actor's virtual, IT is the one that saw the write.
+    const int back_comp = ReadRelationshipViaComponent(player, puppet);
     if (out_player) *out_player = back_player;
     if (out_puppet) *out_puppet = back_puppet;
 
     const bool held = back_player == value && back_puppet == value;
-    if (held || (before >= 0 && after > before)) g_relationship_writes_land = true;
+    const bool held_component = back_comp == value;
+    const bool map_grew = RelationshipMapProbeTrusted() && before >= 0 && after > before;
+    if (held || held_component || map_grew) g_relationship_writes_land = true;
 
-    static bool reported = false;
-    if (!reported && !held && before >= 0) {
-        reported = true;
-        SC_LOG("puppet: relationship write %s -- map %d -> %d entries, readback %d/%d "
-               "(asked for %d %s)",
-               after > before ? "reached the map but the getter disagrees"
-                              : "did NOT reach the map: the setter is a no-op here",
-               before, after, back_player, back_puppet, value, rel::Name(value));
+    // One line per distinct outcome rather than one line ever: the whole point
+    // is to see the two getters disagree, and that only shows up as a pattern.
+    static int last_shape = -1;
+    const int shape = (was_actor + 1) * 100000 + (was_comp + 1) * 10000 +
+                      (back_player + 1) * 1000 + (back_puppet + 1) * 100 +
+                      (back_comp + 1) * 10 + (map_grew ? 1 : 0);
+    if (shape != last_shape) {
+        last_shape = shape;
+        SC_LOG("relationship: player->puppet asked %d %s | actor %d -> %d | component %d -> %d "
+               "| map %d -> %d (%s)",
+               value, rel::Name(value), was_actor, back_player, was_comp, back_comp, before,
+               after,
+               RelationshipMapProbeTrusted() ? "probe trusted"
+                                             : "probe UNVERIFIED -- count means nothing yet");
     }
-    return held;
+    return held || held_component;
 }
 
 // Establish -- and KEEP -- a non-hostile relationship between the two players.
@@ -1078,14 +1038,23 @@ void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
 
     // Nothing held. Say so once rather than every second, and say what was
     // actually read, because that number is the whole diagnosis.
+    //
+    // Two claims were removed from this message because neither survived being
+    // checked. It said the setter was "a no-op on this build":
+    // USocialComponent::SetRelationship is a real unfolded function (one symbol
+    // at its RVA) and is bound in both build tables, so the write is a direct
+    // native call that lands somewhere -- what is in doubt is the READER, not
+    // the writer. And it said remote attacks stay off: they do not, orders.cpp
+    // gates those on the config flag alone. What actually degrades is friendly
+    // fire between the two players, so that is what the player is told.
     static int last_reported = -2;
     if (last_reported != back_player) {
         last_reported = back_player;
-        SC_LOG("puppet: no relationship value would stick (last readback %d/%d) -- "
-               "remote attacks stay OFF. 0=Enemy 1=Fight 2=Object 3=Neutral 4=Coop 5=Ally",
+        SC_LOG("puppet: no relationship value read back on either getter (last %d/%d) -- "
+               "the two players can hurt each other. "
+               "0=Enemy 1=Fight 2=Object 3=Neutral 4=Coop 5=Ally",
                back_player, back_puppet);
-        coop::ReportProblem("could not turn friendly fire off -- "
-                            "your partner will move but not swing");
+        coop::ReportProblem("friendly fire between players could not be turned off");
     }
 }
 
@@ -2041,16 +2010,29 @@ void TickPuppet() {
 
         ue::UObject* visual_actor = actor_hash ? FindEnemyByHash(actor_hash) : g_puppet;
         if (!visual_actor) continue;
-        // Same reason the echoed order is dropped for these: the body is
-        // animating its own swing already, and layering the host's copy of it
-        // through the Cinematic slot puts a second, differently-timed strike
-        // over the top.
-        if (actor_hash && EnemyRunsLocalBrain(actor_hash)) continue;
 
         wchar_t wide[192] = {};
         MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, 192);
         ue::UObject* animation = ue::FindObjectByPath(wide);
         if (!animation) continue;
+
+        // A body running its own brain must not have the host's copy of a SWING
+        // layered over it -- it is animating that swing itself, and the second,
+        // differently-timed strike is what this guard was added for. But the
+        // guard used to drop the asset entirely, and that took the death
+        // sequence with it, for exactly the enemies the joining player fights
+        // and kills. Every measured death on this side reads `anim=0`: no
+        // animation was ever available, so the body entered the down state and
+        // played nothing, which is a corpse standing up.
+        //
+        // Recording is not playing. Keep handing the asset to the death ledger
+        // -- the death edge in enemies.cpp asks for it by hash on the next
+        // sweep, and a swing that is never claimed simply expires -- and only
+        // skip the immediate playback.
+        if (actor_hash && EnemyRunsLocalBrain(actor_hash)) {
+            if (raw_sequence) NoteEnemyDeathAnimation(actor_hash, animation);
+            continue;
+        }
 
         if (raw_sequence) {
             if (ue::PlayAnimationAsset(visual_actor, animation, position)) {
@@ -2192,7 +2174,6 @@ void TickPuppet() {
 
     // Best-effort, default-off: no-op once applied for this puppet.
     MaintainFriendlyRelationship(player, g_puppet);
-    MaintainBystanderFaction(player, g_puppet);
 
     // A live peer always wins over the local follow-mode rehearsal.
     ue::FVector peer_location = {};

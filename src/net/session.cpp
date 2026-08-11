@@ -188,6 +188,11 @@ int g_order_read = 0;
 EnemyStateOut g_enemies_live[kMaxTrackedEnemies];
 int g_enemy_live_count = 0;
 bool g_enemy_sweep_seen = false;
+// When the live set was last replaced. "We have had a sweep" and "the sweep in
+// front of us is current" are different questions, and code that acts on the
+// host's authority -- most of all code that resurrects a body because the host
+// still calls it alive -- has to ask the second one.
+DWORD g_enemy_sweep_at = 0;
 
 EnemyStateOut g_enemies_staging[kMaxTrackedEnemies];
 int g_enemy_staging_count = 0;
@@ -626,6 +631,7 @@ void ResetPeerState() {
     g_enemy_chunks_seen = 0;
     g_enemy_chunk_total = 0;
     g_enemy_sweep_seen = false;
+    g_enemy_sweep_at = 0;
     g_damage_count = 0;
     g_damage_sequence = 0;
     g_owned_enemy_count = 0;
@@ -840,6 +846,7 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
     g_enemy_live_count = g_enemy_staging_count;
     g_enemy_staging_count = 0;
     g_enemy_sweep_seen = true;
+    g_enemy_sweep_at = NowMs();
 }
 
 // Each damage packet is a complete statement of the client's running totals for
@@ -1526,6 +1533,15 @@ int GetEnemyStates(EnemyStateOut* out, int max_out) {
 
 bool HasEnemySweep() { return g_enemy_sweep_seen; }
 
+bool EnemySweepIsFresh() {
+    // Same shape and the same order of magnitude as GetOwnedEnemy's ownership
+    // lease. Sweeps arrive at snapshot_hz (>=10 Hz), so a second without one
+    // means the host has stopped talking, not that it is briefly busy.
+    constexpr DWORD kSweepStaleMs = 1000;
+    if (!g_enemy_sweep_seen) return false;
+    return NowMs() - g_enemy_sweep_at <= kSweepStaleMs;
+}
+
 void ResetEnemyReplication() {
     g_enemy_live_count = 0;
     g_enemy_staging_count = 0;
@@ -1533,6 +1549,7 @@ void ResetEnemyReplication() {
     g_enemy_chunks_seen = 0;
     g_enemy_chunk_total = 0;
     g_enemy_sweep_seen = false;
+    g_enemy_sweep_at = 0;
     g_damage_count = 0;
     g_damage_sequence = 0;
     g_owned_enemy_count = 0;

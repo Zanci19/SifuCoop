@@ -127,6 +127,12 @@ int GetEnemyStates(EnemyStateOut* out, int max_out);
 // told us anything yet", and those call for opposite behaviour.
 bool HasEnemySweep();
 
+// Whether the host's enemy set in front of us is CURRENT, not merely something
+// we once received. Anything that overrides local state on the host's authority
+// -- above all reviving a body because the host still calls it alive -- must
+// ask this rather than HasEnemySweep().
+bool EnemySweepIsFresh();
+
 // A new UWorld owns a different enemy pool even when its package path is the
 // same (restart/checkpoint reload). Drop completed/staging sweeps and damage
 // ledgers before actors from that world are matched against network state.

@@ -571,6 +571,13 @@ ue::UObject* GetSocialComponent(ue::UObject* character) {
     return params.ReturnValue;
 }
 
+// Both readers ask a function with the same NAME, and they are not the same
+// function. The actor's is a virtual that AFightingCharacter overrides
+// (0x019B4910, distinct from ABaseCharacter's 0x019953A0); the component's
+// (0x01B5B7F0) belongs to the class that OWNS m_Relationships, which is what
+// every write in this file targets. Nothing has ever established that the actor
+// override consults the map, and a whole session's worth of "the setter is a
+// no-op" rests on assuming it does. Ask both and let them disagree in the log.
 int ReadRelationship(ue::UObject* from_actor, ue::UObject* to_actor) {
     if (!from_actor || !to_actor) return relationship::kUnknown;
     struct Params {
@@ -579,6 +586,21 @@ int ReadRelationship(ue::UObject* from_actor, ue::UObject* to_actor) {
     } params = {};
     params.Actor = to_actor;
     if (!ue::CallFunction(from_actor, L"BPF_GetRelationship", &params)) {
+        return relationship::kUnknown;
+    }
+    return params.ReturnValue;
+}
+
+int ReadRelationshipViaComponent(ue::UObject* from_actor, ue::UObject* to_actor) {
+    if (!from_actor || !to_actor) return relationship::kUnknown;
+    ue::UObject* social = GetSocialComponent(from_actor);
+    if (!social) return relationship::kUnknown;
+    struct Params {
+        ue::UObject* Actor;
+        std::uint8_t ReturnValue;
+    } params = {};
+    params.Actor = to_actor;
+    if (!ue::CallFunction(social, L"BPF_GetRelationship", &params)) {
         return relationship::kUnknown;
     }
     return params.ReturnValue;
@@ -642,6 +664,20 @@ bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
 // whether a write landed.
 constexpr std::uintptr_t kSocialRelationshipsMap = 0x0318;
 
+// Whether this offset has ever been seen to hold two different numbers.
+//
+// 0x0318 is a hardcoded guess. A guess that reads back a plausible constant --
+// "5 entries", every time, on both machines -- is indistinguishable from a
+// correct offset on a map that never grows, and the difference between those
+// two decides whether the relationship setter works. Until the number has been
+// observed to MOVE, it is not evidence of anything and must not be quoted as
+// though it were. This is the same rule as counting symbols at an RVA before
+// trusting a function exists.
+int g_map_probe_first = -1;
+bool g_map_probe_moved = false;
+
+bool RelationshipMapProbeTrusted() { return g_map_probe_moved; }
+
 int RelationshipMapSize(ue::UObject* social) {
     if (!social) return -1;
     std::int32_t num = 0;
@@ -649,6 +685,14 @@ int RelationshipMapSize(ue::UObject* social) {
                 reinterpret_cast<const std::uint8_t*>(social) + kSocialRelationshipsMap + 8,
                 sizeof(num));
     if (num < 0 || num > 4096) return -1;  // implausible: do not report a guess
+    if (g_map_probe_first < 0) {
+        g_map_probe_first = num;
+    } else if (!g_map_probe_moved && num != g_map_probe_first) {
+        g_map_probe_moved = true;
+        SC_LOG("relationship: map probe MOVED %d -> %d -- offset 0x%03X is real and its "
+               "count may be quoted as evidence",
+               g_map_probe_first, num, static_cast<unsigned>(kSocialRelationshipsMap));
+    }
     return num;
 }
 

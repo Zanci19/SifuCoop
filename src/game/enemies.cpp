@@ -110,6 +110,9 @@ struct Tracked {
     float last_local_health = -1.f;
     float reported_total = 0.f;  // running damage we have told the host about
     float host_applied = 0.f;    // how much of that the host says it has applied
+    // Log dedup only: a refused revive would otherwise print at the snapshot
+    // rate for as long as a dropped link lasts.
+    bool revive_refused = false;
 
     // --- Host-side ---
     // (How much of the peer's total has been applied lives in the ledger above,
@@ -370,8 +373,32 @@ bool AssertHostileToward(Tracked& entry, ue::UObject* peer) {
 
     const int candidates[] = {relationship::kFight, relationship::kEnemy};
     for (const int value : candidates) {
+        // Sample first. This function has been reporting success since the day
+        // it was written -- "5 of 5 active enemies hold 'Fight'" -- while the
+        // player-side user of the SAME setter and the SAME getter reported that
+        // the setter was a no-op. Both cannot be true. If an enemy already reads
+        // Fight toward a player-class pawn before we touch it, this test proves
+        // nothing about the write, and that is very likely what has been
+        // happening: it is the one measurement here that was never controlled.
+        const int was_actor = ReadRelationship(entry.actor, peer);
+        const int was_comp = ReadRelationshipViaComponent(entry.actor, peer);
         WriteRelationship(social, peer, value);
-        if (ReadRelationship(entry.actor, peer) != value) continue;
+        const int now_actor = ReadRelationship(entry.actor, peer);
+        const int now_comp = ReadRelationshipViaComponent(entry.actor, peer);
+
+        static int last_shape = -1;
+        const int shape = (was_actor + 1) * 1000 + (was_comp + 1) * 100 +
+                          (now_actor + 1) * 10 + (now_comp + 1);
+        if (shape != last_shape) {
+            last_shape = shape;
+            SC_LOG("relationship: enemy->puppet asked %d %s | actor %d -> %d | "
+                   "component %d -> %d | %s",
+                   value, relationship::Name(value), was_actor, now_actor, was_comp, now_comp,
+                   was_actor == value ? "ALREADY that value -- this proves nothing"
+                                      : "the value changed, so the write landed");
+        }
+
+        if (now_actor != value && now_comp != value) continue;
         g_hostile_value = value;
         SC_LOG("targets: enemies will hold '%s' toward your partner", relationship::Name(value));
         return true;
@@ -1186,7 +1213,13 @@ void SendDamageReports() {
     for (int i = 0; i < g_tracked_count && count < net::kMaxDamagePerPacket; ++i) {
         if (g_tracked[i].reported_total <= 0.f) continue;
         if (!g_tracked[i].seen_from_host) continue;  // not in the host's fight
-        reports[count].name_hash = g_tracked[i].wire_hash;
+        // Fallback to match the two sibling call sites (the owned-enemy publish
+        // and the host-state lookup). The seen_from_host gate above implies a
+        // wire hash was bound, so this is latent rather than live -- but three
+        // places deriving the same id two different ways is how a live one
+        // starts.
+        reports[count].name_hash =
+            g_tracked[i].wire_hash ? g_tracked[i].wire_hash : g_tracked[i].hash;
         reports[count].total = g_tracked[i].reported_total;
         ++count;
     }
@@ -1558,7 +1591,21 @@ void ApplyRemoteEnemies() {
         // so the old edge-only test never called SetDown(false): health rose,
         // but the actor stayed in Sifu's dead state. First authoritative live
         // state now explicitly revives such a body after restoring its health.
-        if (!dead && locally_dead_before_sync) {
+        //
+        // Only on a CURRENT sweep. "The host says this body is alive" is a
+        // statement about the moment the host said it, and the state in front
+        // of us keeps saying it long after the host has stopped talking. When
+        // the link drops mid-fight the last word is always "alive" -- so a body
+        // the joining player has just killed is resurrected, dies again a
+        // second later under the same local blows, and is resurrected again.
+        // Four of those in seven seconds are in the 2026-08-11 log, immediately
+        // after the host process quit, and a body oscillating between dead and
+        // revived has no stable collision: that is a strong candidate for the
+        // long-standing "attacks phase through" report.
+        //
+        // Fresh sweep, real revival. Stale sweep, the body stays dead and the
+        // host repairs it when it comes back.
+        if (!dead && locally_dead_before_sync && net::EnemySweepIsFresh()) {
             entry.was_down = false;
             if (GetHealth(fighter) <= 0.5f) {
                 const float revive_health =
@@ -1571,7 +1618,17 @@ void ApplyRemoteEnemies() {
             RegisterEnemyTargetable(entry.actor);
             entry.present = true;
             entry.parked = false;
+            entry.revive_refused = false;
             SC_LOG("enemies: revived and re-registered %s from client-only death", entry.name);
+        } else if (!dead && locally_dead_before_sync) {
+            // Once per body, not once per sweep: a dropped link would otherwise
+            // print this at the snapshot rate for as long as the game runs.
+            if (!entry.revive_refused) {
+                entry.revive_refused = true;
+                SC_LOG("enemies: %s died here while the host's sweep was stale -- leaving it "
+                       "down rather than resurrecting it on a stale 'alive'",
+                       entry.name);
+            }
         } else if (entry.was_down != dead) {
             entry.was_down = dead;
             // A death is not a knockdown, and InternalSetDownState only knows
@@ -1770,7 +1827,7 @@ void ApplyRemoteEnemies() {
         // permanent. Only the down/death state machine is left alone.
         if (!dead && !knocked_down && IsDown(fighter) && config.sync_enemies) {
             SetDown(fighter, false);
-            entry.was_down = false;
+            entry.was_down = false;
             NotifyDownStateChanged(fighter, false);
             if (config.verbose_enemies) {
                 SC_LOG("enemies: %s was floored locally but the host has it up -- restored",

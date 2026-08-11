@@ -313,6 +313,71 @@ bool RangeReadable(const void* address, std::size_t size) {
 }
 
 
+// --- Order-type census -------------------------------------------------------
+//
+// Hit reactions are Orders. `OrderReaction` and `OrderTargetReactionBlendSpace`
+// are real classes in the shipped binary, with `GetSubType`, `IsAMovingOrder`
+// and `GetNetOrderStructRaw` -- so the thing this mod could never replicate goes
+// through the very path it already hooks and already replays per enemy. The
+// FHitRequest wall (1104 bytes, FWeakObjectPtr serial numbers that cannot be
+// rebuilt from outside the process) is the wall in front of
+// BPF_GenerateFakeImpact. It is not the only door.
+//
+// One number is missing: WHICH order_type is a reaction. This hook used to log
+// its first 40 calls per process and then go silent, and 40 calls is the menu
+// and the first few steps -- it has never once covered a fight. So: count every
+// type forever, print the table on a timer, and open a window of full detail
+// around the moment the local player is hit, because that is the only moment at
+// which the answer is visible.
+//
+// This is measurement only. Nothing here replays a reaction; two guesses at
+// that have already crashed the game.
+struct OrderTypeStat {
+    unsigned int type = 0;
+    unsigned long long total = 0;
+    unsigned long long from_player = 0;
+    unsigned long long while_hit = 0;  // within the window after we took damage
+    bool used = false;
+};
+constexpr int kOrderTypeSlots = 64;
+OrderTypeStat g_order_census[kOrderTypeSlots];
+
+// Set when the local player's health drops. Full lines are logged while it is
+// in the future, and the census counts what arrived inside the window.
+DWORD g_hit_window_until = 0;
+
+void NoteOrderType(unsigned int type, bool from_player, bool in_hit_window) {
+    for (int i = 0; i < kOrderTypeSlots; ++i) {
+        OrderTypeStat& slot = g_order_census[i];
+        if (slot.used && slot.type != type) continue;
+        if (!slot.used) {
+            slot.used = true;
+            slot.type = type;
+        }
+        ++slot.total;
+        if (from_player) ++slot.from_player;
+        if (in_hit_window) ++slot.while_hit;
+        return;
+    }
+}
+
+void DumpOrderCensus() {
+    char line[512];
+    int n = 0;
+    int shown = 0;
+    for (int i = 0; i < kOrderTypeSlots && n < static_cast<int>(sizeof(line)) - 24; ++i) {
+        const OrderTypeStat& slot = g_order_census[i];
+        if (!slot.used) continue;
+        ++shown;
+        n += snprintf(line + n, sizeof(line) - n, "%u:%llu/p%llu/h%llu ", slot.type, slot.total,
+                      slot.from_player, slot.while_hit);
+    }
+    if (shown == 0) return;
+    // h> is the whole point of the table: a type whose count only ever rises
+    // inside the hit window is a reaction.
+    SC_LOG("orders: census type:total/player/hit -- %s", line);
+}
+
 extern "C" void sifucoop_on_playorder(void* self, unsigned int order_type,
                                       const void* net_order_struct,
                                       const void* play_order_infos) {
@@ -326,10 +391,16 @@ extern "C" void sifucoop_on_playorder(void* self, unsigned int order_type,
     ue::UObject* player = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
     const bool from_player = player && player == static_cast<ue::UObject*>(self);
 
-    if (++count <= 40) {
-        SC_LOG("playorder: #%llu %s=%p type=%u netstruct=%p infos=%p", count,
+    const DWORD order_now = GetTickCount();
+    const bool in_hit_window = static_cast<LONG>(g_hit_window_until - order_now) > 0;
+    NoteOrderType(order_type & 0xFF, from_player, in_hit_window);
+
+    ++count;
+    if (count <= 40 || in_hit_window) {
+        SC_LOG("playorder: #%llu %s=%p type=%u netstruct=%p infos=%p%s", count,
                from_player ? "PLAYER" : "other", self, order_type & 0xFF, net_order_struct,
-               play_order_infos);
+               play_order_infos,
+               in_hit_window ? "  <-- WITHIN the window after YOU were hit" : "");
     }
 
     if (!from_player || !g_mirror_enabled) return;
@@ -368,7 +439,10 @@ extern "C" void sifucoop_on_playorder(void* self, unsigned int order_type,
     // whatever we hand it. A TSet copy walks heap pointers that are invalid the
     // moment the object is rebuilt at a different address, so no payload size
     // makes this safe. The engine's own serialised form (FBuffer, via
-    // MultiCastPlayOrder) exists precisely for this and is the correct target.
+    // MultiCastPlayOrder) exists precisely for this -- and is NOT reachable:
+    // that hook installs every session and has been called zero times in every
+    // log ever recorded, because it is a multicast RPC and there is no net
+    // driver. Same root as HANDOFF §14. Do not plan around it.
     const void* payload = net_order_struct;
 
     g_mirroring = true;
@@ -983,7 +1057,48 @@ void ApplyRemoteOrder(std::uint32_t order_type, std::int32_t attack_index,
     }
 }
 
+// Runs per frame from the puppet tick. Watches player zero's health for a drop
+// and opens the detail window around it, the same shape AccumulateLocalDamage
+// uses for enemies -- health that fell without us asking it to is a hit landing.
+void WatchLocalPlayerForHits() {
+    if (!coop::Get().verbose_orders) return;
+
+    ue::UObject* world = ue::GetWorld();
+    ue::UObject* player = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
+    if (!player) return;
+    const Fighter fighter = ResolveFighter(player);
+    if (!fighter.health) return;
+
+    const float health = GetHealth(fighter);
+    const DWORD now = GetTickCount();
+
+    static ue::UObject* watched = nullptr;
+    static float last_health = -1.f;
+    if (watched != player) {
+        watched = player;
+        last_health = health;
+        return;
+    }
+    const float drop = last_health - health;
+    last_health = health;
+    if (drop > 0.05f) {
+        // Reactions are short. A second either side is enough to bracket the
+        // order that plays one without burying it in a minute of locomotion.
+        g_hit_window_until = now + 1000;
+        SC_LOG("orders: YOU took %.1f (health %.0f) -- logging every order for 1s", drop,
+               health);
+    }
+
+    static DWORD last_census = 0;
+    if (now - last_census >= 10000) {
+        last_census = now;
+        DumpOrderCensus();
+    }
+}
+
 void PumpRemoteOrders() {
+    WatchLocalPlayerForHits();
+
     std::uint32_t actor_hash = 0;
     std::uint32_t order_type = 0;
     std::int32_t attack_index = 0;
