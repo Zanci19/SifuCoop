@@ -34,6 +34,9 @@ ue::UObject* FindEnemyByHash(std::uint32_t hash);
 // enemy's swing is turned into something the peer can act on -- and it is a
 // table lookup rather than a walk back up to the actor, because it runs on the
 // hot path of every attack in the level.
+// The wire id for a tracked enemy actor, or 0 if it is not one of ours (the
+// local player, the puppet, a civilian outside the roster).
+std::uint32_t EnemyHashForActor(const void* actor);
 std::uint32_t EnemyHashForAttackComponent(const void* attack_component);
 std::uint32_t EnemyHashForHealthComponent(const void* health_component);
 

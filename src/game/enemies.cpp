@@ -113,6 +113,10 @@ struct Tracked {
     // Log dedup only: a refused revive would otherwise print at the snapshot
     // rate for as long as a dropped link lasts.
     bool revive_refused = false;
+    // This body died on THIS machine, under a brain this machine was running.
+    // Held until the host says dead too, because until then its sweep still
+    // says alive and acting on that resurrects a corpse mid-death-animation.
+    bool died_locally = false;
 
     // --- Host-side ---
     // (How much of the peer's total has been applied lives in the ledger above,
@@ -816,6 +820,10 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
             entry.ai_stopped = previous[k].ai_stopped;
             entry.last_ai_stop_ms = previous[k].last_ai_stop_ms;
             entry.was_down = previous[k].was_down;
+            // Must survive a rebuild, or a table refresh in the half-second
+            // between our kill and the host's confirmation drops the latch and
+            // the corpse is resurrected after all.
+            entry.died_locally = previous[k].died_locally;
             entry.parked = previous[k].parked;
             entry.present = previous[k].present;
             entry.missing_since = previous[k].missing_since;
@@ -1470,6 +1478,34 @@ void ApplyRemoteEnemies() {
         const bool locally_dead_before_sync =
             fighter.health && (GetHealth(fighter) <= 0.5f || IsDead(fighter));
 
+        // A body we are simulating that reaches zero here has been KILLED here,
+        // by this player, and Sifu has already started its death sequence for
+        // it. Latch that, because for the next few hundred milliseconds the
+        // host will still be saying "alive" -- it has not been told yet -- and
+        // acting on that is what has been destroying every corpse.
+        //
+        // Measured, 2026-08-11:
+        //   07:28:28.659  hp=35/35 owned=1 alive
+        //   07:28:28.961  revived and re-registered from client-only death
+        //   07:28:29.079  death: kill=1 anim=0 -> down=1
+        // Killed locally, resurrected by us 300 ms later, killed again by the
+        // host's decree 118 ms after that. Three state transitions on one body
+        // inside half a second. The revive sets health back to 1 and calls
+        // SetDown(false), which aborts the death animation already playing --
+        // that is the whole of `anim=0` and of the standing corpses. And a body
+        // walked in and out of Sifu's down-state machine from outside comes
+        // back upright but no longer a valid hit target, which the handoff
+        // already documented for knockdowns: that is the "attacks go straight
+        // through enemies that were already attacked" report, same cause.
+        if (locally_dead_before_sync && entry.local_brain && !entry.died_locally) {
+            entry.died_locally = true;
+            if (config.verbose_enemies) {
+                SC_LOG("enemies: %s died HERE under our own brain -- holding the corpse "
+                       "until the host agrees",
+                       entry.name);
+            }
+        }
+
         // Order matters here. Local damage has to be read *before* the host's
         // health is written on top, or the write itself would be mistaken for
         // a hit -- or worse, our own hit would be erased before it was ever
@@ -1605,7 +1641,26 @@ void ApplyRemoteEnemies() {
         //
         // Fresh sweep, real revival. Stale sweep, the body stays dead and the
         // host repairs it when it comes back.
-        if (!dead && locally_dead_before_sync && net::EnemySweepIsFresh()) {
+        // A genuine recycle: the pool has lifted this body back into the fight
+        // with a full health bar. That is the one case where a host "alive"
+        // against a local corpse is real rather than merely early, and it is
+        // what the revive below was written for.
+        if (entry.died_locally && !dead && state.health > 1.f && state.max_health > 0.f &&
+            state.health >= state.max_health - 0.5f) {
+            entry.died_locally = false;
+            if (config.verbose_enemies) {
+                SC_LOG("enemies: %s came back from the pool at full health -- the host's "
+                       "'alive' is real this time",
+                       entry.name);
+            }
+        }
+        // The host agrees. Nothing left to hold: the two machines have converged
+        // on dead, and the body here is already lying where its own death
+        // sequence put it.
+        if (entry.died_locally && dead) entry.died_locally = false;
+
+        if (!dead && locally_dead_before_sync && !entry.died_locally &&
+            net::EnemySweepIsFresh()) {
             entry.was_down = false;
             if (GetHealth(fighter) <= 0.5f) {
                 const float revive_health =
@@ -1621,14 +1676,21 @@ void ApplyRemoteEnemies() {
             entry.revive_refused = false;
             SC_LOG("enemies: revived and re-registered %s from client-only death", entry.name);
         } else if (!dead && locally_dead_before_sync) {
-            // Once per body, not once per sweep: a dropped link would otherwise
-            // print this at the snapshot rate for as long as the game runs.
+            // Once per body, not once per sweep: a dropped link, or a host that
+            // is simply a few hundred milliseconds behind, would otherwise print
+            // this at the snapshot rate.
             if (!entry.revive_refused) {
                 entry.revive_refused = true;
-                SC_LOG("enemies: %s died here while the host's sweep was stale -- leaving it "
-                       "down rather than resurrecting it on a stale 'alive'",
-                       entry.name);
+                SC_LOG("enemies: %s stays down -- %s", entry.name,
+                       entry.died_locally
+                           ? "we killed it, the host has not caught up yet"
+                           : "the host's sweep is stale and its 'alive' cannot be trusted");
             }
+            // Its death is ours and it has already happened. Do not let the
+            // host's late confirmation re-run a kill on a body that is lying
+            // down: that is what turned a finished death sequence back into a
+            // forced down-state.
+            entry.was_down = true;
         } else if (entry.was_down != dead) {
             entry.was_down = dead;
             // A death is not a knockdown, and InternalSetDownState only knows
@@ -2066,6 +2128,15 @@ std::uint32_t EnemyHashForAttackComponent(const void* attack_component) {
     if (!attack_component || !TrackingIsCurrent()) return 0;
     for (int i = 0; i < g_tracked_count; ++i) {
         if (g_tracked[i].attack_component == attack_component) return g_tracked[i].hash;
+    }
+    return 0;
+}
+
+std::uint32_t EnemyHashForActor(const void* actor) {
+    if (!actor || !TrackingIsCurrent()) return 0;
+    for (int i = 0; i < g_tracked_count; ++i) {
+        if (g_tracked[i].actor != actor) continue;
+        return g_tracked[i].wire_hash ? g_tracked[i].wire_hash : g_tracked[i].hash;
     }
     return 0;
 }

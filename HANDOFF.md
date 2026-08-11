@@ -662,3 +662,81 @@ fight. It now keeps a permanent per-type census (`orders: census type:total/play
 logs every order for one second after the local player's health drops. **A type whose count
 rises only inside the hit window is the reaction.** Get that number before writing any replay:
 two guesses at this have already crashed the game.
+
+---
+
+## 16. THE CORPSE RACE, AND WHERE HIT REACTIONS ACTUALLY LIVE — 2026-08-11 (second pass)
+
+Three symptoms were reported after §15 shipped: the observing machine still saw dead enemies
+standing, enemies that had already been hit let attacks pass straight through, and enemies
+never showed hurt animations. The first two are one bug. The third had been mis-scoped.
+
+### One race behind both the standing corpses and the pass-through hits
+
+Measured on the joiner, one body, half a second:
+
+```
+07:28:28.659  esync: 000_Receptionist_Right hp=35/35 owned=1 dead=0
+07:28:28.961  enemies: revived and re-registered ... from client-only death
+07:28:29.079  death: 000_Receptionist_Right kill=1 anim=0 health_comp=1 -> down=1
+```
+
+The joiner simulates the enemies fighting it, so **it reaches zero first** — it landed the
+killing blow and Sifu started that body's death sequence locally. The host has not been told
+yet; its sweep still says alive, and 300 ms later the revive branch acted on that: health back
+to 1, `SetDown(false)`, re-registered as targetable. That **aborts the death animation already
+playing** — the whole of `anim=0`. Then the host's death arrives 118 ms later and kills it a
+second time, from outside, with no hit to choose an animation from.
+
+Three forced state transitions on one body inside half a second. §7b already recorded what that
+does: *a body walked in and out of that state machine from outside comes back upright but no
+longer a valid hit target.* That is the pass-through report, same cause, and it explains why it
+was always "enemies that had already been attacked".
+
+The §15 freshness gate did not help, because the sweep was **fresh** — the host was talking, it
+was simply a few hundred milliseconds behind. Freshness was the wrong question. The right one
+is *whose kill was it.*
+
+Fix: a body that dies here under a brain this machine is running latches `died_locally`, and no
+host "alive" resurrects it. The latch clears when the host agrees (converged), or when the pool
+lifts the body back at full health, which is the one case the revive was originally written
+for. It survives a table rebuild, because a refresh in that half-second would otherwise drop it.
+
+### Hit reactions: the player's already work; only enemies had no channel
+
+This was never "hit reactions are unreachable". The **player's** reactions replicate today:
+
+```
+host   07:28:31.039  action: sent '.../MC_Man_Barehands_HitReaction_Strong_High_East'
+joiner 07:28:31.476  attack: cosmetic sequence playing actor=00000000
+```
+
+`UPlayerAnim::m_LastActionAnim` carries them, and the existing channel delivers them. What has
+no channel is an **enemy's** reaction, because that field is declared on `UPlayerAnim` (verified
+against the property table: `Z_Construct_UClass_UPlayerAnim_Statics::NewProp_m_LastActionAnim`,
+and nowhere else) while enemies animate through `USCAnimInstance`.
+
+**`EOrderType` is now decoded.** 72 enumerators extracted from the exe's generated name table
+(`0x04A1F350`–`0x04A1FB48`, epic), same method as `ERelationshipTypes`. The census answered on
+its first run: **type 3 is `Hitted`** — 17 in one fight, 4 inside the second after the local
+player's health dropped. It had been flowing through the `PlayOrder` hook the entire time,
+unnamed and therefore invisible. Also now named: `12 Pushed`, `10 KnockedDown`, `11 Dizzy`,
+`65 Deflected`, `2 ParryVictim`, `33 StructureBroken`, `58 HittedGeneric`. Every log line that
+prints an order type now prints its name.
+
+**`OrderBase::GetAnimPlayed` is a folded stub** — `0085E5C0`, 11,097 symbols. Only `OrderAttack`,
+`OrderDodge`, `OrderFallOnSlope` and `OrderPlayAnim` override it, which is exactly why attacks
+replicate and nothing else does. `OrderHitted` inherits the stub, so there is no accessor for
+the reaction it chose. One `awk` line, no build round.
+
+`OrderHitted::OnStart` is real and unique (epic `01ADF720`, steam `0191F950`) and now hooked.
+`PlayOrder` knows *who* is reacting, `OnStart` knows *what* is being played, and neither can see
+the other's half — so `PlayOrder` arms and `OnStart` collects, the same pairing `LaunchAttack`
+already uses for `OrderAttack`. The sequence is harvested two ways: a bounded scan of the
+order's first 0x120 bytes, every candidate put through `LooksLikeUObject` and then identified by
+asking the game for its **class path** rather than trusting an offset; and failing that, the
+anim instance's active montage. Neither dereferences anything unvalidated, and a miss logs
+which of the two failed. `mirror_hit_reactions` gates it and is now **1** in both deployed inis.
+
+If both routes come back empty, the log will say so per order type, and the next step is the
+order's own layout — not another guess.

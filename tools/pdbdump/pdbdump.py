@@ -133,6 +133,11 @@ WANTED = {
     "UAttackComponent_LaunchAttack": ["?LaunchAttack@UAttackComponent@@AEAA"],
     "OrderAttack_GetAnimPlayed": ["?GetAnimPlayed@OrderAttack@@UEBAPEAVUAnimSequence@@XZ"],
     "OrderAttack_OnStart": ["?OnStart@OrderAttack@@UEAAXXZ"],
+    # The hit reaction. OrderHitted does NOT override GetAnimPlayed, and
+    # OrderBase::GetAnimPlayed is an ICF-folded stub (11,097 symbols share its
+    # address), so there is no accessor for the sequence it chose -- the object
+    # itself has to be read. OnStart is real and unique, so it is the moment.
+    "OrderHitted_OnStart": ["?OnStart@OrderHitted@@UEAAXXZ"],
     # Shared base update used by enemy animation instances. Raw sequences are
     # layered through USCAnimInstance's Cinematic slot; its weight must be
     # restored after this update, immediately before graph evaluation.

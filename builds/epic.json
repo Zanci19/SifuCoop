@@ -41,6 +41,7 @@
     "OrderBase_GetType": 28311152,
     "OrderBase_LoadFrom": 23031712,
     "OrderBase_SaveTo": 28400192,
+    "OrderHitted_OnStart": 28178208,
     "StaticFindObjectSafe": 34063008,
     "UAIFightingComponent_GetAttackHandler": 25892192,
     "UAIFightingComponent_StaticClass": 29309696,

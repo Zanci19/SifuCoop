@@ -313,6 +313,60 @@ bool RangeReadable(const void* address, std::size_t size) {
 }
 
 
+// --- EOrderType --------------------------------------------------------------
+//
+// Recovered from the generated enumerator-name table in the shipped exe: 72
+// contiguous `EOrderType::<Name>` strings running from 0x04A1F350 to 0x04A1FB48
+// (epic build), ending in Count then None, which is the same layout and the same
+// extraction that produced ERelationshipTypes. Declaration order is enum order.
+//
+// This is what the census was built to find, and it answered on its first run.
+// The hit reaction is type 3, `Hitted`: 17 of them in one fight, 4 inside the
+// one-second window after the local player's health dropped. It is not exotic
+// and it was never hiding -- it has been flowing through the PlayOrder hook the
+// whole time, unnamed and therefore invisible.
+const char* OrderTypeName(unsigned int type) {
+    static const char* kNames[] = {
+        "Attack", "Dodge", "ParryVictim", "Hitted", "Guard", "Avoided", "FreezeFrame",
+        "WeaponAction", "TakedownInstigator", "TakedownVictim", "KnockedDown", "Dizzy", "Pushed",
+        "PlayAnim", "Parry", "GrabInstigator", "GrabVictim", "FightingStateRecovery",
+        "DownBeforeStandup", "Standup", "UseMovable", "ThrowObject", "PushObject", "PickUpObject",
+        "DropObject", "PushInstigator", "PushVictim", "FallFromPushed", "FallReception",
+        "FallGetUp", "Reaction", "IdleExit", "Traversal", "StructureBroken",
+        "AttackEnvInstigator", "AttackEnvVictim", "SwapWeaponHand", "Fidget", "FallOnSlope",
+        "PrepFocus", "SynchronizedAttackInstigator", "SynchronizedAttackVictim", "WallJumpEntry",
+        "WallJumpAttack", "ParryInstigator", "TraversalClimb", "ParryFromDown",
+        "DeflectSBInstigator", "AnimSync", "TraversalCinematic", "RagingBull", "Avoid",
+        "FallOnSlopeRecovery", "Dash", "FallOnSlopeEntry", "AttackActionGeneric", "ChargeBuildUp",
+        "OpeningDoor", "HittedGeneric", "TraversalPush", "TraversalPushInstigator",
+        "TraversalDropDown", "RainDash", "Incapacipated", "Jiggle", "Deflected", "Taunt",
+        "PlayBlendSpace", "TargetReactionBlendSpace", "MoveToWithPhysWalking", "Count", "None"};
+    constexpr unsigned int kCount = sizeof(kNames) / sizeof(kNames[0]);
+    return type < kCount ? kNames[type] : "?";
+}
+
+// The orders that make a body visibly register having been hit. This is the
+// list the user's report is about -- "being punched, being pushed" -- and every
+// one of them was measured flowing through PlayOrder during a real fight.
+bool IsReactionOrder(unsigned int type) {
+    switch (type) {
+        case 3:   // Hitted
+        case 58:  // HittedGeneric
+        case 12:  // Pushed
+        case 10:  // KnockedDown
+        case 11:  // Dizzy
+        case 65:  // Deflected
+        case 2:   // ParryVictim
+        case 5:   // Avoided
+        case 33:  // StructureBroken
+        case 27:  // FallFromPushed
+        case 30:  // Reaction
+        case 68:  // TargetReactionBlendSpace
+            return true;
+        default: return false;
+    }
+}
+
 // --- Order-type census -------------------------------------------------------
 //
 // Hit reactions are Orders. `OrderReaction` and `OrderTargetReactionBlendSpace`
@@ -346,6 +400,14 @@ OrderTypeStat g_order_census[kOrderTypeSlots];
 // in the future, and the census counts what arrived inside the window.
 DWORD g_hit_window_until = 0;
 
+// Armed by the PlayOrder hook, which is the only place that knows WHICH
+// character is being hit -- the order object itself is not reachable from there,
+// and the character is not reachable from OnStart. They meet in the same frame.
+const void* g_reaction_actor = nullptr;
+DWORD g_reaction_armed_ms = 0;
+unsigned int g_reaction_order_type = 0;
+
+
 void NoteOrderType(unsigned int type, bool from_player, bool in_hit_window) {
     for (int i = 0; i < kOrderTypeSlots; ++i) {
         OrderTypeStat& slot = g_order_census[i];
@@ -362,15 +424,15 @@ void NoteOrderType(unsigned int type, bool from_player, bool in_hit_window) {
 }
 
 void DumpOrderCensus() {
-    char line[512];
+    char line[1600];
     int n = 0;
     int shown = 0;
     for (int i = 0; i < kOrderTypeSlots && n < static_cast<int>(sizeof(line)) - 24; ++i) {
         const OrderTypeStat& slot = g_order_census[i];
         if (!slot.used) continue;
         ++shown;
-        n += snprintf(line + n, sizeof(line) - n, "%u:%llu/p%llu/h%llu ", slot.type, slot.total,
-                      slot.from_player, slot.while_hit);
+        n += snprintf(line + n, sizeof(line) - n, "%u=%s:%llu/p%llu/h%llu ", slot.type,
+                      OrderTypeName(slot.type), slot.total, slot.from_player, slot.while_hit);
     }
     if (shown == 0) return;
     // h> is the whole point of the table: a type whose count only ever rises
@@ -395,11 +457,20 @@ extern "C" void sifucoop_on_playorder(void* self, unsigned int order_type,
     const bool in_hit_window = static_cast<LONG>(g_hit_window_until - order_now) > 0;
     NoteOrderType(order_type & 0xFF, from_player, in_hit_window);
 
+    // This is the only place that knows WHO is reacting. OrderHitted::OnStart
+    // runs inside this call and knows WHAT is being played; neither can see the
+    // other's half, so hand it over here and let OnStart collect it.
+    if (IsReactionOrder(order_type & 0xFF)) {
+        g_reaction_actor = self;
+        g_reaction_armed_ms = order_now;
+        g_reaction_order_type = order_type & 0xFF;
+    }
+
     ++count;
     if (count <= 40 || in_hit_window) {
-        SC_LOG("playorder: #%llu %s=%p type=%u netstruct=%p infos=%p%s", count,
-               from_player ? "PLAYER" : "other", self, order_type & 0xFF, net_order_struct,
-               play_order_infos,
+        SC_LOG("playorder: #%llu %s=%p type=%u %s netstruct=%p infos=%p%s", count,
+               from_player ? "PLAYER" : "other", self, order_type & 0xFF,
+               OrderTypeName(order_type & 0xFF), net_order_struct, play_order_infos,
                in_hit_window ? "  <-- WITHIN the window after YOU were hit" : "");
     }
 
@@ -581,6 +652,117 @@ void ArmCosmeticSequence(const void* order, std::uint32_t actor_hash) {
         }
     }
     g_pending_cosmetic_sequences[0] = {order, now, actor_hash};
+}
+
+// --- Hit reactions -----------------------------------------------------------
+//
+// The observing machine has never shown an enemy registering a punch, and the
+// reason was mis-scoped for weeks. It is NOT that hit reactions are unreachable:
+// the player's own reactions already replicate today, through
+// UPlayerAnim::m_LastActionAnim, and the 2026-08-11 log has the host sending
+// `MC_Man_Barehands_HitReaction_Strong_High_East` and the joiner playing it.
+// What has no channel is an ENEMY's reaction, because m_LastActionAnim is
+// declared on UPlayerAnim and enemies animate through USCAnimInstance, which
+// has no equivalent field.
+//
+// So take it from the order instead. `OrderHitted::OnStart` is real and unique
+// (01ADF720, one symbol), and it runs at the instant the reaction begins --
+// after Sifu has chosen which reaction to play. What it does NOT have is an
+// accessor: OrderHitted does not override GetAnimPlayed, and
+// OrderBase::GetAnimPlayed is an ICF-folded stub sharing its address with 11,097
+// other empty functions, so calling it returns nothing on every order type
+// except the four that override it.
+//
+// The sequence therefore has to be read out of the order object. That is the
+// kind of thing that has crashed this game twice, so it is done the way the
+// attack template scan already is: bounded to a small window, every candidate
+// put through LooksLikeUObject first (vtable in range, ClassPrivate readable),
+// and identified by asking the game for its CLASS path rather than by guessing
+// from an offset. A wrong guess yields no match and sends nothing; it never
+// dereferences anything unvalidated.
+using OrderHittedOnStartFn = void(__fastcall*)(void* order);
+OrderHittedOnStartFn g_original_order_hitted_on_start = nullptr;
+
+// Is this pointer a UAnimSequence? Asked of the game, not inferred from a
+// layout. UObject::ClassPrivate sits at 0x10 -- the same offset LooksLikeUObject
+// already validates -- and the class object's own path name is exact.
+bool LooksLikeAnimSequence(const void* candidate) {
+    if (!LooksLikeUObject(candidate)) return false;
+    auto* class_object = *reinterpret_cast<ue::UObject* const*>(
+        static_cast<const std::uint8_t*>(candidate) + 0x10);
+    char class_path[128] = {};
+    if (!ue::GetObjectPathName(class_object, class_path, sizeof(class_path))) return false;
+    const int length = lstrlenA(class_path);
+    const int suffix = lstrlenA(".AnimSequence");
+    return length >= suffix && lstrcmpA(class_path + length - suffix, ".AnimSequence") == 0;
+}
+
+void __fastcall OrderHittedOnStartHook(void* order) {
+    g_original_order_hitted_on_start(order);
+    if (!order || g_mirroring || !net::IsConnected()) return;
+    if (!coop::Get().mirror_hit_reactions) return;
+
+    const DWORD now = GetTickCount();
+    const void* actor = g_reaction_actor;
+    const unsigned int type = g_reaction_order_type;
+    // One frame's grace. Anything older belongs to a different hit.
+    if (!actor || now - g_reaction_armed_ms > 100) return;
+    g_reaction_actor = nullptr;
+
+    // Only enemies. The local player's own reactions already reach the peer
+    // through m_LastActionAnim, and sending them twice would layer a second
+    // copy through the Cinematic slot on top of the first.
+    const std::uint32_t actor_hash = EnemyHashForActor(actor);
+    if (actor_hash == 0) return;
+
+    if (!RangeReadable(order, 0x120)) return;
+    const auto* words = reinterpret_cast<const void* const*>(order);
+    for (int i = 1; i < 0x120 / 8; ++i) {
+        if (!LooksLikeAnimSequence(words[i])) continue;
+        char path[192] = {};
+        if (!ue::GetObjectPathName(const_cast<ue::UObject*>(
+                                       static_cast<const ue::UObject*>(words[i])),
+                                   path, sizeof(path))) {
+            continue;
+        }
+        net::SendAnimationSequence(path, actor_hash);
+        static unsigned int sent = 0;
+        if (++sent <= 5 || coop::Get().verbose_orders) {
+            SC_LOG("reaction: %s sequence sent for %08X at +0x%02X '%s'", OrderTypeName(type),
+                   actor_hash, i * 8, path);
+        }
+        return;
+    }
+
+    // Second route, free to try: if Sifu played the reaction as a MONTAGE
+    // rather than a bare sequence, the anim instance is already holding it and
+    // the mod's existing reader finds it. Costs one reflection call on a body
+    // that was just hit, and covers the case the scan above cannot.
+    ue::UObject* actor_object =
+        const_cast<ue::UObject*>(static_cast<const ue::UObject*>(actor));
+    ue::AnimState anim = {};
+    char montage_path[192] = {};
+    if (ue::ReadAnimState(actor_object, &anim) && anim.montage &&
+        ue::GetObjectPathName(anim.montage, montage_path, sizeof(montage_path))) {
+        // Addressed to the enemy, not to the puppet. SendMontageState carries no
+        // actor and would land on the remote player's body.
+        net::SendAnimationSequence(montage_path, actor_hash, anim.position);
+        static unsigned int montages = 0;
+        if (++montages <= 5 || coop::Get().verbose_orders) {
+            SC_LOG("reaction: %s montage sent for %08X '%s'", OrderTypeName(type), actor_hash,
+                   montage_path);
+        }
+        return;
+    }
+
+    // Worth one line: it says the hook fires and the harvest is the part that
+    // failed, which is a different next step from "no reaction ever arrives".
+    static unsigned int missed = 0;
+    if (++missed <= 5) {
+        SC_LOG("reaction: %s on %08X carried no UAnimSequence in its first 0x120 bytes and "
+               "no active montage",
+               OrderTypeName(type), actor_hash);
+    }
 }
 
 void __fastcall OrderAttackOnStartHook(void* order) {
@@ -1327,6 +1509,22 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
         }
     } else {
         SC_LOG("order: OrderAttack::OnStart unavailable on this build");
+    }
+
+    if (offsets::OrderHitted_OnStart != 0) {
+        auto* hitted = reinterpret_cast<void*>(base + offsets::OrderHitted_OnStart);
+        if (MH_CreateHook(hitted, reinterpret_cast<void*>(&OrderHittedOnStartHook),
+                          reinterpret_cast<void**>(&g_original_order_hitted_on_start)) == MH_OK &&
+            MH_EnableHook(hitted) == MH_OK) {
+            SC_LOG("order: OrderHitted::OnStart hook ACTIVE at %p -- enemy hit reactions",
+                   hitted);
+        } else {
+            g_original_order_hitted_on_start = nullptr;
+            SC_LOG("order: OrderHitted::OnStart hook FAILED -- enemy hit reactions unavailable");
+        }
+    } else {
+        SC_LOG("order: OrderHitted::OnStart unavailable on this build -- REBUILD the offset "
+               "table for this game folder");
     }
 
     auto* prepare =
