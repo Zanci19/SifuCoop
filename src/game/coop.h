@@ -121,6 +121,10 @@ struct Config {
     // reaction is carried as an Order, this is the honest half: the enemy
     // notices.
     bool mirror_hit_reactions = true;
+    // Show your partner at THEIR age rather than yours. Their age is already on
+    // the wire; this is the only thing that consumes it. Written to the puppet
+    // only -- your own age is your own run and is never touched from the network.
+    bool sync_peer_age = true;
 
     // Let the JOINING machine's own AI fight its player, for the enemies the
     // host says are already targeting them.

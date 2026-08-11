@@ -98,6 +98,7 @@ void Load() {
         ReadBool("peer_fights_locally", g_config.peer_fights_locally, ini);
     g_config.mirror_hit_reactions =
         ReadBool("mirror_hit_reactions", g_config.mirror_hit_reactions, ini);
+    g_config.sync_peer_age = ReadBool("sync_peer_age", g_config.sync_peer_age, ini);
     g_config.fix_room_clear = ReadBool("fix_room_clear", g_config.fix_room_clear, ini);
     g_config.auto_follow_level = ReadBool("auto_follow_level",
                                           g_config.auto_follow_level, ini);
@@ -160,6 +161,7 @@ void Save() {
     WriteBool("client_simulates_enemies", g_config.client_simulates_enemies, ini);
     WriteBool("peer_fights_locally", g_config.peer_fights_locally, ini);
     WriteBool("mirror_hit_reactions", g_config.mirror_hit_reactions, ini);
+    WriteBool("sync_peer_age", g_config.sync_peer_age, ini);
     WriteBool("fix_room_clear", g_config.fix_room_clear, ini);
     WriteBool("auto_follow_level", g_config.auto_follow_level, ini);
     WriteBool("auto_join_level", g_config.auto_join_level, ini);

@@ -683,19 +683,46 @@ void ArmCosmeticSequence(const void* order, std::uint32_t actor_hash) {
 using OrderHittedOnStartFn = void(__fastcall*)(void* order);
 OrderHittedOnStartFn g_original_order_hitted_on_start = nullptr;
 
-// Is this pointer a UAnimSequence? Asked of the game, not inferred from a
-// layout. UObject::ClassPrivate sits at 0x10 -- the same offset LooksLikeUObject
-// already validates -- and the class object's own path name is exact.
-bool LooksLikeAnimSequence(const void* candidate) {
-    if (!LooksLikeUObject(candidate)) return false;
-    auto* class_object = *reinterpret_cast<ue::UObject* const*>(
-        static_cast<const std::uint8_t*>(candidate) + 0x10);
-    char class_path[128] = {};
-    if (!ue::GetObjectPathName(class_object, class_path, sizeof(class_path))) return false;
-    const int length = lstrlenA(class_path);
-    const int suffix = lstrlenA(".AnimSequence");
-    return length >= suffix && lstrcmpA(class_path + length - suffix, ".AnimSequence") == 0;
-}
+// The byte scan that used to live here CRASHED THE GAME and must not come back.
+//
+// It walked the order object looking for a UAnimSequence, put every candidate
+// through LooksLikeUObject, and then asked the game for its class path. That is
+// not enough: LooksLikeUObject only proves a pointer is shaped like a UObject,
+// and GetPathName walks the Outer chain of whatever it is handed. The minidump
+// is unambiguous --
+//
+//   UObjectBaseUtility::GetPathName()   reading 0xffffffffffffffff
+//   dsound  <- the class-path check
+//   dsound  <- OrderHittedOnStartHook
+//   OrderBase::Start()
+//
+// -- three GetPathName frames deep, recursing up an Outer chain that was not
+// one, on the first punch of the session.
+//
+// The evidence against it was already in the log before it was written. The
+// order dump prints `uobjects=0` for every order it inspects: these objects hold
+// no recognisable UObject pointer in their first bytes at all, so the scan could
+// not have succeeded even if it had survived. That is the whole lesson of §14
+// and it was ignored: check first, build second.
+
+// A reaction that has just been ARMED, to be sampled over the next few frames.
+//
+// OnStart runs at the top of the order, before Sifu has put the reaction on the
+// mesh, so asking the anim instance right there returns the previous animation
+// or nothing at all. The attack path already solved this -- it arms a short
+// capture window and samples afterwards -- and this is the same shape.
+// Deliberately holds a HASH and not an actor pointer. An enemy can be killed
+// and recycled into the pool inside this window, and a stale body pointer is
+// how this project has crashed before -- the anim hook holding freed components
+// is in the fixed list. The hash is re-resolved every frame.
+struct PendingReaction {
+    std::uint32_t actor_hash = 0;
+    unsigned int order_type = 0;
+    DWORD until_ms = 0;
+    ue::UObject* last_sent = nullptr;  // compared only, never dereferenced
+};
+constexpr int kPendingReactionCount = 8;
+PendingReaction g_pending_reactions[kPendingReactionCount] = {};
 
 void __fastcall OrderHittedOnStartHook(void* order) {
     g_original_order_hitted_on_start(order);
@@ -710,58 +737,67 @@ void __fastcall OrderHittedOnStartHook(void* order) {
     g_reaction_actor = nullptr;
 
     // Only enemies. The local player's own reactions already reach the peer
-    // through m_LastActionAnim, and sending them twice would layer a second
-    // copy through the Cinematic slot on top of the first.
+    // through m_LastActionAnim -- that channel is working, and the 2026-08-11
+    // log has the host sending a HitReaction asset and the joiner playing it.
+    // Sending them twice would layer a second copy through the Cinematic slot.
     const std::uint32_t actor_hash = EnemyHashForActor(actor);
     if (actor_hash == 0) return;
 
-    if (!RangeReadable(order, 0x120)) return;
-    const auto* words = reinterpret_cast<const void* const*>(order);
-    for (int i = 1; i < 0x120 / 8; ++i) {
-        if (!LooksLikeAnimSequence(words[i])) continue;
-        char path[192] = {};
-        if (!ue::GetObjectPathName(const_cast<ue::UObject*>(
-                                       static_cast<const ue::UObject*>(words[i])),
-                                   path, sizeof(path))) {
+    for (PendingReaction& pending : g_pending_reactions) {
+        if (pending.actor_hash != actor_hash && pending.until_ms != 0 &&
+            static_cast<LONG>(pending.until_ms - now) > 0) {
             continue;
         }
-        net::SendAnimationSequence(path, actor_hash);
+        pending = {actor_hash, type, now + 400, nullptr};
+        return;
+    }
+    g_pending_reactions[0] = {actor_hash, type, now + 400, nullptr};
+}
+
+// Per frame, for bodies that have just started a reaction. Asks the ANIM
+// INSTANCE what it is playing -- never the order object.
+//
+// This is the only safe question available. It is one reflection call on a live
+// actor, the same call the mod already makes on the local player every frame,
+// and it cannot walk anything the game has not handed us.
+void PumpReactionCaptures() {
+    if (!coop::Get().mirror_hit_reactions || !net::IsConnected()) return;
+    const DWORD now = GetTickCount();
+    for (PendingReaction& pending : g_pending_reactions) {
+        if (!pending.actor_hash || pending.until_ms == 0) continue;
+        if (static_cast<LONG>(pending.until_ms - now) <= 0) {
+            // Say so once per type: "the hook fires but nothing was playing" is
+            // a different next step from "no reaction ever arrives".
+            if (!pending.last_sent) {
+                static unsigned int missed = 0;
+                if (++missed <= 5 || coop::Get().verbose_orders) {
+                    SC_LOG("reaction: %s on %08X -- nothing on its anim instance for 400ms, "
+                           "so this body plays its reaction outside the montage system",
+                           OrderTypeName(pending.order_type), pending.actor_hash);
+                }
+            }
+            pending = {};
+            continue;
+        }
+
+        // Re-resolved every frame. If the body died and went back to the pool
+        // the lookup simply stops returning it, which is the whole point.
+        ue::UObject* actor = FindEnemyByHash(pending.actor_hash);
+        if (!actor) continue;
+        ue::AnimState anim = {};
+        if (!ue::ReadAnimState(actor, &anim) || !anim.montage) continue;
+        if (anim.montage == pending.last_sent) continue;
+        char path[192] = {};
+        if (!ue::GetObjectPathName(anim.montage, path, sizeof(path))) continue;
+        pending.last_sent = anim.montage;
+        // Addressed to the enemy. SendMontageState carries no actor and would
+        // land the reaction on the remote player's body instead.
+        net::SendAnimationSequence(path, pending.actor_hash, anim.position);
         static unsigned int sent = 0;
         if (++sent <= 5 || coop::Get().verbose_orders) {
-            SC_LOG("reaction: %s sequence sent for %08X at +0x%02X '%s'", OrderTypeName(type),
-                   actor_hash, i * 8, path);
+            SC_LOG("reaction: %s sent for %08X '%s'", OrderTypeName(pending.order_type),
+                   pending.actor_hash, path);
         }
-        return;
-    }
-
-    // Second route, free to try: if Sifu played the reaction as a MONTAGE
-    // rather than a bare sequence, the anim instance is already holding it and
-    // the mod's existing reader finds it. Costs one reflection call on a body
-    // that was just hit, and covers the case the scan above cannot.
-    ue::UObject* actor_object =
-        const_cast<ue::UObject*>(static_cast<const ue::UObject*>(actor));
-    ue::AnimState anim = {};
-    char montage_path[192] = {};
-    if (ue::ReadAnimState(actor_object, &anim) && anim.montage &&
-        ue::GetObjectPathName(anim.montage, montage_path, sizeof(montage_path))) {
-        // Addressed to the enemy, not to the puppet. SendMontageState carries no
-        // actor and would land on the remote player's body.
-        net::SendAnimationSequence(montage_path, actor_hash, anim.position);
-        static unsigned int montages = 0;
-        if (++montages <= 5 || coop::Get().verbose_orders) {
-            SC_LOG("reaction: %s montage sent for %08X '%s'", OrderTypeName(type), actor_hash,
-                   montage_path);
-        }
-        return;
-    }
-
-    // Worth one line: it says the hook fires and the harvest is the part that
-    // failed, which is a different next step from "no reaction ever arrives".
-    static unsigned int missed = 0;
-    if (++missed <= 5) {
-        SC_LOG("reaction: %s on %08X carried no UAnimSequence in its first 0x120 bytes and "
-               "no active montage",
-               OrderTypeName(type), actor_hash);
     }
 }
 
@@ -1280,6 +1316,7 @@ void WatchLocalPlayerForHits() {
 
 void PumpRemoteOrders() {
     WatchLocalPlayerForHits();
+    PumpReactionCaptures();
 
     std::uint32_t actor_hash = 0;
     std::uint32_t order_type = 0;

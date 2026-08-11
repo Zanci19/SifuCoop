@@ -11,6 +11,7 @@
 #include "../net/session.h"
 #include "../ue/reflection.h"
 #include "coop.h"
+#include "puppet.h"
 
 namespace sifucoop::game {
 namespace {
@@ -35,6 +36,33 @@ int ReadLocalAge(ue::UObject* player) {
     } age = {};
     if (!ue::CallFunction(stats.ReturnValue, L"BPF_GetCharacterAge", &age)) return -1;
     return age.ReturnValue;
+}
+
+// The same chain, written instead of read, and only ever aimed at the PUPPET.
+//
+// Sifu's characters are aged by their stats component and their appearance
+// follows from it, so a clone of the local player carries the LOCAL player's
+// age -- which is why the host at 48 saw two old men and the joiner at 20 saw
+// two young ones, each machine showing its partner at its own age. The peer's
+// real age has been on the wire and in the log all along
+// (`run: peer age=...`); nothing consumed it.
+//
+// BPF_SetCharacterAge is Blueprint-exposed (it has an exec thunk), so this is
+// reflection like everything around it -- no offset, no unknown field. Aimed at
+// the puppet and nowhere else: the local player's age is their own run and must
+// never be written from the network.
+bool WritePuppetAge(ue::UObject* puppet, int years) {
+    if (!puppet || years < 0) return false;
+    struct StatsRet {
+        ue::UObject* ReturnValue;
+    } stats = {};
+    if (!ue::CallFunction(puppet, L"BPF_GetStatsComponent", &stats) || !stats.ReturnValue) {
+        return false;
+    }
+    struct AgeArg {
+        int Age;
+    } arg = {years};
+    return ue::CallFunction(stats.ReturnValue, L"BPF_SetCharacterAge", &arg);
 }
 
 // player -> currently held weapon actor -> its UBaseWeaponData asset -> the
@@ -171,6 +199,28 @@ void TickRunState(ue::UObject* player) {
             if (peer_room_pct != INT_MIN) wsprintfA(room_buf, "%d%%", peer_room_pct);
             SC_LOG("run: peer age=%s room=%s weapon=%s", age_buf, room_buf,
                    peer.has_weapon ? peer.weapon_path : "none");
+        }
+    }
+
+    // Age IS applied, to the puppet, because a partner shown at your own age is
+    // a visible defect rather than a missing feature. Whether Sifu refreshes the
+    // model from this on its own is exactly what the next run measures, so the
+    // outcome is logged either way rather than assumed.
+    if (coop::Get().sync_peer_age && coop::Get().mode == coop::Mode::Coop) {
+        net::RunSnapshot ages;
+        ue::UObject* puppet = GetPuppet();
+        if (puppet && net::GetPeerRunState(&ages) && ages.age_valid && ages.age >= 0) {
+            static ue::UObject* aged_puppet = nullptr;
+            static int aged_to = INT_MIN;
+            if (puppet != aged_puppet || ages.age != aged_to) {
+                const bool ok = WritePuppetAge(puppet, ages.age);
+                aged_puppet = puppet;
+                aged_to = ages.age;
+                SC_LOG("run: partner's body aged to %d %s", ages.age,
+                       ok ? "-- if they still look your age, the model does not follow the "
+                            "stats component and needs a mesh refresh"
+                          : "FAILED -- BPF_SetCharacterAge did not dispatch");
+            }
         }
     }
 

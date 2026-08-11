@@ -740,3 +740,73 @@ which of the two failed. `mirror_hit_reactions` gates it and is now **1** in bot
 
 If both routes come back empty, the log will say so per order type, and the next step is the
 order's own layout — not another guess.
+
+---
+
+## 17. THE SCAN THAT CRASHED IT, AND WHY BOTH PLAYERS LOOKED THE SAME AGE
+
+### Do not scan an order object for UObject pointers. It has none, and it crashes.
+
+§16 shipped a bounded scan of `OrderHitted`'s first 0x120 bytes looking for the reaction's
+`UAnimSequence`, with every candidate put through `LooksLikeUObject` and then identified by
+asking the game for its class path. It crashed on the first punch of the session:
+
+```
+Unhandled Exception: EXCEPTION_ACCESS_VIOLATION reading address 0xffffffffffffffff
+  UObjectBaseUtility::GetPathName()   UObjectBaseUtility.cpp:51
+  UObjectBaseUtility::GetPathName()   UObjectBaseUtility.cpp:58
+  UObjectBaseUtility::GetPathName()   UObjectBaseUtility.cpp:44
+  dsound                              <- the class-path check
+  dsound                              <- OrderHittedOnStartHook
+  OrderBase::Start()                  OrderBase.cpp:252
+```
+
+`LooksLikeUObject` only proves a pointer is *shaped* like a UObject: vtable in module range,
+ClassPrivate readable. `GetPathName` then walks the Outer chain of whatever it is handed, and
+three frames up that chain it read -1.
+
+**The evidence against it was already in the log before it was written.** The order dump prints
+`order: #6 order=... bytes=0 fnames=0 actors=0 uobjects=0` — orders carry no recognisable
+UObject pointer in the scanned range at all. The scan could not have succeeded even if it had
+survived. Checking that one existing line would have cost nothing; instead it cost the owner a
+session. This is the §14 lesson exactly, and it was ignored while writing a section that quotes
+§14.
+
+The scan is deleted with a comment saying why. What replaced it asks only the **anim instance**
+what it is playing, which is one reflection call on a live actor and the same call the mod
+already makes on the local player every frame.
+
+Two further corrections in the replacement, both learned here:
+
+- `OrderHitted::OnStart` runs at the TOP of the order, before Sifu has put the reaction on the
+  mesh, so sampling there returns the previous animation or nothing. It now arms a 400 ms
+  capture window and samples afterwards -- the shape the attack path already uses.
+- The window holds an actor **hash**, never an actor pointer. An enemy can be killed and
+  recycled into the pool inside 400 ms, and "the anim hook holding freed components" is already
+  in this project's fixed-bugs list. The hash is re-resolved every frame; if the body is gone
+  the lookup simply stops returning it.
+
+If the anim instance turns out to hold nothing during a reaction, the log now says so per order
+type, and the next step is the order's own layout -- established by dumping it offline, not by
+scanning it at runtime.
+
+### Both players looked the same age because nothing ever consumed the peer's age
+
+Reported: host at 48, joiner at 20; on the host both characters looked old, on the joiner both
+looked young. Each machine was showing its partner at its OWN age.
+
+The puppet is a clone of the local player, so it carries the local player's age, and Sifu ages a
+character through `UStatsComponent` with appearance following from it. The peer's real age has
+been on the wire and in the log the whole time -- `run: peer age=...` -- and §? said plainly
+that peer run state was "intentionally not applied". That was right for room-clear and for the
+weapon; it was wrong for age, which is a visible defect rather than a missing feature.
+
+`UStatsComponent::BPF_SetCharacterAge(int)` is Blueprint-exposed (it has an exec thunk), so this
+is reflection like everything around it -- no offset, no unknown field. It is written to the
+**puppet only**: the local player's age is their own run and must never be written from the
+network. `sync_peer_age`, default on.
+
+What is not yet known is whether Sifu refreshes the model from the stats component on its own.
+The log says which happened rather than assuming: if the body still looks your age after
+`run: partner's body aged to N`, the setter landed but the mesh needs an explicit refresh, and
+that is a different search.
