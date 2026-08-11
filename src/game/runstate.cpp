@@ -22,6 +22,8 @@ namespace net = sifucoop::net;
 namespace coop = sifucoop::coop;
 namespace offsets = sifucoop::offsets;
 
+ue::UObject* PlayerFightingComponent(ue::UObject* character);
+
 // Never write cosmetics onto the local player.
 //
 // Reported after the first version of this shipped: on the joiner, whose player
@@ -121,6 +123,39 @@ int ReadLocalOutfit(ue::UObject* player) {
                     offsets::M_UPlayerFightingComponent_iOutfitIndex,
                 sizeof(index));
     return (index < 0 || index > 64) ? -1 : index;
+}
+
+// Rebuild the body after writing stats to it.
+//
+// The age write works and has been measured working: "aged to 45" followed by
+// "max health here 96, theirs 96 -- agreed", so BPF_SetCharacterAge reaches
+// everything computed from it. The FACE still did not change, and the reason is
+// that Sifu rebuilds the model from a callback rather than polling the stats:
+// UPlayerFightingComponent::OnStatsUpdated, private, void(), no arguments, one
+// symbol at its RVA on both builds. Writing the number without ringing the bell
+// left the character aged on paper and unchanged on screen.
+//
+// Direct native call rather than reflection because it is not Blueprint-exposed.
+// Trivial ABI -- a this pointer and nothing else.
+using OnStatsUpdatedFn = void(__fastcall*)(ue::UObject* component);
+OnStatsUpdatedFn g_on_stats_updated = nullptr;
+
+bool RefreshAppearance(ue::UObject* puppet) {
+    // Bound on first use from the game module, so this file needs no init hook.
+    static bool bound = false;
+    if (!bound) {
+        bound = true;
+        if (offsets::UPlayerFightingComponent_OnStatsUpdated != 0) {
+            const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleA(nullptr));
+            g_on_stats_updated = reinterpret_cast<OnStatsUpdatedFn>(
+                base + offsets::UPlayerFightingComponent_OnStatsUpdated);
+        }
+    }
+    if (!g_on_stats_updated || !puppet) return false;
+    ue::UObject* comp = PlayerFightingComponent(puppet);
+    if (!comp) return false;
+    g_on_stats_updated(comp);
+    return true;
 }
 
 // Aimed at the PUPPET only, exactly like the age write. The second argument is
@@ -305,10 +340,12 @@ void TickRunState(ue::UObject* player) {
                 const bool ok = WritePuppetAge(puppet, ages.age);
                 aged_puppet = puppet;
                 aged_to = ages.age;
+                const bool refreshed = ok && RefreshAppearance(puppet);
                 SC_LOG("run: partner's body aged to %d %s", ages.age,
-                       ok ? "-- if they still look your age, the model does not follow the "
-                            "stats component and needs a mesh refresh"
-                          : "FAILED -- BPF_SetCharacterAge did not dispatch");
+                       !ok ? "FAILED -- BPF_SetCharacterAge did not dispatch"
+                           : refreshed ? "and the model was rebuilt (OnStatsUpdated)"
+                                       : "but OnStatsUpdated is unavailable -- the number "
+                                         "changed and the face will not");
             }
         }
     }

@@ -607,6 +607,138 @@ bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
     // -- it was logged whether or not the write took. Read it back instead.
     return TargetIndexOf(entry.attack_component) == InternalIndexOf(desired);
 }
+// --- Making the partner a TARGET the director knows about --------------------
+//
+// This is the measured cause of "enemies never attack my partner", and of the
+// two reports that follow from it -- the partner takes no damage, and a dead
+// player's attackers keep working on the corpse instead of switching over.
+//
+// The host census says it in one line, every sample:
+//
+//   targets: 0 enemies on YOU, 3 on the second player, 0 elsewhere, 0 idle
+//   roles:   fighting YOU direct=1 indirect=1 |
+//            fighting your partner direct=0 indirect=0 non=0 none=0
+//
+// Three enemies AIMED at the partner. All four role counters for the partner at
+// zero -- not "they hold NonOpponent", not "they hold None", but no entry of any
+// kind. Aim and permission are different things: only a DirectOpponent may
+// swing, roles come out of a ticket manager AAIDirectorActor keeps PER TARGET,
+// and nothing ever asked it to keep one for the puppet. Pointing enemies at a
+// body the director has never heard of is why every targeting fix so far moved
+// the `targets` line and never the `roles` one.
+//
+// RegisterOrRemoveFromCombatRoleTicketManagerForTarget is the director's own
+// front door for exactly this, and it has never been called. Public, one symbol
+// at its RVA, resolved on both builds.
+//
+// It also explains the BPF_ForceEnemy crash rather than repeating it. That call
+// handed out a ticket for a target the director had no manager for, so removal
+// on death walked a null:
+//   FAICombatRoleTicketManager::AddRemoveCandidate  ...:428
+//   AAIDirectorActor::RemoveActorFromSystems        ...:813
+//   AAIDirectorActor::OnDeathDetected               ...:719
+// Registering through the front door is what creates the bookkeeping that the
+// removal path expects to find. The matching unregister below is mandatory for
+// the same reason: leaving a destroyed puppet registered is that crash again.
+using DirectorRegisterFn = void(__fastcall*)(ue::UObject* director, ue::UObject* target,
+                                             std::uint8_t behavior,
+                                             const ue::UObject* instigator);
+using DirectorRemoveForTargetFn = void(__fastcall*)(ue::UObject* director,
+                                                    const ue::UObject* actor,
+                                                    ue::UObject* target);
+using DirectorRedistributeFn = void(__fastcall*)(const ue::UObject* target, bool immediate,
+                                                 std::uint8_t reason);
+
+DirectorRegisterFn g_director_register = nullptr;
+DirectorRemoveForTargetFn g_director_remove_for_target = nullptr;
+DirectorRedistributeFn g_director_redistribute = nullptr;
+StaticClassFn g_director_class = nullptr;
+
+// EGlobalBehaviors, from the exe's enumerator table:
+// 0 Idle, 1 Suspicious, 2 Surprised, 3 Alerted, 4 Abandoning, 5 Friendly.
+// Alerted is "there is a fight on and this is part of it".
+constexpr std::uint8_t kGlobalBehaviorAlerted = 3;
+// ESCAICombatRolesChangeReason: 2 is Script, which is exactly what this is.
+constexpr std::uint8_t kRoleChangeScript = 2;
+
+ue::UObject* g_registered_partner = nullptr;
+ue::UObject* g_registered_with_director = nullptr;
+
+ue::UObject* FindDirector() {
+    if (!g_get_all_actors || !g_director_class) return nullptr;
+    ue::UObject* world = ue::GetWorld();
+    if (!world) return nullptr;
+    g_get_all_actors(world, g_director_class(), &g_actors);
+    if (!g_actors.data || g_actors.num <= 0) return nullptr;
+    return g_actors.data[0];
+}
+
+// Not optional. An unregistered teardown is the crash quoted above.
+void ReleasePartnerFromDirector() {
+    if (!g_registered_partner || !g_registered_with_director) return;
+    if (g_director_remove_for_target && ue::IsValidObject(g_registered_with_director) &&
+        ue::IsValidObject(g_registered_partner)) {
+        g_director_remove_for_target(g_registered_with_director, g_registered_partner,
+                                     g_registered_partner);
+        SC_LOG("director: released your partner as a target");
+    }
+    g_registered_partner = nullptr;
+    g_registered_with_director = nullptr;
+}
+
+void MaintainPartnerAsDirectorTarget(ue::UObject* partner) {
+    if (!coop::Get().director_targets_partner) return;
+    if (coop::Get().mode != coop::Mode::Coop) return;
+    if (!g_director_register) return;
+
+    // The settle rule the relationship writes learned the hard way: a world
+    // still being built has half-constructed AI structures, and this walks them.
+    static ue::UObject* seen_world = nullptr;
+    static DWORD world_settled_at = 0;
+    ue::UObject* world = ue::GetWorld();
+    if (!world) return;
+    const DWORD now = GetTickCount();
+    if (world != seen_world) {
+        seen_world = world;
+        world_settled_at = now;
+        g_registered_partner = nullptr;  // that world's director went with it
+        g_registered_with_director = nullptr;
+        return;
+    }
+    if (now - world_settled_at < 5000) return;
+
+    if (!partner || !ue::IsValidObject(partner)) {
+        ReleasePartnerFromDirector();
+        return;
+    }
+    if (partner != g_registered_partner) ReleasePartnerFromDirector();
+
+    static DWORD next_attempt = 0;
+    if (next_attempt != 0 && static_cast<LONG>(next_attempt - now) > 0) return;
+    next_attempt = now + 2000;
+
+    ue::UObject* director = FindDirector();
+    if (!director) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            SC_LOG("director: no AAIDirectorActor in this level -- roles cannot be allocated "
+                   "to your partner here");
+        }
+        return;
+    }
+
+    g_director_register(director, partner, kGlobalBehaviorAlerted, partner);
+    if (g_director_redistribute) g_director_redistribute(partner, true, kRoleChangeScript);
+
+    if (partner != g_registered_partner || director != g_registered_with_director) {
+        g_registered_partner = partner;
+        g_registered_with_director = director;
+        SC_LOG("director: registered your partner as a combat TARGET -- the roles line should "
+               "stop reading all zeros for 'fighting your partner'");
+    }
+}
+
 // Every fighting character in the level, players included.
 int EnumerateFighters(ue::UObject** out, int max_out) {
     if (!g_get_all_actors || !g_fighting_character_class) return 0;
@@ -987,6 +1119,7 @@ void PublishEnemies() {
     // puppet, which is a character they will defend themselves against and
     // never attack.
     MaintainPeerHostility(peer_player);
+    MaintainPartnerAsDirectorTarget(peer_player);
 
     // A dead player is not a fight. Hand the room to the partner.
     //
@@ -2137,6 +2270,27 @@ void InitEnemies(std::uintptr_t base) {
     g_fighting_character_class =
         reinterpret_cast<StaticClassFn>(base + offsets::AFightingCharacter_StaticClass);
     SC_LOG("enemies: ready (INSERT lists the roster)");
+    g_director_register =
+        offsets::AAIDirectorActor_RegisterOrRemoveForTarget
+            ? reinterpret_cast<DirectorRegisterFn>(
+                  base + offsets::AAIDirectorActor_RegisterOrRemoveForTarget)
+            : nullptr;
+    g_director_remove_for_target =
+        offsets::AAIDirectorActor_RemoveActorFromCombatRolesForTarget
+            ? reinterpret_cast<DirectorRemoveForTargetFn>(
+                  base + offsets::AAIDirectorActor_RemoveActorFromCombatRolesForTarget)
+            : nullptr;
+    g_director_redistribute =
+        offsets::AAIDirectorActor_RequestCombatRoleRedistribution
+            ? reinterpret_cast<DirectorRedistributeFn>(
+                  base + offsets::AAIDirectorActor_RequestCombatRoleRedistribution)
+            : nullptr;
+    g_director_class =
+        offsets::AAIDirectorActor_StaticClass
+            ? reinterpret_cast<StaticClassFn>(base + offsets::AAIDirectorActor_StaticClass)
+            : nullptr;
+    SC_LOG("director: registration %s",
+           g_director_register && g_director_class ? "available" : "UNAVAILABLE on this build");
     g_set_attack_target = offsets::UAttackComponent_SetTarget
         ? reinterpret_cast<SetAttackTargetFn>(base + offsets::UAttackComponent_SetTarget)
         : nullptr;

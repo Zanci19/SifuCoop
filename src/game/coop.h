@@ -125,6 +125,10 @@ struct Config {
     // the wire; this is the only thing that consumes it. Written to the puppet
     // only -- your own age is your own run and is never touched from the network.
     bool sync_peer_age = true;
+    // Register the partner with AAIDirectorActor as a combat TARGET, so its
+    // ticket manager can allocate DirectOpponent to enemies aimed at them.
+    // Without it they are aimed and never permitted to swing.
+    bool director_targets_partner = true;
 
     // Let the JOINING machine's own AI fight its player, for the enemies the
     // host says are already targeting them.

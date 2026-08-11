@@ -138,6 +138,36 @@ WANTED = {
     # address), so there is no accessor for the sequence it chose -- the object
     # itself has to be read. OnStart is real and unique, so it is the moment.
     "OrderHitted_OnStart": ["?OnStart@OrderHitted@@UEAAXXZ"],
+    # The AI director's own front door for "this actor is a TARGET".
+    #
+    # Measured cause of the partner never being attacked: the host census reads
+    # `3 on the second player` beside `fighting your partner direct=0 indirect=0
+    # non=0 none=0` -- all four counters zero, so the director has no combat-role
+    # entry for the partner AT ALL. It keeps a ticket manager per TARGET, and no
+    # one ever asked it to make one for the puppet.
+    #
+    # This is also why BPF_ForceEnemy crashed: it handed out a ticket for a
+    # target the director had never registered, so removal on death walked a
+    # null. Registering through this door first is the difference.
+    "AAIDirectorActor_RegisterOrRemoveForTarget": [
+        "?RegisterOrRemoveFromCombatRoleTicketManagerForTarget@AAIDirectorActor@@QEAAXPEAVAActor@@W4EGlobalBehaviors@@AEBV2@@Z"
+    ],
+    "AAIDirectorActor_RemoveActorFromCombatRolesForTarget": [
+        "?RemoveActorFromCombatRolesForTarget@AAIDirectorActor@@QEAAXPEBVAActor@@PEAV2@@Z"
+    ],
+    "AAIDirectorActor_RequestCombatRoleRedistribution": [
+        "?RequestCombatRoleRedistribution@AAIDirectorActor@@SAXPEBVAActor@@_NW4ESCAICombatRolesChangeReason@@@Z"
+    ],
+    "AAIDirectorActor_StaticClass": ["?StaticClass@AAIDirectorActor@@SAPEAVUClass@@XZ"],
+    # What makes an age change VISIBLE.
+    #
+    # BPF_SetCharacterAge lands and the stats derived from it follow -- measured:
+    # "aged to 45" then "max health here 96, theirs 96 -- agreed". The face did
+    # not change, because the model is rebuilt by a callback rather than polled.
+    # This is that callback: private, void(), no arguments, one symbol at its RVA.
+    "UPlayerFightingComponent_OnStatsUpdated": [
+        "?OnStatsUpdated@UPlayerFightingComponent@@AEAAXXZ"
+    ],
     # Shared base update used by enemy animation instances. Raw sequences are
     # layered through USCAnimInstance's Cinematic slot; its weight must be
     # restored after this update, immediately before graph evaluation.

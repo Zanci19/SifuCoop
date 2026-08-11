@@ -1,6 +1,10 @@
 {
   "name": "epic",
   "offsets": {
+    "AAIDirectorActor_RegisterOrRemoveForTarget": 25570992,
+    "AAIDirectorActor_RemoveActorFromCombatRolesForTarget": 25578432,
+    "AAIDirectorActor_RequestCombatRoleRedistribution": 25581264,
+    "AAIDirectorActor_StaticClass": 29303344,
     "AActor_K2_DestroyActor": 52985536,
     "AActor_SetActorLocationAndRotation": 53017904,
     "ABaseCharacter_OnLocalPlayOrder": 10878480,
@@ -85,6 +89,7 @@
     "UOrderComponent_PlayOrder": 28200736,
     "UPlayerAnim_BPF_SetSpeedState": 26393584,
     "UPlayerAnim_NativeUpdateAnimation": 26468944,
+    "UPlayerFightingComponent_OnStatsUpdated": 27294336,
     "UReplaySystem_GetPlayingPlayerCharacter": 28686176,
     "USCActorManager_RegisterTargetableActor": 25573552,
     "USCAnimInstance_NativeUpdateAnimation": 12479968,

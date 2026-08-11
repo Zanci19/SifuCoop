@@ -1,6 +1,10 @@
 {
   "name": "steam",
   "offsets": {
+    "AAIDirectorActor_RegisterOrRemoveForTarget": 23733648,
+    "AAIDirectorActor_RemoveActorFromCombatRolesForTarget": 23741088,
+    "AAIDirectorActor_RequestCombatRoleRedistribution": 23743920,
+    "AAIDirectorActor_StaticClass": 27470240,
     "AActor_K2_DestroyActor": 51173520,
     "AActor_SetActorLocationAndRotation": 51205888,
     "ABaseCharacter_OnLocalPlayOrder": 9446720,
@@ -85,6 +89,7 @@
     "UOrderComponent_PlayOrder": 26366288,
     "UPlayerAnim_BPF_SetSpeedState": 24556544,
     "UPlayerAnim_NativeUpdateAnimation": 24631920,
+    "UPlayerFightingComponent_OnStatsUpdated": 25457904,
     "UReplaySystem_GetPlayingPlayerCharacter": 26851984,
     "USCActorManager_RegisterTargetableActor": 23736208,
     "USCAnimInstance_NativeUpdateAnimation": 10617568,
