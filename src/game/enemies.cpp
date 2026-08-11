@@ -1603,10 +1603,27 @@ void ApplyRemoteEnemies() {
                 ue::UObject* death_world = ue::GetWorld();
                 ue::UObject* killer =
                     death_world ? ue::GetPlayerCharacter(death_world, 0) : nullptr;
-                const bool killed = KillWithAnimation(
-                    fighter, killer, have_death_anim ? entry.pending_death_anim : nullptr);
-                if (!killed && GetHealth(fighter) > 0.5f) {
-                    ApplyDamage(fighter, GetHealth(fighter) + 1.f);
+                // DAMAGE first, Kill only as a fallback -- the opposite of
+                // what this did, and the reason bodies stood up.
+                //
+                // On the host these same enemies fall correctly, and nothing
+                // there forces anything: they simply take a lethal hit and Sifu
+                // runs its whole death sequence off the damage. Forcing Kill
+                // here announced the death and skipped that sequence, which is
+                // why every measurement read kill=1 down=1 and the body was
+                // still on its feet. Even OnRepSetIsDown could not rescue it,
+                // because there was no death animation in flight for it to
+                // present.
+                //
+                // Now that the joining machine simulates these enemies for real,
+                // it can kill them the same way the host does.
+                const float local_now = GetHealth(fighter);
+                if (local_now > 0.5f) ApplyDamage(fighter, local_now + 1.f);
+
+                bool killed = GetHealth(fighter) <= 0.5f;
+                if (!killed) {
+                    killed = KillWithAnimation(
+                        fighter, killer, have_death_anim ? entry.pending_death_anim : nullptr);
                 }
                 // The measurement came back "kill=1 ... -> down=0" for every
                 // death: Sifu's own Kill runs, returns success, and leaves the
@@ -1616,6 +1633,9 @@ void ApplyRemoteEnemies() {
                 // a knockdown pose rather than a death -- removed the only thing
                 // that was laying anyone down. A knockdown pose is wrong; a
                 // corpse standing up is worse.
+                // Last resort only. If Sifu's own death sequence took the body
+                // down, forcing the state on top of it interrupts the animation
+                // that is already playing.
                 if (!IsDown(fighter)) SetDown(fighter, true);
                 // And then PLAY it. The flag was already being set correctly
                 // -- every death measured down=1 -- and the body stood there
