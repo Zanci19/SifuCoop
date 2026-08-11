@@ -935,6 +935,8 @@ void HandleRunState(const RunStatePacket& packet) {
     g_peer_run.room_clear_valid =
         (packet.flags & kRunRoomClearValid) != 0 && g_peer_run.room_clear_percent >= 0.f;
     g_peer_run.has_weapon = (packet.flags & kRunHasWeapon) != 0;
+    g_peer_run.outfit_valid = (packet.flags & kRunOutfitValid) != 0 && packet.outfit_index >= 0;
+    g_peer_run.outfit_index = packet.outfit_index;
     lstrcpynA(g_peer_run.weapon_path, packet.weapon_path, sizeof(g_peer_run.weapon_path));
     g_peer_run_valid = true;
 }
@@ -1683,6 +1685,10 @@ void SendRunState(const RunSnapshot& state) {
         packet.flags |= kRunRoomClearValid;
     }
     if (state.has_weapon && state.weapon_path[0]) packet.flags |= kRunHasWeapon;
+    if (state.outfit_valid && state.outfit_index >= 0 && state.outfit_index < 127) {
+        packet.outfit_index = static_cast<std::int8_t>(state.outfit_index);
+        packet.flags |= kRunOutfitValid;
+    }
     lstrcpynA(packet.weapon_path, state.weapon_path, sizeof(packet.weapon_path));
     SendPacket(&packet, sizeof(packet));
 }

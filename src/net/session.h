@@ -182,6 +182,8 @@ struct RunSnapshot {
     float room_clear_percent = -1.f;
     bool has_weapon = false;
     char weapon_path[192] = {};
+    bool outfit_valid = false;
+    int outfit_index = -1;
 };
 
 // Either side: publish where this run stands. Cheap and slow (a couple of

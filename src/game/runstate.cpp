@@ -65,6 +65,62 @@ bool WritePuppetAge(ue::UObject* puppet, int years) {
     return ue::CallFunction(stats.ReturnValue, L"BPF_SetCharacterAge", &arg);
 }
 
+// player -> UPlayerFightingComponent -> m_iOutfitIndex.
+//
+// Sifu has no BPF_GetOutfitIndex, so the index is read from the property
+// directly at an offset the build tool resolves from the PDB -- the same way
+// health, guard and faction are read. Writing it DOES have a Blueprint entry
+// point, BPF_SwapOutfit, so the round trip is a raw read and a reflected write.
+// AFightingCharacter has no BPF getter for it -- the whole BPF_ surface was
+// listed and there is none -- so it is reached the way the capsule already is:
+// resolve the class and ask AActor::GetComponentByClass.
+ue::UObject* PlayerFightingComponent(ue::UObject* character) {
+    if (!character) return nullptr;
+    void* klass = ue::FindObjectByPath(L"/Script/Sifu.PlayerFightingComponent");
+    if (!klass) return nullptr;
+    struct ComponentParams {
+        void* ComponentClass;
+        ue::UObject* ReturnValue;
+    } params = {};
+    params.ComponentClass = klass;
+    if (!ue::CallFunction(character, L"GetComponentByClass", &params)) return nullptr;
+    return params.ReturnValue;
+}
+
+int ReadLocalOutfit(ue::UObject* player) {
+    if (offsets::M_UPlayerFightingComponent_iOutfitIndex == 0) return -1;
+    ue::UObject* comp_object = PlayerFightingComponent(player);
+    if (!comp_object) return -1;
+    struct CompRet {
+        ue::UObject* ReturnValue;
+    } comp = {comp_object};
+    std::int32_t index = 0;
+    std::memcpy(&index,
+                reinterpret_cast<const std::uint8_t*>(comp.ReturnValue) +
+                    offsets::M_UPlayerFightingComponent_iOutfitIndex,
+                sizeof(index));
+    return (index < 0 || index > 64) ? -1 : index;
+}
+
+// Aimed at the PUPPET only, exactly like the age write. The second argument is
+// an optional material override; passing null means "just the outfit".
+bool WritePuppetOutfit(ue::UObject* puppet, int index) {
+    if (!puppet || index < 0) return false;
+    ue::UObject* comp = PlayerFightingComponent(puppet);
+    if (!comp) return false;
+    // Three parameters, from the decorated name:
+    //   BPF_SwapOutfit(int32, UMaterialInterface*, bool)
+    // The second is an optional material override -- null means "just the
+    // outfit" -- and the third is a flag whose meaning is unknown, so it is left
+    // false. Getting the count wrong here would hand ProcessEvent a short frame.
+    struct SwapArgs {
+        std::int32_t Index;
+        ue::UObject* MaterialOverride;
+        bool Flag;
+    } args = {index, nullptr, false};
+    return ue::CallFunction(comp, L"BPF_SwapOutfit", &args);
+}
+
 // player -> currently held weapon actor -> its UBaseWeaponData asset -> the
 // asset's object path, which is portable across machines exactly like a combo
 // tree or a level package. Empty string when the player is unarmed.
@@ -166,6 +222,11 @@ void TickRunState(ue::UObject* player) {
         g_last_send = now;
 
         net::RunSnapshot local;
+        const int outfit = ReadLocalOutfit(player);
+        if (outfit >= 0) {
+            local.outfit_index = outfit;
+            local.outfit_valid = true;
+        }
         const int age = ReadLocalAge(player);
         if (age >= 0) {
             local.age = age;
@@ -220,6 +281,26 @@ void TickRunState(ue::UObject* player) {
                        ok ? "-- if they still look your age, the model does not follow the "
                             "stats component and needs a mesh refresh"
                           : "FAILED -- BPF_SetCharacterAge did not dispatch");
+            }
+        }
+    }
+
+    // Costume, same rule and the same reason as age: the puppet is a CLONE of
+    // the local player, so without this it wears whatever this machine's player
+    // is wearing and both characters look identical on both screens. Written to
+    // the puppet only.
+    if (coop::Get().sync_peer_age && coop::Get().mode == coop::Mode::Coop) {
+        net::RunSnapshot outfit_state;
+        ue::UObject* outfit_puppet = GetPuppet();
+        if (outfit_puppet && net::GetPeerRunState(&outfit_state) && outfit_state.outfit_valid) {
+            static ue::UObject* dressed_puppet = nullptr;
+            static int dressed_as = INT_MIN;
+            if (outfit_puppet != dressed_puppet || outfit_state.outfit_index != dressed_as) {
+                const bool ok = WritePuppetOutfit(outfit_puppet, outfit_state.outfit_index);
+                dressed_puppet = outfit_puppet;
+                dressed_as = outfit_state.outfit_index;
+                SC_LOG("run: partner's outfit set to %d %s", outfit_state.outfit_index,
+                       ok ? "" : "FAILED -- BPF_SwapOutfit did not dispatch");
             }
         }
     }

@@ -757,9 +757,20 @@ void __fastcall OrderHittedOnStartHook(void* order) {
 // Per frame, for bodies that have just started a reaction. Asks the ANIM
 // INSTANCE what it is playing -- never the order object.
 //
-// This is the only safe question available. It is one reflection call on a live
-// actor, the same call the mod already makes on the local player every frame,
-// and it cannot walk anything the game has not handed us.
+// USCAnimInstance::m_CachedCurrentPoseAsset is the enemy equivalent of
+// UPlayerAnim::m_LastActionAnim, and finding it is what unblocked this. HANDOFF
+// recorded that USCAnimInstance "has no current-action asset ... it was dumped
+// and checked"; it is listed plainly in the class's own property table, and the
+// build tool resolves its offset from the PDB like every other member here.
+//
+// The montage route that shipped first was measured dead in the same session
+// that produced this: `reaction: Hitted on X -- nothing on its anim instance for
+// 400ms`, dozens of times across four different enemies. Sifu plays reactions as
+// pose assets, not montages. GetCurrentActiveMontage was always going to return
+// null for them, and the log said so before this was written.
+//
+// Read, not called: one aligned pointer load at a resolved offset, on an anim
+// instance the game handed us, guarded on the offset being present.
 void PumpReactionCaptures() {
     if (!coop::Get().mirror_hit_reactions || !net::IsConnected()) return;
     const DWORD now = GetTickCount();
@@ -771,8 +782,8 @@ void PumpReactionCaptures() {
             if (!pending.last_sent) {
                 static unsigned int missed = 0;
                 if (++missed <= 5 || coop::Get().verbose_orders) {
-                    SC_LOG("reaction: %s on %08X -- nothing on its anim instance for 400ms, "
-                           "so this body plays its reaction outside the montage system",
+                    SC_LOG("reaction: %s on %08X -- m_CachedCurrentPoseAsset stayed empty "
+                           "for 400ms",
                            OrderTypeName(pending.order_type), pending.actor_hash);
                 }
             }
@@ -784,15 +795,21 @@ void PumpReactionCaptures() {
         // the lookup simply stops returning it, which is the whole point.
         ue::UObject* actor = FindEnemyByHash(pending.actor_hash);
         if (!actor) continue;
-        ue::AnimState anim = {};
-        if (!ue::ReadAnimState(actor, &anim) || !anim.montage) continue;
-        if (anim.montage == pending.last_sent) continue;
+        ue::UObject* anim_instance = ue::GetAnimInstance(actor);
+        if (!anim_instance || offsets::M_USCAnimInstance_CachedCurrentPoseAsset == 0) continue;
+
+        ue::UObject* pose = nullptr;
+        std::memcpy(&pose,
+                    reinterpret_cast<const std::uint8_t*>(anim_instance) +
+                        offsets::M_USCAnimInstance_CachedCurrentPoseAsset,
+                    sizeof(pose));
+        if (!pose || pose == pending.last_sent) continue;
         char path[192] = {};
-        if (!ue::GetObjectPathName(anim.montage, path, sizeof(path))) continue;
-        pending.last_sent = anim.montage;
+        if (!ue::GetObjectPathName(pose, path, sizeof(path))) continue;
+        pending.last_sent = pose;
         // Addressed to the enemy. SendMontageState carries no actor and would
         // land the reaction on the remote player's body instead.
-        net::SendAnimationSequence(path, pending.actor_hash, anim.position);
+        net::SendAnimationSequence(path, pending.actor_hash);
         static unsigned int sent = 0;
         if (++sent <= 5 || coop::Get().verbose_orders) {
             SC_LOG("reaction: %s sent for %08X '%s'", OrderTypeName(pending.order_type),

@@ -988,6 +988,46 @@ void PublishEnemies() {
     // never attack.
     MaintainPeerHostility(peer_player);
 
+    // A dead player is not a fight. Hand the room to the partner.
+    //
+    // Reported: "when host was dead, enemies still attacked at him, didn't want
+    // to attack peer". They had no reason to switch -- nothing here ever told
+    // them the body they were aimed at had stopped being a threat, so they kept
+    // working on a corpse while the surviving player stood untouched.
+    //
+    // This reuses the peer-aggro lease that already runs after a peer's hit
+    // lands, and nothing else: no BPF_ForceEnemy, no director ticket. That
+    // matters, because forcing a ticket is the thing that crashes in
+    // AAIDirectorActor::OnDeathDetected and it is documented at ForceAttackTarget
+    // below. So this steers them and cannot grant them permission to swing --
+    // if the roles census still reads `fighting your partner direct=0` while
+    // this is active, the ticket really is the only remaining blocker and that
+    // is worth knowing precisely.
+    if (peer_player && host_player) {
+        Fighter host_fighter = ResolveFighter(host_player);
+        const bool host_is_out =
+            host_fighter.health && (GetHealth(host_fighter) <= 0.5f || IsDown(host_fighter));
+        static bool announced = false;
+        if (host_is_out) {
+            int handed = 0;
+            for (int i = 0; i < g_tracked_count; ++i) {
+                Tracked& entry = g_tracked[i];
+                if (!entry.active || !entry.actor) continue;
+                if (ForceAttackTarget(entry, peer_player)) {
+                    entry.peer_aggro_until = now + 3000;
+                    entry.last_peer_target_ms = now;
+                    ++handed;
+                }
+            }
+            if (!announced) {
+                announced = true;
+                SC_LOG("targets: you are down -- handed %d enemies to your partner", handed);
+            }
+        } else {
+            announced = false;
+        }
+    }
+
     net::EnemyStateOut out[net::kMaxTrackedEnemies];
     int count = 0;
     int active = 0;

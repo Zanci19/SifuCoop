@@ -29,7 +29,7 @@ constexpr std::uint32_t kMagic = 0x53434F50;  // 'SCOP'
 // MEANING changes: `sequence` is now per packet type rather than one counter for
 // the whole socket, and a v11 peer's numbering would read as constant loss.
 // Peers refuse to talk across a mismatch rather than misinterpreting each other.
-constexpr std::uint16_t kProtocolVersion = 14;
+constexpr std::uint16_t kProtocolVersion = 15;
 
 // AUTHENTICATION
 //
@@ -294,6 +294,7 @@ struct PingPacket {
 constexpr std::uint8_t kRunAgeValid = 1 << 0;          // `age` means something
 constexpr std::uint8_t kRunRoomClearValid = 1 << 1;    // `room_clear_percent` is real
 constexpr std::uint8_t kRunHasWeapon = 1 << 2;         // `weapon_path` names a held weapon
+constexpr std::uint8_t kRunOutfitValid = 1 << 3;       // `outfit_index` means something
 
 // Periodic session status, independent of position. Carries the things a full
 // playthrough makes players curious about on the other machine: alive at what
@@ -311,7 +312,12 @@ struct RunStatePacket {
     std::int32_t age = 0;              // sender's character age (BPF_GetCharacterAge)
     float room_clear_percent = -1.f;   // sender's live room-clear progress, 0..1
     std::uint8_t flags = 0;
-    std::uint8_t reserved[3] = {};
+    // Which costume the sender is wearing (UPlayerFightingComponent::
+    // m_iOutfitIndex). The puppet is a clone of the LOCAL player, so without
+    // this it wears the local outfit -- the same root cause as the age bug, and
+    // the same fix: send the number, apply it to the puppet only.
+    std::int8_t outfit_index = -1;
+    std::uint8_t reserved[2] = {};
     char weapon_path[192] = {};        // portable path of the held UBaseWeaponData
 };
 

@@ -261,6 +261,18 @@ WANTED_MEMBERS = {
     # its own copy, and can optionally be nudged toward the host's percentage.
     "M_AThePlainesGameState_fRoomClearedLifePercent": ("AThePlainesGameState",
                                                       "m_fRoomClearedLifePercent"),
+    # The enemy equivalent of UPlayerAnim::m_LastActionAnim, and the reason hit
+    # reactions never replicated. HANDOFF recorded that USCAnimInstance "has no
+    # current-action asset ... it was dumped and checked" -- it has this, listed
+    # plainly in its own property table. The montage route was measured dead:
+    # `nothing on its anim instance for 400ms`, dozens of times, because Sifu
+    # plays reactions as pose assets rather than montages.
+    "M_USCAnimInstance_CachedCurrentPoseAsset": ("USCAnimInstance",
+                                                 "m_CachedCurrentPoseAsset"),
+    # Which costume the player is wearing. The puppet is a clone of the LOCAL
+    # player, so it wears the local outfit -- the same root as the age bug.
+    "M_UPlayerFightingComponent_iOutfitIndex": ("UPlayerFightingComponent",
+                                                "m_iOutfitIndex"),
 }
 
 

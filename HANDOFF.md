@@ -810,3 +810,91 @@ What is not yet known is whether Sifu refreshes the model from the stats compone
 The log says which happened rather than assuming: if the body still looks your age after
 `run: partner's body aged to N`, the setter landed but the mesh needs an explicit refresh, and
 that is a different search.
+
+---
+
+## 18. WHAT THE 12:58 RUN SETTLED — 2026-08-11 (third pass)
+
+No crash. Four reports, and the log answered three of them outright.
+
+### `USCAnimInstance::m_CachedCurrentPoseAsset` exists. The earlier note was wrong.
+
+The montage route shipped in §17 was measured dead in one session:
+`reaction: Hitted on 48FCE144 -- nothing on its anim instance for 400ms`, over and over, across
+four different enemies and five order types. Sifu does not play reactions as montages, so
+`GetCurrentActiveMontage` was always going to return null for them.
+
+It plays them as **pose assets**, and `USCAnimInstance` has the field. Its whole property table
+is nine entries:
+
+```
+m_ActionToActionBlendForRep   m_ActionToLocoBlendForRep   m_CachedCurrentPoseAsset
+m_LocoToActionBlendForRep     m_MirrorAnimDB              m_bIsInCinematic
+m_fCinematicLayerTypesCursor  m_fCinematicOverallWeight   m_fPreviewCinematicLayerTypesCursor
+```
+
+`m_CachedCurrentPoseAsset` is the enemy equivalent of `UPlayerAnim::m_LastActionAnim`, and it
+is what the earlier note -- *"USCAnimInstance (enemy anim base) has no current-action asset"*,
+"it was dumped and checked" -- missed. Offset `0x390` on both builds, resolved from the PDB by
+the build tool like every other member. The reaction capture now reads it instead of asking for
+a montage.
+
+That is three separate times now that a confidently-worded negative in this document turned out
+to be an unverified one: `BPF_ServerChangeRelationship` in section 15, and this twice over.
+
+### Costume: same root cause as age, same fix
+
+The puppet is a **clone of the local player**, so it wears the local player's outfit -- which is
+why both characters wore the machine owner's costume on both machines. `m_iOutfitIndex` on
+`UPlayerFightingComponent` (offset `0x33C`) is read directly, because there is no BPF getter;
+`BPF_SwapOutfit(int32, UMaterialInterface*, bool)` is the reflected write. Note the THIRD
+parameter -- the decorated name is `QEAAXHPEAVUMaterialInterface@@_N@Z` -- a short parameter
+frame here would corrupt ProcessEvent's stack.
+
+`AFightingCharacter` has no BPF getter for the fighting component (the whole `BPF_` surface was
+listed), so it is reached the way the capsule already is: `FindObjectByPath` the class, then
+`GetComponentByClass`. Protocol bumped to **15** for the new wire field.
+
+Confirmed working on the way: **the age write does propagate to derived stats.**
+`run: partner's body aged to 28` was followed by
+`puppet: max health here 108, theirs 108 -- agreed`. Writing the stats component from outside
+is honoured by the things computed from it. Costume is not one of them, which is why it needs
+its own channel.
+
+### The targeting problem is now precisely located, and it is the ticket
+
+Host census, the same second, over and over:
+
+```
+targets: 1 enemies on YOU, 4 on the second player, 0 elsewhere, 0 idle
+roles:   fighting YOU direct=1 indirect=4 non=0 none=0 |
+         fighting your partner direct=0 indirect=0 non=0 none=0
+```
+
+Four enemies are **aimed** at the partner and **none of them has any combat role toward it**.
+Aim and permission are different things: only a `DirectOpponent` may swing, and the partner is
+allocated nothing, ever. That is one mechanism behind three separate reports -- the partner
+takes no damage, enemies ignore the partner, and enemies keep hitting a dead host.
+
+The joiner's log says the same from its side: `orders: YOU took` fired **zero times** all
+session, against six on the host. The joining player is untouchable, and on their own screen
+four of five enemies are aimed at the host's puppet -- which until now was `puppet_invincible`,
+an invincible decoy soaking most of the room. That is switched off in both inis.
+
+`BPF_ForceEnemy` remains disabled and must stay so: it is the one thing that *does* grant the
+ticket (measured: `fighting your partner direct=1`), and it crashes in
+`AAIDirectorActor::OnDeathDetected -> RemoveActorFromSystems -> AddRemoveCandidate` at 0x108
+when anything dies, because a spawned clone is not a candidate the director's bookkeeping can
+survive removing.
+
+**The next experiment is `real_second_player=1`, and the reasoning is now specific rather than
+hopeful.** The crash is on *removal of a clone* from the director. A pawn created by
+`UGameplayStatics::CreatePlayer` is a real `AFightingPlayerController` with a game-mode pawn --
+exactly the kind of actor the director's bookkeeping is built to account for. It is currently
+`0` on both machines. It is not switched on in this pass because it changes what the second
+body IS, and that deserves its own run rather than being folded into four other changes.
+
+Meanwhile a dead player now hands the room over with the peer-aggro lease that already exists
+(`targets: you are down -- handed N enemies to your partner`). No ticket, no `BPF_ForceEnemy`,
+so it steers them without permission to swing -- and if the roles census still reads
+`direct=0` while that line is in the log, the ticket is conclusively the only blocker left.

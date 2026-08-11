@@ -36,6 +36,8 @@
     "M_UDefenseComponent_fCurrentGuard": 352,
     "M_UHealthComponent_fHealth": 312,
     "M_UHealthComponent_fMaxHealth": 320,
+    "M_UPlayerFightingComponent_iOutfitIndex": 828,
+    "M_USCAnimInstance_CachedCurrentPoseAsset": 912,
     "OrderAttack_GetAnimPlayed": 26293920,
     "OrderAttack_OnStart": 26332144,
     "OrderBase_GetType": 26476752,
