@@ -1094,6 +1094,31 @@ void ApplyPeerVitals(ue::UObject* puppet, const net::PeerVitals& vitals) {
     if (coop::Get().mirror_peer_vitals && vitals.max_health > 0.f) {
         SetHealth(fighter, vitals.health);
         SetGuard(fighter, vitals.guard);
+
+        // Max health is on the wire and cannot be written: Sifu exposes
+        // BPF_GetMaxHealth on both health components and no setter anywhere.
+        // It does not need one -- max health is DERIVED from age, and the
+        // puppet's age is now the peer's. So this one comparison answers a
+        // question no other line can: whether writing the stats component
+        // actually propagates to the stats that follow from it.
+        //
+        // Equal means the age write took and Sifu recomputed. Still differing
+        // means BPF_SetCharacterAge stored a number nothing downstream reads,
+        // and the partner's body will keep showing your health bar and your
+        // face regardless of what the age says.
+        const float puppet_max = GetMaxHealth(fighter);
+        static float last_reported_gap = -1.f;
+        const float gap = puppet_max - vitals.max_health;
+        const float magnitude = gap < 0.f ? -gap : gap;
+        if (last_reported_gap < 0.f || (magnitude - last_reported_gap > 1.f) ||
+            (last_reported_gap - magnitude > 1.f)) {
+            last_reported_gap = magnitude;
+            SC_LOG("puppet: max health here %.0f, theirs %.0f -- %s", puppet_max,
+                   vitals.max_health,
+                   magnitude <= 1.f
+                       ? "agreed, so the age write reached the stats derived from it"
+                       : "still YOURS, so age alone does not drive it and their bar is wrong");
+        }
     }
 
     if (vitals.is_down == g_peer_was_down) return;  // only on transitions
