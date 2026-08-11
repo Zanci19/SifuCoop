@@ -70,6 +70,32 @@ bool VerifyGameBuild(HMODULE game, uintptr_t base) {
 
     SC_LOG("guard: build '%s' matched. image base = 0x%llX", build,
            static_cast<unsigned long long>(base));
+
+    // How many entries in THIS build's table are zero.
+    //
+    // Adding a symbol regenerates the table for whichever game folder build.ps1
+    // was pointed at, and only that one. The other machine keeps an older table
+    // in which the new entries are zero, every call through them silently does
+    // nothing, and the feature looks broken on exactly one side. That is not
+    // hypothetical: the two callbacks that make a body fall over were resolved
+    // on Epic and zero on Steam, so corpses stood up for the joining player and
+    // nowhere else, and it cost a full test round to find. One number at startup
+    // makes it obvious.
+    for (const auto& entry : offsets::kBuilds) {
+        if (_stricmp(entry.name, build) != 0) continue;
+        int missing = 0;
+        for (std::uint32_t value : entry.values) {
+            if (value == 0) ++missing;
+        }
+        if (missing > 0) {
+            SC_LOG("guard: %d of %d offsets are MISSING from the '%s' table -- regenerate it "
+                   "on this machine (build.ps1 -GameDir <this game folder> -LocalBuildName %s) "
+                   "or those features will silently do nothing here",
+                   missing, static_cast<int>(sizeof(entry.values) / sizeof(entry.values[0])),
+                   build, build);
+        }
+        break;
+    }
     return true;
 }
 

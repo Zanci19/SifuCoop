@@ -59,6 +59,8 @@
     "UCharacterHealthComponent_Get": 25805264,
     "UCharacterHealthComponent_InternalSetDownState": 25833968,
     "UCharacterHealthComponent_IsDown": 25836448,
+    "UCharacterHealthComponent_OnCharacterStandsUp": 25845520,
+    "UCharacterHealthComponent_OnRepSetIsDown": 25849440,
     "UCharacterHealthComponent_SetIsDown": 25871488,
     "UCharacterHealthComponent_StaticClass": 27755200,
     "UCharacterMovementComponent_RequestDirectMove": 52518016,
