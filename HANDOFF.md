@@ -898,3 +898,128 @@ Meanwhile a dead player now hands the room over with the peer-aggro lease that a
 (`targets: you are down -- handed N enemies to your partner`). No ticket, no `BPF_ForceEnemy`,
 so it steers them without permission to swing -- and if the roles census still reads
 `direct=0` while that line is in the log, the ticket is conclusively the only blocker left.
+
+---
+
+## 19. HANDOFF TO THE NEXT AGENT — 2026-08-11, end of session
+
+Read §14 first, then this. §14 is the discipline; this is what happens when you ignore it.
+
+### The state you are inheriting
+
+Deployed to **both** machines and committed through `7286de8`. Two things are ON for the first
+time and **have never been tested together**:
+
+- `director_targets_partner=1` — registers the partner with `AAIDirectorActor` as a combat
+  target. Ran in a live session, logged, did not crash. Did not change the roles line by itself.
+- `force_enemy_engage=1` — was disabled for a week after crashing. Re-enabled because the
+  prerequisite it was missing now exists (see below).
+
+**The very first thing to do is read both logs and find out whether that pair worked or
+crashed.** Everything else is secondary. If it crashed, `force_enemy_engage=0` in both inis
+stops it without a rebuild.
+
+### The finding that matters most
+
+There are **two separate target fields**, and the two census lines each read one:
+
+| line | reads | written by |
+|---|---|---|
+| `targets:` | the **attack component's** target | `g_set_attack_target` — set correctly for weeks |
+| `roles:` | the **AI's own enemy** (`ReadAIEnemy`) | `ForceEnemy` only — which was switched off |
+
+Every targeting fix in this project moved `targets` to the partner while permission stayed with
+the host. Enemies walked over to the partner and stood there. **Aim without permission.** That
+is one cause behind "enemies can't hit my partner", "they won't attack the peer", and "they keep
+hitting the dead host".
+
+Only a `DirectOpponent` may swing. Roles come from a ticket manager `AAIDirectorActor` keeps
+**per target**, and nothing had ever asked it to keep one for the puppet — which is also why
+`ForceEnemy` crashed: it handed out a ticket for a target with no manager, so
+`RemoveActorFromSystems` walked a null on the next death. Registering the target creates the
+bookkeeping; `ForceEnemy` puts the enemy into it. **Neither half does anything alone.**
+
+### Still broken, with what is known
+
+1. **Enemy hurt/push/stagger animations do not appear on the observing machine.**
+   `USCAnimInstance::m_CachedCurrentPoseAsset` (offset `0x390`) holds a **`UPoseAsset`** during a
+   reaction. `PlaySlotAnimationAsDynamicMontage` — the Cinematic-slot path that works for
+   attacks — takes a `UAnimSequenceBase`. `UPoseAsset` is not one. Feeding it one corrupted the
+   heap. That route is closed by type, not by tuning.
+
+   **Caveat that has not been checked: nobody has confirmed `m_CachedCurrentPoseAsset` is the
+   reaction.** It was sampled during a reaction window and was non-null. It may be non-null
+   always. Check that before building on it.
+
+   Four routes, ranked, all fold-checked and real:
+   - `AFightingCharacter::BPF_LaunchImpact(float, bool, float)` @ epic `019B5070` — **best
+     candidate.** Three scalars, no structs, no pointers. Would make the observing machine
+     generate a real impact so the enemy picks its own reaction locally. Parameters unknown;
+     sweep them on one enemy with logging rather than guessing.
+   - `UGuardDB::BPF_GetHittedGuardAnim(EQuadrantTypes, ESCCardinalPoints, EHeight)` @ `01950160`
+     returns a real `UAnimSequence*`. Safe, plays through the existing proven path — but covers
+     **guard/deflect only**, not clean hits.
+   - `UHittedAnimHelper::BPF_MakeGenericHitAnim(FHittedAnimContainer&, ...)` — covers unguarded
+     hits, which is what is actually wanted, but it is struct-by-reference. Dump the layout from
+     the PDB offline first. Do not probe it live.
+   - `BPF_GenerateFakeImpact` / `BPF_GenerateForeignImpact` — the 1104-byte `FHitRequest` wall.
+     Leave it alone.
+
+2. **Enemies do not damage the partner.** Should follow from the targeting fix. If roles now
+   read non-zero and he still takes nothing, note that **there is no wire message for "the puppet
+   was hit"** — damage to the puppet on one machine is never reported to the machine that owns
+   that player. `SendEnemyDamage` is the model to copy.
+
+3. **Costume/age appearance.** Age writes work and the model rebuild works (`aged to 45 and the
+   model was rebuilt (OnStatsUpdated)`). The same number is read on one machine and written on
+   the other, so both bodies should carry the same value. Owner still reports it looking wrong —
+   **verify against the log before assuming it is broken.** Note `BPF_GetCharacterAge` returned
+   45 on one machine and 1–3 on the other; whether that is the displayed age or a counter has
+   never been established.
+
+### Mistakes made this session. Do not repeat them.
+
+- **Scanned an order object for `UObject` pointers and called `GetPathName` on the hits.**
+  Crashed on the first punch. `LooksLikeUObject` proves *shape*, not identity, and `GetPathName`
+  walks the Outer chain of whatever it gets. Worse: the log already printed `uobjects=0` for
+  every order, so the scan could never have worked. **The evidence was there before the code
+  was written.**
+- **Matched a field by name and shipped it without checking its type.** `m_CachedCurrentPoseAsset`
+  → montage slot → heap corruption. There is now `ue::ObjectClassIs`; use it on anything read
+  from a raw field before handing it to the engine.
+- **Wrote peer state onto the local player.** `ApplyPeerVitals` has carried a guard against
+  exactly that since it was written, and two new writes were added next to it without copying
+  the guard. `IsSafeToDress` now exists — use it for anything aimed at the puppet.
+- **Trusted three confidently-worded negatives in this document that were never verified.**
+  `BPF_ServerChangeRelationship` "is a no-op" (the setter is real; the *reader* was wrong —
+  there are two different `BPF_GetRelationship` functions, one on the actor and one on the
+  component that owns the map). `USCAnimInstance` "has no current-action asset" (it has
+  `m_CachedCurrentPoseAsset`). If this file states something does not exist, **re-check it.**
+
+### Techniques worth reusing
+
+- **Symbol-count fold check before building on any function** (§14). One `awk` line.
+  `awk -F'\t' '$1=="019B5070"' research/wf-attacksel/allsyms.tsv | wc -l` — 1 is real, tens of
+  thousands means ICF collapsed an empty body.
+- **Enum names come out of the exe**, as contiguous `EName::Value\0` runs. This produced
+  `EOrderType` (72 entries — hit reaction is type **3, `Hitted`**), `ERelationshipTypes`,
+  `EGlobalBehaviors`, `ESCAICombatRolesChangeReason`. Grep the exe with a regex; it takes
+  seconds and removes all guessing about magic numbers.
+- **Member offsets come from the PDB** via `WANTED_MEMBERS` in `tools/pdbdump/pdbdump.py`.
+  Do not hardcode struct offsets.
+- **Adding any symbol means regenerating BOTH offset tables.** `build.ps1` only regenerates for
+  the game folder it was pointed at; the other build silently keeps zeros and the feature dies
+  on exactly one machine. Verify with a script that both entries are non-zero before shipping.
+  Deployed dlls should differ only in build-stamp bytes (offsets 137-138, 217-218, and the debug
+  directory copy).
+
+### How to work on this
+
+Read both logs before theorising — the joiner's is readable from the host at
+`Z:\Users\Zanci19\AppData\Local\Sifu\Saved\Logs\SifuCoop.log`. Every real fix this session came
+from a log line and every guess cost a test round, two of which were crashes in the owner's
+session. When a measurement and the thing it measures disagree, suspect the measurement: that is
+how both the relationship bug and the two-target-fields bug were finally found.
+
+Change one risky thing per run. The owner is testing manually across two machines and cannot
+tell which of four changes caused a result.
