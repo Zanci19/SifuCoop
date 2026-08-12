@@ -226,15 +226,26 @@ void DrawPlayTab(const MenuStatus& status) {
             PostRequests(r);
         }
         ImGui::Checkbox("Always join automatically", &coop::Get().auto_join_level);
-    } else if (status.hosting && !status.together) {
+    } else if (status.hosting) {
+        // ALWAYS offered while hosting, never hidden behind `together`.
+        //
+        // `together` only means both players are in the same level package, and
+        // two people sitting in their own saved hideout satisfy that before
+        // co-op has been started at all. Gating the button on it made the button
+        // vanish exactly when it was needed: connected, same level, and no way
+        // to start. And because the invite is what sets g_coop_started, nothing
+        // spawned either body, so the two symptoms -- cannot invite, cannot see
+        // each other -- were one cause.
         ImGui::Spacing();
         if (ImGui::Button("Start co-op here", ImVec2(200, 0))) {
             MenuRequests r;
             r.invite_peer = true;
             PostRequests(r);
         }
-        ImGui::TextColored(dim, "Invites your partner into the level you are in.");
-    } else if (!status.together) {
+        ImGui::TextColored(dim, status.together
+                                    ? "Your partner is in this level. Press to begin co-op."
+                                    : "Invites your partner into the level you are in.");
+    } else {
         ImGui::Spacing();
         ImGui::TextColored(dim, "Waiting for the host to start co-op.");
     }
