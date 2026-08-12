@@ -1,101 +1,49 @@
 # SifuCoop — complete handoff
 
-## 0. Latest tested result (2026-08-11)
+## 0. Latest state — 2026-08-12, stabilization pass
 
-- `force_enemy_engage=1` + `director_targets_partner=1` is UNSAFE. One fight
-  produced non-zero partner roles, but the next run crashed both machines as
-  soon as each player traversed a table. Both crash stacks are identical:
-  `FWeakObjectPtr::IsValid` (reading `0x24c`) ->
-  `FAICombatRoleTicketManager::RequestEvaluation` ->
-  `AAIDirectorActor::ReditributeCombatRolesForAllTarget`. Traversal only caused
-  a global behavior broadcast; it exposed the custom puppet-target manager.
-- The crash happened with `dmg out=0 in=0`, before the fake-impact experiment
-  could run. Do not blame `BPF_LaunchImpact` for this crash.
-- Partner damage remains OPEN. Earlier local-player `Hitted` orders proved that
-  one local simulation registered hits, but did not prove the reported
-  host-to-peer direction or that attacks against the spawned puppet reach the
-  owning player. The owner's phase-through/no-damage report is authoritative.
-- `real_second_player=1` is also a FAILED/settled dead end. At 19:42:52 on both
-  machines, `CreatePlayer` made controller 1 but gave it the exact pawn already
-  owned by controller 0. The repair returned player one's pawn, spawned another
-  clone, and possessed that clone. The owner then saw the old "Where's your
-  sifu" / "what's that noise" placeholder state and neither player was properly
-  in gameplay. This was not actually untried: `player2.cpp` has comments and
-  repair code derived from the same live failure in commit `ba96685` (2026-08-09).
-- The corrected director-candidate build was tested from 20:50-20:52 without a
-  crash and is now the accepted baseline. When the host died at 20:51:28 the
-  host logged `you are down -- handed 4 enemies to your partner`; repeated
-  target censuses then read `0 enemies on YOU, 4 on the second player`. This
-  run fixes the corpse-target handoff. Keep `director_targets_partner=1` and
-  `force_enemy_engage=0`; the forced-engage pair remains unsafe.
-- A separate remote resurrection presentation bug was isolated from that run.
-  The owner saw the peer fall normally but later snap upright. The host sent
-  the real `MC_man_barehands_resurrect_faceup` sequence at 20:51:36.679; the
-  joiner resolved and started it at 20:51:36.651, but did not receive/apply the
-  authoritative `down=false` edge until 20:51:40.210. Extracted
-  `DeathDB_MC.json` confirms that asset is the configured face-up stand
-  sequence and its JSON marks it as root-motion. Native disassembly confirms
-  Sifu deliberately leaves `m_bIsDown` set throughout the sequence and clears
-  it in `UCharacterHealthComponent::OnCharacterStandsUp` at the end. Our
-  Cinematic slot was masked by the full-body Down branch for that whole window,
-  so the montage ran invisibly and the final state edge snapped the body up.
-- The 21:04 build releases only the puppet's local presentation down-state
-  immediately before a player `/Death/...resurrect_...` sequence, then keeps
-  the authoritative edge bookkeeping untouched. It is deployed on Epic and
-  Steam but still needs the owner's two-machine death/resurrection test. Success
-  logs `puppet: released local down state for the incoming resurrection sequence`.
-- The corrected director call passes each enemy as the ticket candidate rather
-  than retrying the old call unchanged. Fold count is 1 for every function
-  involved. Disassembly proves
-  `RegisterOrRemoveFromCombatRoleTicketManagerForTarget` executes
-  `SetTarget(manager, target)` then `AddCandidate(manager, fourth_argument)`.
-  The crashing build passed `partner` for both, so the partner became a candidate
-  in its own manager. The corrected build passes each live enemy as the fourth
-  argument and tears down with `(partner target, enemy candidate)` in the native
-  order. The exact `0x24c` crash also proves RequestEvaluation's manager `this`
-  was null: its first operation accesses `this+0x248`.
-- The 21:45 enemy-action authority build was tested from 21:49-21:52 without a
-  crash. `OwnedEnemy` leases handed the correct enemies to the joiner, stopped
-  the matching host brains, and restarted them on expiry. Enemy `OrderEvent`s
-  and exact attack sequences flowed in both directions. This proves the split
-  authority channel works. Native attack replay is not reliable, however: the
-  host launched 19 of 50 remote requests and rejected 31 during selection; the
-  joiner rejected all 34. Observer presentation still has the exact cosmetic
-  sequence as a usable path and should not depend on native hitbox replay.
-- That same run exposed a separate concrete transport bug: one joiner send was
-  delivered to the host as many as six times in 17 ms. `Snapshot` and damage
-  packets already rejected repeated per-type sequence numbers, but
-  `QueueOrder` and `HandleMontage` did not. Those repeats can restart the exact
-  enemy animation several times and make observer attacks look unrelated or
-  mistimed. The 22:04 build adds strictly-newer sequence checks for both event
-  types, resets them with peer state, and is deployed to Epic and Steam but
-  untested. It is the only risky change in this build. Expected result: one
-  sender `orders: enemy` / cosmetic-sequence line produces exactly one matching
-  receiver replay line.
-- `client_simulates_enemies` now defaults OFF. Only enemies actually claimed by
-  the joiner through `peer_fights_locally` keep a joiner brain; an `OwnedEnemy`
-  lease stops the host copy's brain. Host-owned and peer-owned attack events
-  both cross the wire. This run intentionally does not enable the separate
-  hit-reaction experiment.
-- Deployed test config on both machines: `director_targets_partner=1`;
-  `real_second_player=0`, `force_enemy_engage=0`, and `mirror_hit_reactions=0`.
-- The reaction experiment remains compiled but disabled. When
-  enabled later, peer damage reaching a still-living enemy on the host calls
-  `BPF_LaunchImpact(damage=0, lethal=false, stun=0.25)`. The PDB names those
-  parameters exactly and disassembly proves the unfolded function calls
-  `UHitComponent::LaunchFakeImpact`.
+**Deployed to both machines, protocol 17, commit `6ce8ade`. Not yet play-tested.**
+Read section 10 before changing anything, and both logs before theorising.
 
-- Current owner-reported open bugs: enemy attacks may still phase through/do no
-  damage to the peer; remote enemy hurt/push/stagger is absent; each machine's
-  puppet shows its local age and costume; the corpse handoff worked in one run;
-  plus the remaining issues below.
+Fixed and deployed in this pass:
 
-Self-contained brief for an agent picking this project up cold. `HANDOFF.md` is the long-form
-history (19 sections); this is everything you need to start without reading it. When the two
-disagree, trust this file — and see "Do not trust unverified negatives" below, because several
-confident claims in `HANDOFF.md` turned out to be wrong.
+| symptom | cause | fix |
+|---|---|---|
+| Restart crashed both machines | two use-after-frees: cached UObjects survived a UWorld swap; a destroyed puppet was still registered with the combat director | world-change cache invalidation before any subsystem reads, plus release-while-live on despawn |
+| Two Sifu processes hooked at once | nothing prevented a second launch; the second failed its UDP bind and stayed half-active | kernel process guard held for the lifetime of the process, checked by the launcher too |
+| Peer-killed enemies stood motionless | the host restarted the dead enemy's brain 0.1–0.5 s after the kill, aborting the fall | a corpse never regains its brain on lease expiry |
+| Attacks replayed up to six times | `QueueOrder`/`HandleMontage` accepted duplicate sequence numbers | strictly-newer check per event type |
+| An attack could be stored as a death animation | the wire carried the UObject type but not the event's meaning | `AnimationSemantic` on the packet; only `Death` seeds the death ledger |
+| Enemies chasing the host **slid** | presentation velocity was written during the game tick; the movement component then braked a body with no input before the graph sampled it | re-published inside the enemy animation update, at the pre-evaluation boundary — the same fix the remote player already had |
+| Hit timing disagreed between screens | `OrderFreezeFrame` (33× in one measured fight) was never replicated | `AActor::CustomTimeDilation` travels with enemy state, clamped at every hop |
+| Observer never saw enemies react | the zero-damage impact probe ran on the host only | the same probe now runs on the client's authoritative health decrease |
+| Invitations looked ignored | Join lived inside a menu the receiver had no reason to open; no decline, no reply | on-screen banner, Accept/Decline, `InviteReply` packet carrying the id it answers |
+| Permanent "friendly fire" warning; dead GUI controls | — | removed; menu input is now shared with the game by default (`menu_exclusive_input` opts into capture) |
 
----
+**Do not enable `force_enemy_engage` or `director_targets_partner`.** Together they crashed
+both machines in the director's weak-object bookkeeping (`FWeakObjectPtr::IsValid` reading
+`0x24c`, via `RequestEvaluation` -> `ReditributeCombatRolesForAllTarget`, triggered by an
+ordinary traversal). They are forced off at config load as well as being `0` in both inis. The
+corpse-target handoff they were reached for is now covered by `retarget_from_down_peer`, which
+uses the existing peer-aggro lease and never touches ticket bookkeeping.
+
+`real_second_player=1` is a settled dead end: `CreatePlayer` makes controller 1 but Sifu's
+game mode hands it player zero's existing pawn, and the repair leaves both players out of
+normal gameplay. See `player2.cpp`.
+
+Still open, and honest about it:
+
+- **Partner damage.** Whether enemies can hurt the joiner at all is unproven. The measured
+  blocker is that no enemy is ever allocated a combat role toward the partner (section 5), and
+  the only call that grants one is the unsafe pair above. If reactions and corpses now work and
+  the partner still takes nothing, note that **there is no wire message for "the puppet was
+  hit"** — damage dealt to a puppet is never reported to the machine that owns that player.
+  `SendEnemyDamage` is the model to copy.
+- **Hurt animations** depend on `BPF_LaunchImpact` doing what its PDB parameter names say. The
+  function is real and unfolded and the 12-byte frame is correct, but it has never run in a
+  live session. `mirror_hit_reactions=0` disables it without a rebuild.
+- **`m_CachedCurrentPoseAsset` is a `UPoseAsset`**, not an `AnimSequence`, and the montage slot
+  cannot play it. Both send and receive now type-gate; do not remove those gates.
 
 ## 1. What this is
 
@@ -228,9 +176,13 @@ Each of these cost a round or more. All are verified.
    and nothing else does.
 6. **`OpenLevel`'s `Options` parameter is by value and the callee frees it.** A stack buffer
    crashes the allocator.
-7. **`BPF_ForceEnemy` alone crashes** in `AAIDirectorActor::OnDeathDetected` → 
-   `RemoveActorFromSystems` → `AddRemoveCandidate`, reading 0x108, when anything dies. The cause
-   is now understood — see §5 — and the fix is deployed but untested.
+7. **The whole director-ticket route is unsafe and is switched off in code.** `BPF_ForceEnemy`
+   alone crashes in `AAIDirectorActor::OnDeathDetected` -> `RemoveActorFromSystems` ->
+   `AddRemoveCandidate` (0x108) when anything dies. Registering the partner as a target first
+   fixes *that* crash and moves the fault later: with both enabled, an ordinary traversal
+   broadcast crashed both machines in `FWeakObjectPtr::IsValid` (0x24c) via
+   `RequestEvaluation` -> `ReditributeCombatRolesForAllTarget`. Section 5 explains what the
+   pair was reaching for; section 0 says what replaced it.
 
 ---
 
@@ -264,25 +216,32 @@ takes no damage, enemies ignore the partner, and enemies keep hitting a dead hos
 It also explains the `BPF_ForceEnemy` crash: it handed out a ticket for a target the director had
 no manager for, so removal on death walked a null.
 
-**The fix is two halves, and neither does anything alone:**
+**The two-halves theory was right about the mechanism and wrong about the cost.**
 
-- `AAIDirectorActor::RegisterOrRemoveFromCombatRoleTicketManagerForTarget(partner, Alerted,
-  partner)` creates the ticket manager. Implemented as `MaintainPartnerAsDirectorTarget` in
-  `enemies.cpp`, gated by `director_targets_partner`. **Verified live: runs, logs, does not
-  crash.** Did not change the roles line by itself.
-- `ForceEnemy(ai_fighting, partner, Alerted)` puts the enemy into it. Gated by
-  `force_enemy_engage`, disabled for a week after its crash, **re-enabled now that the
-  prerequisite exists.**
+- `AAIDirectorActor::RegisterOrRemoveFromCombatRoleTicketManagerForTarget` creates the ticket
+  manager (`MaintainPartnerAsDirectorTarget`, gated by `director_targets_partner`). It runs and
+  logs without crashing, and does not change the roles line by itself.
+- `ForceEnemy(ai_fighting, partner, Alerted)` puts the enemy into it, gated by
+  `force_enemy_engage`. Together they **did** produce non-zero partner roles -- the theory holds.
 
-**Both are ON and have never been tested together. Your first job is to read both logs and find
-out whether that pair worked or crashed.** If it crashed, `force_enemy_engage=0` in both inis
-stops it without a rebuild. The line that decides it:
+Then both machines crashed on an ordinary traversal: `FWeakObjectPtr::IsValid` reading `0x24c`
+inside `RequestEvaluation` -> `ReditributeCombatRolesForAllTarget`. A traversal only triggers a
+global behaviour broadcast; it walked the custom puppet-target manager and found a dead weak
+pointer. That manager cannot survive Sifu's own periodic redistribution, and the redistribution
+is not something the mod can avoid provoking.
 
-```
-roles: fighting your partner direct=? ...
-```
+**So both switches are `0` and are additionally forced off at config load.** Do not re-enable
+them to "try again" -- that exact pair is what crashes, and the crash is in engine bookkeeping
+this mod does not own.
 
-Non-zero means it worked.
+What it means for partner damage: **the mechanism is understood and the safe route is still
+unknown.** Any future attempt needs the partner to be a body the director can account for on its
+own terms, which `real_second_player` was supposed to provide and does not (section 0). Do not
+spend another round on the ticket manager itself.
+
+The corpse half of the problem -- enemies beating a dead player instead of switching to the
+survivor -- is solved separately and safely by `retarget_from_down_peer`, which reuses the
+existing peer-aggro lease and never touches ticket bookkeeping.
 
 ---
 
@@ -428,34 +387,29 @@ regenerate both tables, use `offsets::M_Class_field`.
 
 ---
 
-## 9. Current config (both machines, identical)
+## 9. Current config (both machines, identical unless noted)
 
 ```
-mode=host|client  port=7777  snapshot_hz=60  interp_delay_ms=60
+mode=host | client      port=7777   snapshot_hz=60   interp_delay_ms=60
 sync_enemies=1  suppress_client_ai=1  sync_enemy_vitals=1  report_damage=1
 mirror_peer_vitals=1  echo_enemy_attacks=1  echo_player_attacks=0
-remote_player_attacks=1  sync_montages=1  mirror_hit_reactions=0
-client_simulates_enemies=0  peer_fights_locally=1
-puppet_invincible=0        <- was an invincible decoy soaking most of the room
-force_enemy_engage=0       <- unsafe with the spawned-clone ticket manager
-director_targets_partner=1 <- corrected enemy-candidate registration; ONLY risky switch
-real_second_player=0       <- failed: CreatePlayer steals player one's pawn
+remote_player_attacks=1  sync_montages=1  peer_fights_locally=1 (compiled default)
+
+client_simulates_enemies=0            one brain per enemy, or you get two attack selectors
+observer_cosmetic_enemy_attacks_only=1  observers present the owner's exact sequence
+sync_enemy_death_animations=1         corpses fall on the observing machine
+retarget_from_down_peer=1             a dead player's attackers go to the survivor
+mirror_hit_reactions=1                zero-damage impact, both directions
+sync_peer_visual_age=1                CharacterAging.UpdateMorphTexAging
+use_engine_outfit_refresh=1           BPF_SwapOutfit's third argument, as Sifu passes it
+menu_exclusive_input=0                GUI and game share input
+puppet_invincible=0
 verbose_enemies=1  verbose_orders=1
+
+force_enemy_engage=0                  UNSAFE -- also forced off in code
+director_targets_partner=0            UNSAFE -- also forced off in code
+real_second_player=0                  settled dead end
 ```
-
-**Do not retry `real_second_player=1` as-is.** Live evidence from both builds:
-
-1. `UGameplayStatics::CreatePlayer` produces a genuine controller 1.
-2. Sifu's single-player game mode assigns controller 1 the pawn already possessed by controller 0.
-3. `ReturnStolenPawnAndRehouse` gives that pawn back, then uses `SpawnPlayerClone` for controller 1.
-4. The result is still a spawned clone, plus the broken placeholder/non-gameplay UI state caused by
-   creating the unsupported second local-player lifecycle.
-
-The old claim that this was untried was false: the repair code was already based on an earlier live
-failure. A viable structural route would need the game mode itself to spawn/initialize a distinct
-second pawn; merely putting a real controller on another clone does not supply that bookkeeping.
-
----
 
 ## 10. How to work on this
 
