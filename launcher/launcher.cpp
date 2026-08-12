@@ -13,10 +13,14 @@
 #include <ws2tcpip.h>
 
 #include <windows.h>
+#include <tlhelp32.h>
 #include <shlwapi.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+
+#include "../src/net/instance_guard.h"
 
 namespace {
 
@@ -57,6 +61,37 @@ void GetIniPath(wchar_t* out, int count) {
 void SetStatus(const wchar_t* text) { SetWindowTextW(g_status, text); }
 
 bool IsHosting() { return SendMessageW(g_host_radio, BM_GETCHECK, 0, 0) == BST_CHECKED; }
+
+bool IsSifuProcessRunning() {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return false;
+
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    bool found = false;
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, L"Sifu.exe") == 0 ||
+                _wcsicmp(entry.szExeFile, L"Sifu-Win64-Shipping.exe") == 0) {
+                found = true;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return found;
+}
+
+bool IsGameProcessReserved() {
+    HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, sifucoop::net::kGameProcessMutexNameW);
+    if (mutex) {
+        CloseHandle(mutex);
+        return true;
+    }
+    // An access-denied result still proves the object exists (for example if
+    // Sifu was launched elevated and this setup window was not).
+    return GetLastError() == ERROR_ACCESS_DENIED;
+}
 
 // Hosting means telling the peer which address to use, and a machine on a VPN
 // has several. ZeroTier hands out 10.x / 172.16-31.x, so those are flagged --
@@ -143,7 +178,15 @@ bool SaveSettings() {
 
     wchar_t port[16] = {};
     GetWindowTextW(g_port_edit, port, 16);
-    if (port[0] == L'\0') wcscpy(port, L"7777");
+    if (port[0] == L'\0') {
+        wcscpy(port, L"7777");
+        SetWindowTextW(g_port_edit, port);
+    }
+    const int port_value = _wtoi(port);
+    if (port_value < 1 || port_value > 65535) {
+        SetStatus(L"Port must be a number from 1 to 65535.");
+        return false;
+    }
 
     wchar_t passphrase[64] = {};
     GetWindowTextW(g_passphrase_edit, passphrase, 64);
@@ -167,6 +210,17 @@ bool SaveSettings() {
 }
 
 void LaunchGame() {
+    // Check the kernel guard first; process enumeration is the fallback during
+    // the short interval before a newly launched DLL reaches Bootstrap.
+    if (IsGameProcessReserved() || IsSifuProcessRunning()) {
+        SetStatus(L"Sifu is already running. Close it before launching another copy.");
+        MessageBoxW(nullptr,
+                    L"Another Sifu process is already running.\n\nClose the existing game "
+                    L"before launching another SifuCoop copy.",
+                    L"SifuCoop already running", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
     if (!SaveSettings()) return;
 
     wchar_t dir[MAX_PATH] = {};

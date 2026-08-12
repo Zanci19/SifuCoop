@@ -30,6 +30,7 @@
     "FName_FromWide": 31961792,
     "GEngine": 99340520,
     "GWorld": 99355112,
+    "M_AActor_CustomTimeDilation": 244,
     "M_AFightingCharacter_AttackComponent": 4872,
     "M_AFightingCharacter_DefenseComponent": 4776,
     "M_AFightingCharacter_HealthComponent": 4944,

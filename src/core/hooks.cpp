@@ -30,6 +30,12 @@ unsigned long long g_frames = 0;
 void OnFrame() {
     ++g_frames;
 
+    // Unreal can replace a UWorld (and every actor in it) between two engine
+    // ticks. Invalidate the puppet and enemy caches before TickEnemies reads
+    // either one. TickEnemies must otherwise remain first because queued enemy
+    // orders need its freshly rebuilt hash table.
+    sifucoop::game::PreparePuppetLifecycle();
+
     // Enemies first. TickPuppet applies the peer's queued orders, and enemy
     // orders are addressed by name hash -- so the table those resolve against
     // must already have been rebuilt for the current level, not still describe

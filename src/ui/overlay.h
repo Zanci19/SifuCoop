@@ -47,6 +47,7 @@ struct MenuRequests {
     bool despawn_puppet = false;
     bool invite_peer = false;     // pull the peer into the level we are in now
     bool accept_invite = false;   // joiner: take the host up on their standing invite
+    bool decline_invite = false;  // joiner: say no, and tell the host so
     bool teleport_to_peer = false;  // stand where the other player is standing
     bool save_config = false;     // persist the toggles to SifuCoop.ini
     bool restart_network = false; // restart the configured UDP session
@@ -85,6 +86,10 @@ struct MenuStatus {
     // The host has offered a level and the joining player has not taken it yet.
     bool invite_pending = false;
     char invite_level[128] = {};
+    // The host's view of the answer, so pressing Invite is a conversation
+    // rather than a guess. Cleared after it has been shown for a few seconds.
+    bool invite_answer_valid = false;
+    bool invite_answer_accepted = false;
     // Sifu confirms the two players are marked friendly to each other, which is
     // the gate on the remote player's attacks being replayed at all.
     bool friendly_confirmed = false;

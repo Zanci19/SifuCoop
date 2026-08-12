@@ -25,6 +25,12 @@ void InitEnemies(std::uintptr_t module_base);
 // Called each frame from the tick hook.
 void TickEnemies();
 
+// Lifecycle notifications from the puppet owner. A world change can only
+// forget cached objects; destroying a still-live puppet may first unregister
+// it from the current world's combat director.
+void ForgetEnemyWorldObjects();
+void NotifyPuppetWillBeDestroyed(ue::UObject* puppet);
+
 // Resolves an enemy by the id used on the wire. Null when this machine has no
 // such enemy, which is normal for a moment after a level loads.
 ue::UObject* FindEnemyByHash(std::uint32_t hash);
@@ -54,6 +60,12 @@ void NoteEnemyDeathAnimation(std::uint32_t hash, ue::UObject* animation);
 // (peer_fights_locally). Its attacks are real and local, so the host's echoed
 // copy of them must be dropped rather than played on top.
 bool EnemyRunsLocalBrain(std::uint32_t hash);
+
+// True only on the machine that owns this enemy's attack decisions. Host-owned
+// enemies are authoritative on the host; peer-owned enemies are authoritative
+// on the joiner. The observer must replay their OrderEvent and must not run a
+// second private selector.
+bool EnemyActionsAreLocallyAuthoritative(std::uint32_t hash);
 
 // Everything Sifu's own AI attack launcher needs for one replicated swing.
 // `target` is the joining machine's body corresponding to the host's selected

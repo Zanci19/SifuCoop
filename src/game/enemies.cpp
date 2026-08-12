@@ -172,6 +172,7 @@ struct Tracked {
 
 Tracked g_tracked[net::kMaxTrackedEnemies];
 int g_tracked_count = 0;
+bool g_announce_empty_ownership = false;
 
 // The world the tracked actor pointers belong to. A level change frees every
 // one of them, and the hooks that look enemies up (the attack hook especially)
@@ -512,20 +513,25 @@ void RegisterEnemyTargetable(ue::UObject* actor) {
     if (targetable) g_register_targetable_actor(targetable);
 }
 
-// Map the host's target to the equivalent body on the joining machine. The host
-// player is represented by this client's puppet, while the host's remote-player
-// body is represented by this client's physical player.
+// Map a player identity from the wire to the equivalent body on this machine.
+// On the joiner, the host is the puppet and the peer is the physical player.
+// On the host those identities are the other way around. This used to assume
+// it only ran on the joiner; bidirectional enemy action ownership makes the
+// host an observer for peer-owned enemies too.
 bool ApplyMirroredTarget(Tracked& entry, std::uint8_t flags) {
     flags &= kEnemyTargetMask;
     entry.host_target_flags = flags;
     if (flags == 0 || (flags == kEnemyTargetMask) || !entry.attack_component) return false;
 
     ue::UObject* world = ue::GetWorld();
+    ue::UObject* local = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
+    ue::UObject* remote = GetPuppet();
+    const bool on_host = net::GetRole() == net::Role::Host;
     ue::UObject* desired = nullptr;
     if (flags == net::kEnemyTargetsHost) {
-        desired = GetPuppet();
-    } else if (world) {
-        desired = ue::GetPlayerCharacter(world, 0);
+        desired = on_host ? local : remote;
+    } else {
+        desired = on_host ? remote : local;
     }
     if (!desired) return false;
 
@@ -554,7 +560,7 @@ bool ApplyMirroredTarget(Tracked& entry, std::uint8_t flags) {
 
     entry.mirrored_target = desired;
     SC_LOG("targets: %s mirrored to %s", entry.name,
-           flags == net::kEnemyTargetsHost ? "host puppet" : "local player");
+           desired == local ? "local player" : "remote puppet");
     return true;
 }
 
@@ -582,13 +588,19 @@ bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
     // director cannot fully account for takes the room out of combat rather
     // than sharing it.
     //
-    // ...and the prerequisite that note asked for now exists, so it is ON.
+    // ...and the prerequisite that note asked for was implemented as the
+    // experiment below. It is now OFF: the combined path allocated roles once,
+    // then crashed both machines during later all-target redistribution.
     //
-    // "The right form of this needs the puppet to be a legitimate director
-    // candidate first, not a ticket forced onto one." That was the correct
-    // diagnosis and it has now been acted on: MaintainPartnerAsDirectorTarget
-    // registers the partner through the director's own front door, and a live
-    // session confirmed it runs without crashing.
+    // Disassembly after that crash found the argument error. The director method
+    // calls SetTarget(manager, target), then AddCandidate(manager, fourth arg).
+    // The old call passed the partner as BOTH arguments, putting the partner in
+    // its own candidate list instead of putting enemies there. RequestEvaluation
+    // later received a null manager (`this + 0x248` produced the exact 0x24c
+    // fault address). MaintainPartnerAsDirectorTarget now registers each live
+    // enemy as the candidate; this ForceEnemy path remains a separate, disabled
+    // experiment.
+    //
     //
     // Why BOTH halves are needed, which took far too long to see. There are two
     // separate fields and the two census lines read one each:
@@ -677,6 +689,13 @@ constexpr std::uint8_t kRoleChangeScript = 2;
 
 ue::UObject* g_registered_partner = nullptr;
 ue::UObject* g_registered_with_director = nullptr;
+ue::UObject* g_registered_world = nullptr;
+
+void ClearDirectorRegistration() {
+    g_registered_partner = nullptr;
+    g_registered_with_director = nullptr;
+    g_registered_world = nullptr;
+}
 
 ue::UObject* FindDirector() {
     if (!g_get_all_actors || !g_director_class) return nullptr;
@@ -689,15 +708,31 @@ ue::UObject* FindDirector() {
 
 // Not optional. An unregistered teardown is the crash quoted above.
 void ReleasePartnerFromDirector() {
-    if (!g_registered_partner || !g_registered_with_director) return;
-    if (g_director_remove_for_target && ue::IsValidObject(g_registered_with_director) &&
-        ue::IsValidObject(g_registered_partner)) {
-        g_director_remove_for_target(g_registered_with_director, g_registered_partner,
-                                     g_registered_partner);
-        SC_LOG("director: released your partner as a target");
+    if (!g_registered_partner || !g_registered_with_director) {
+        ClearDirectorRegistration();
+        return;
     }
-    g_registered_partner = nullptr;
-    g_registered_with_director = nullptr;
+
+    // Kismet IsValid is not a guard for an arbitrary cached pointer: invoking
+    // it already dereferences the UObject. The 22:11 restart crash was exactly
+    // this call receiving a puppet destroyed on disconnect. Only call the
+    // native while every pointer is explicitly owned by the current world.
+    const bool current_registration =
+        g_registered_world && g_registered_world == ue::GetWorld() && TrackingIsCurrent();
+    if (current_registration && g_director_remove_for_target) {
+        int removed = 0;
+        for (int i = 0; i < g_tracked_count; ++i) {
+            ue::UObject* candidate = g_tracked[i].actor;
+            if (!candidate) continue;
+            // The native order is (manager target, candidate), as confirmed by
+            // RemoveActorFromCombatRolesForTarget's GetTicketManager/RemoveCandidate calls.
+            g_director_remove_for_target(g_registered_with_director, g_registered_partner,
+                                         candidate);
+            ++removed;
+        }
+        SC_LOG("director: released your partner target and %d enemy candidates", removed);
+    }
+    ClearDirectorRegistration();
 }
 
 void MaintainPartnerAsDirectorTarget(ue::UObject* partner) {
@@ -715,8 +750,7 @@ void MaintainPartnerAsDirectorTarget(ue::UObject* partner) {
     if (world != seen_world) {
         seen_world = world;
         world_settled_at = now;
-        g_registered_partner = nullptr;  // that world's director went with it
-        g_registered_with_director = nullptr;
+        ClearDirectorRegistration();  // that world's director went with it
         return;
     }
     if (now - world_settled_at < 5000) return;
@@ -742,14 +776,25 @@ void MaintainPartnerAsDirectorTarget(ue::UObject* partner) {
         return;
     }
 
-    g_director_register(director, partner, kGlobalBehaviorAlerted, partner);
+    int candidates = 0;
+    for (int i = 0; i < g_tracked_count; ++i) {
+        Tracked& entry = g_tracked[i];
+        if (!entry.active || !entry.actor || !ue::IsValidObject(entry.actor)) continue;
+        // Native semantics: target=the actor being fought, fourth argument=the
+        // hostile candidate eligible for a role against that target.
+        g_director_register(director, partner, kGlobalBehaviorAlerted, entry.actor);
+        ++candidates;
+    }
+    if (candidates == 0) return;
     if (g_director_redistribute) g_director_redistribute(partner, true, kRoleChangeScript);
 
     if (partner != g_registered_partner || director != g_registered_with_director) {
         g_registered_partner = partner;
         g_registered_with_director = director;
-        SC_LOG("director: registered your partner as a combat TARGET -- the roles line should "
-               "stop reading all zeros for 'fighting your partner'");
+        g_registered_world = world;
+        SC_LOG("director: registered your partner as a combat TARGET with %d enemy candidates "
+               "-- the roles line should stop reading all zeros for 'fighting your partner'",
+               candidates);
     }
 }
 
@@ -1034,6 +1079,41 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
 
 // --- HOST -------------------------------------------------------------------
 
+// A replicated health decrease has no FHitRequest on this machine, so
+// BPF_ApplyDamage changes the number without starting the victim's hit order.
+// AFightingCharacter::BPF_LaunchImpact is the small, Blueprint-facing way back
+// into that state machine.  Its exact reflected parameter names come from the
+// shipped PDB: (_fDamage, _bLethal, _fStunTime).
+//
+// Damage stays zero deliberately.  The cumulative damage ledger immediately
+// below is authoritative and has already applied the real delta; charging it a
+// second time here would both double the hit and feed a phantom delta back to
+// the host.  0.25 s is the conservative 15-frame stun used by the extracted
+// Grunt hit-box data.  A failure to resolve the UFunction is harmless and is
+// named in the log.  mirror_hit_reactions=0 disables this probe without a
+// rebuild.
+bool LaunchReplicatedImpact(Tracked& entry, float replicated_delta) {
+    if (!coop::Get().mirror_hit_reactions || !entry.actor) return false;
+
+    struct Params {
+        float fDamage = 0.f;
+        bool bLethal = false;
+        std::uint8_t padding[3] = {};
+        float fStunTime = 0.25f;
+    } params;
+    static_assert(sizeof(Params) == 12, "BPF_LaunchImpact parameter layout changed");
+
+    const bool launched = ue::CallFunction(entry.actor, L"BPF_LaunchImpact", &params);
+    static unsigned int attempts = 0;
+    if (++attempts <= 8 || coop::Get().verbose_enemies) {
+        SC_LOG("reaction: replicated %.1f damage on %08X '%s' -- zero-damage fake impact %s "
+               "(stun=%.2f)",
+               replicated_delta, entry.hash, entry.name, launched ? "LAUNCHED" : "UNAVAILABLE",
+               params.fStunTime);
+    }
+    return launched;
+}
+
 void ApplyPeerDamage() {
     net::DamageReport reports[net::kMaxDamagePerPacket];
     const int count = net::GetEnemyDamage(reports, net::kMaxDamagePerPacket);
@@ -1070,6 +1150,7 @@ void ApplyPeerDamage() {
         if (!fighter.health) continue;
         ApplyDamage(fighter, delta);
         *applied = reports[i].total;
+        if (GetHealth(fighter) > 0.5f) LaunchReplicatedImpact(entry, delta);
 
         // BPF_ApplyDamage is a health path: it reaches zero and kills the body,
         // but it never went through the hit that would have chosen a death
@@ -1154,24 +1235,57 @@ void PublishEnemies() {
         Fighter host_fighter = ResolveFighter(host_player);
         const bool host_is_out =
             host_fighter.health && (GetHealth(host_fighter) <= 0.5f || IsDown(host_fighter));
-        static bool announced = false;
-        if (host_is_out) {
+        Fighter peer_fighter = ResolveFighter(peer_player);
+        const bool peer_is_out =
+            peer_fighter.health &&
+            (GetHealth(peer_fighter) <= 0.5f || IsDown(peer_fighter));
+        static bool announced_host_down = false;
+        static bool announced_peer_down = false;
+        if (host_is_out && !peer_is_out) {
             int handed = 0;
             for (int i = 0; i < g_tracked_count; ++i) {
                 Tracked& entry = g_tracked[i];
                 if (!entry.active || !entry.actor) continue;
+                Fighter enemy = ResolveFighter(entry.actor);
+                if (enemy.health &&
+                    (GetHealth(enemy) <= 0.5f || IsDead(enemy))) continue;
                 if (ForceAttackTarget(entry, peer_player)) {
                     entry.peer_aggro_until = now + 3000;
                     entry.last_peer_target_ms = now;
                     ++handed;
                 }
             }
-            if (!announced) {
-                announced = true;
+            if (!announced_host_down) {
+                announced_host_down = true;
                 SC_LOG("targets: you are down -- handed %d enemies to your partner", handed);
             }
+            announced_peer_down = false;
+        } else if (coop::Get().retarget_from_down_peer && peer_is_out && !host_is_out) {
+            int handed = 0;
+            for (int i = 0; i < g_tracked_count; ++i) {
+                Tracked& entry = g_tracked[i];
+                if (!entry.active || !entry.actor) continue;
+                Fighter enemy = ResolveFighter(entry.actor);
+                if (enemy.health &&
+                    (GetHealth(enemy) <= 0.5f || IsDead(enemy))) continue;
+                // Cancel the peer-hit lease first. Otherwise the publish loop
+                // below reasserts the corpse as target again on the same frame.
+                entry.peer_aggro_until = 0;
+                entry.last_peer_target_ms = 0;
+                if (ForceAttackTarget(entry, host_player)) {
+                    entry.host_target_flags = net::kEnemyTargetsHost;
+                    ++handed;
+                }
+            }
+            if (!announced_peer_down) {
+                announced_peer_down = true;
+                SC_LOG("targets: your partner is down -- handed %d enemies back to you",
+                       handed);
+            }
+            announced_host_down = false;
         } else {
-            announced = false;
+            announced_host_down = false;
+            announced_peer_down = false;
         }
     }
 
@@ -1277,7 +1391,20 @@ void PublishEnemies() {
         // here so the joiner's own copy keeps its authority over nothing but the
         // transform.
         net::OwnedEnemy owned = {};
-        if (net::GetOwnedEnemy(entry.wire_hash ? entry.wire_hash : entry.hash, &owned)) {
+        const bool peer_owned =
+            net::GetOwnedEnemy(entry.wire_hash ? entry.wire_hash : entry.hash, &owned);
+        if (peer_owned) {
+            // Transform ownership without action ownership left this body with
+            // two brains: the joiner chose the attack the peer saw, while the
+            // host chose a different attack for its observer view. Stop the
+            // host copy and let the incoming OrderEvent drive its real local
+            // attack order. KeepClientBrainStopped retries because level logic
+            // can restart a stopped behavior tree behind us.
+            const bool was_stopped = entry.ai_stopped;
+            KeepClientBrainStopped(entry, now);
+            if (!was_stopped && entry.ai_stopped) {
+                SC_LOG("authority: %s actions handed to peer; host brain stopped", entry.name);
+            }
             const ue::FVector target = {owned.x, owned.y, owned.z};
             const ue::FRotator facing = {0.f, owned.yaw, 0.f};
             const ue::FVector velocity = {owned.velocity_x, owned.velocity_y,
@@ -1288,6 +1415,18 @@ void PublishEnemies() {
             state.y = target.Y;
             state.z = target.Z;
             state.yaw = owned.yaw;
+        } else if (entry.ai_stopped) {
+            // OwnedEnemy expires after 500 ms. Resume a LIVE enemy so a dropped
+            // lease cannot freeze the fight, but never restart a corpse. The
+            // latest two-machine log showed this branch running 0.1--0.5 s
+            // after each peer kill, interrupting the fall and leaving the host
+            // looking at an upright, motionless dead body.
+            const bool may_resume = entry.active && entry.health > 0.5f && !IsDead(fighter);
+            if (may_resume && StartBrain(entry.actor)) {
+                entry.ai_stopped = false;
+                SC_LOG("authority: %s actions returned to host; host brain restarted",
+                       entry.name);
+            }
         }
 
         entry.last_host_location = location;
@@ -1297,6 +1436,11 @@ void PublishEnemies() {
         state.max_health = entry.max_health;
         state.guard = GetGuard(fighter);
         state.damage_applied = AppliedTotalValue(entry.hash);
+        // Hit-stop, so the observer's copy stutters on the same frames this one
+        // does. Read from the actor rather than inferred from orders: freeze
+        // frames come from several different order types and the value is the
+        // thing that actually matters.
+        state.time_dilation = GetActorTimeDilation(entry.actor);
         state.flags = net::kEnemyActive;
         // Damage replication has no instigator stimulus. While a peer-hit aggro
         // lease is active, reassert the real target at 4 Hz and publish the
@@ -1397,9 +1541,12 @@ void SendOwnedEnemies() {
         out.velocity_y = velocity.Y;
         out.velocity_z = velocity.Z;
     }
-    // Sent even when empty is NOT wanted here: the host's staleness timeout is
-    // what releases ownership, and an empty packet would keep refreshing it.
-    if (count > 0) net::SendOwnedEnemies(owned, count);
+    // Normally an empty set can expire through the short lease. When this
+    // player is down, explicitly repeat an empty authoritative set so the host
+    // drops every old owner immediately even if one UDP packet is lost.
+    if (count > 0 || g_announce_empty_ownership) {
+        net::SendOwnedEnemies(count > 0 ? owned : nullptr, count);
+    }
 }
 
 void SendDamageReports() {
@@ -1452,6 +1599,15 @@ void ApplyRemoteEnemies() {
 
     const coop::Config& config = coop::Get();
     coop::Stats& stats = coop::GetStats();
+    ue::UObject* local_world = ue::GetWorld();
+    ue::UObject* local_player =
+        local_world ? ue::GetPlayerCharacter(local_world, 0) : nullptr;
+    Fighter local_fighter = ResolveFighter(local_player);
+    const bool local_player_is_out =
+        local_fighter.health &&
+        (GetHealth(local_fighter) <= 0.5f || IsDown(local_fighter));
+    g_announce_empty_ownership =
+        config.retarget_from_down_peer && local_player_is_out;
 
     for (int i = 0; i < g_tracked_count; ++i) {
         g_tracked[i].seen_from_host = false;
@@ -1565,7 +1721,8 @@ void ApplyRemoteEnemies() {
         // earlier, and it is the same two facts off the same packet.
         const bool host_says_dead = (state.flags & net::kEnemyDead) != 0 ||
                                     (state.max_health > 0.f && state.health <= 0.5f);
-        const bool must_release = host_says_dead || !entry.active;
+        const bool must_release = host_says_dead || !entry.active ||
+                                  (config.retarget_from_down_peer && local_player_is_out);
 
         if (host_says_ours && !must_release) {
             entry.not_ours_since = 0;
@@ -1722,14 +1879,26 @@ void ApplyRemoteEnemies() {
                 // direct write remains only for upward corrections (pool reset
                 // or a stale client copy).
                 if (state.health + 0.05f < local_health) {
-                    ApplyDamage(fighter, local_health - state.health);
+                    const float replicated = local_health - state.health;
+                    ApplyDamage(fighter, replicated);
                     // BPF_ApplyDamage is a health path, not an impact, so the
                     // body loses health without ever registering that something
-                    // hit it. Sifu's real reaction comes from
-                    // UHitComponent::ApplyImpact, and the FHitRequest it needs
-                    // reaches a TSet that cannot be rebuilt from outside -- so
-                    // this is the reachable half: the enemy at least notices.
-                    if (config.mirror_hit_reactions) WakeEnemyPerception(entry.ai_fighting);
+                    // hit it.
+                    //
+                    // The host already does this for damage the JOINER dealt.
+                    // Doing it only there was half a fix: the reported symptom
+                    // is symmetric -- "the observing machine doesn't show
+                    // enemies' hurt animations" -- and the observer of the
+                    // host's fight is this side. Same zero-damage impact, same
+                    // reasoning: the health delta above is authoritative and has
+                    // already been charged, so this adds the reaction and no
+                    // second hit.
+                    if (config.mirror_hit_reactions) {
+                        WakeEnemyPerception(entry.ai_fighting);
+                        if (GetHealth(fighter) > 0.5f) {
+                            LaunchReplicatedImpact(entry, replicated);
+                        }
+                    }
                     if (GetHealth(fighter) > state.health + 0.5f) {
                         SetHealth(fighter, state.health);  // guarded fallback
                     }
@@ -1793,6 +1962,14 @@ void ApplyRemoteEnemies() {
 
         entry.health = GetHealth(fighter);
         entry.max_health = GetMaxHealth(fighter);
+
+        // Hit-stop, so this copy stutters on the same frames the owner's does.
+        // Only for bodies this machine is presenting rather than simulating: an
+        // enemy running its own brain here produces its own freeze frames, and
+        // writing the owner's on top would fight them.
+        if (!entry.local_brain) {
+            SetActorTimeDilation(entry.actor, state.time_dilation);
+        }
 
         // ONLY death drives the local down-state machine.
         //
@@ -2322,6 +2499,30 @@ void InitEnemies(std::uintptr_t base) {
             : nullptr;
 }
 
+void ForgetEnemyWorldObjects() {
+    // The old world has already gone; never attempt reflected validity checks
+    // or native unregister calls through its objects. Emptying the lookup table
+    // also makes every asynchronous attack/death hook refuse stale actors.
+    ClearDirectorRegistration();
+    g_tracked_count = 0;
+    g_tracked_world = nullptr;
+    g_had_host_sweep = false;
+    g_announce_empty_ownership = false;
+    g_refresh_requested = true;
+}
+
+void NotifyPuppetWillBeDestroyed(ue::UObject* puppet) {
+    // Despawn calls this before K2_DestroyActor/RemoveSecondPlayer, while the
+    // exact registered body is still live. Any mismatch is a stale cache and
+    // must only be forgotten.
+    if (puppet && puppet == g_registered_partner &&
+        g_registered_world == ue::GetWorld() && TrackingIsCurrent()) {
+        ReleasePartnerFromDirector();
+    } else {
+        ClearDirectorRegistration();
+    }
+}
+
 ue::UObject* FindEnemyByHash(std::uint32_t hash) {
     // Both lookups refuse to answer from a table built in a level we have since
     // left. The actors in it are freed, and handing one back would be a
@@ -2371,6 +2572,18 @@ bool EnemyRunsLocalBrain(std::uint32_t hash) {
     return index >= 0 && g_tracked[index].local_brain;
 }
 
+bool EnemyActionsAreLocallyAuthoritative(std::uint32_t hash) {
+    const int index = FindTracked(hash);
+    if (index < 0) return false;
+
+    const Tracked& entry = g_tracked[index];
+    if (net::GetRole() != net::Role::Host) return entry.local_brain;
+
+    net::OwnedEnemy owned = {};
+    const std::uint32_t wire_hash = entry.wire_hash ? entry.wire_hash : entry.hash;
+    return !net::GetOwnedEnemy(wire_hash, &owned);
+}
+
 void NoteEnemyDeathAnimation(std::uint32_t hash, ue::UObject* animation) {
     if (!animation) return;
     const int index = FindTracked(hash);
@@ -2394,6 +2607,13 @@ bool PrepareMirroredEnemyAttack(std::uint32_t hash, EnemyAttackContext* out) {
     if (index < 0) return false;
 
     Tracked& entry = g_tracked[index];
+    // An enemy OrderEvent received by the host can only originate from the
+    // joiner's locally-owned fight. Its target on this screen is therefore the
+    // remote puppet, even if the host brain's old target field went stale before
+    // its ownership packet arrived.
+    if (net::GetRole() == net::Role::Host) {
+        entry.host_target_flags = net::kEnemyTargetsPeer;
+    }
     out->actor = entry.actor;
     out->attack_component = entry.attack_component;
     out->ai_fighting = entry.ai_fighting;
@@ -2440,6 +2660,7 @@ void TickEnemies() {
     if (world_changed) {
         g_tracked_count = 0;
         g_had_host_sweep = false;
+        g_announce_empty_ownership = false;
         // A restart may construct a new UWorld with the same package path.
         // Path equality cannot make an old completed sweep safe to reuse.
         net::ResetEnemyReplication();

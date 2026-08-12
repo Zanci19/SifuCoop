@@ -62,6 +62,108 @@ bool g_have_puppet_presentation_velocity = false;
 // Resolved on the game thread in DriveTo and consumed inside the animation
 // update, which may not call reflection. Cleared whenever the puppet changes.
 PresentationTargets g_puppet_presentation_targets;
+
+// --- Driven-enemy locomotion, published where the graph can still see it -----
+//
+// Enemies were already given a presentation velocity and a speed band, but in
+// DriveTo -- during UGameEngine::Tick. The character movement component ticks
+// after that and applies braking friction to a body with no input, so by the
+// time USCAnimInstance::NativeUpdateAnimation sampled the owner the velocity
+// was back to zero and the graph played idle. That is the whole of "enemies
+// chasing the host just slide" on the observing machine.
+//
+// The remote player had exactly this bug and it was fixed by moving the write
+// to the last point before the graph samples. This is the same fix for enemies,
+// with two differences that matter:
+//
+//   * m_vOwnerVelocity / m_fWantedSpeed / m_SpeedState are declared on
+//     UPlayerAnim ONLY -- checked against the class property table. An enemy's
+//     USCAnimInstance has no such fields, so writing those offsets there would
+//     corrupt whatever it does keep. Only the class-agnostic movement and root
+//     scene components are written.
+//   * SpeedStateForSpeed keeps its hysteresis in function-level statics, which
+//     one puppet can own but a room full of enemies cannot share. Each body
+//     carries its own band and its own hold timer here.
+//
+// Resolution stays on the game thread: ResolvePresentationTargets calls
+// K2_GetRootComponent, and reflection inside an animation update is what caused
+// the Steam access violation. The hook only writes already-resolved pointers,
+// guarded by the world they were resolved in.
+struct EnemyPresentation {
+    ue::UObject* anim_instance = nullptr;
+    PresentationTargets targets;
+    ue::UObject* world = nullptr;
+    ue::FVector velocity = {};
+    int band = 0;
+    int candidate_band = 0;
+    DWORD candidate_since = 0;
+    DWORD until = 0;
+};
+constexpr int kEnemyPresentationSlots = 24;
+EnemyPresentation g_enemy_presentation[kEnemyPresentationSlots];
+
+// Sifu's own free-move bands out of Content/DB/Movement/BaseMovementDB. An AI
+// anim instance exposes no thresholds to read, and the exact boundary matters
+// far less than not being pinned at V0.
+int EnemyBandForSpeed(float speed) {
+    if (speed <= 20.f) return 0;
+    if (speed < 240.f) return 1;
+    if (speed < 475.f) return 2;
+    return 3;
+}
+
+void ForgetEnemyPresentation() {
+    for (EnemyPresentation& slot : g_enemy_presentation) slot = {};
+}
+
+// Called from DriveTo on the game thread, once per driven enemy per frame.
+void NoteEnemyPresentation(ue::UObject* actor, const ue::FVector& velocity) {
+    ue::UObject* anim_instance = ue::GetAnimInstance(actor);
+    if (!anim_instance) return;
+
+    const DWORD now = GetTickCount();
+    EnemyPresentation* slot = nullptr;
+    EnemyPresentation* free_slot = nullptr;
+    for (EnemyPresentation& candidate : g_enemy_presentation) {
+        if (candidate.anim_instance == anim_instance) {
+            slot = &candidate;
+            break;
+        }
+        if (!free_slot && (candidate.anim_instance == nullptr ||
+                           static_cast<LONG>(now - candidate.until) >= 0)) {
+            free_slot = &candidate;
+        }
+    }
+    if (!slot) slot = free_slot;
+    if (!slot) return;  // more driven bodies than slots: the rest keep the old path
+
+    const float speed =
+        sqrtf(velocity.X * velocity.X + velocity.Y * velocity.Y);
+    const int wanted = EnemyBandForSpeed(speed);
+
+    if (slot->anim_instance != anim_instance || slot->world != ue::GetWorld()) {
+        *slot = {};
+        slot->anim_instance = anim_instance;
+        slot->targets = ResolvePresentationTargets(actor);
+        slot->world = ue::GetWorld();
+        slot->band = wanted;
+        slot->candidate_band = wanted;
+        slot->candidate_since = now;
+    }
+    slot->velocity = velocity;
+
+    // Per-body hysteresis. A band recomputed from an instantaneous speed every
+    // frame restarts the blend it just began, which is what "lifts a leg and
+    // stops" looks like on the remote player -- enemies get the same guard.
+    constexpr DWORD kBandSettleMs = 120;
+    if (wanted != slot->candidate_band) {
+        slot->candidate_band = wanted;
+        slot->candidate_since = now;
+    } else if (wanted != slot->band && now - slot->candidate_since >= kBandSettleMs) {
+        slot->band = wanted;
+    }
+    slot->until = now + 400;
+}
 // The world those two component pointers were resolved in.
 //
 // They are raw pointers into components that a level change frees, and the
@@ -76,6 +178,7 @@ ue::UObject* g_puppet_targets_world = nullptr;
 // Weak: the puppet can be destroyed by the game (level transition, respawn),
 // so this is validated before use rather than trusted.
 ue::UObject* g_puppet = nullptr;
+ue::UObject* g_puppet_world = nullptr;
 bool g_coop_started = false;
 char g_announced_level[192] = {};
 bool g_lobby_was_connected = false;
@@ -281,6 +384,19 @@ void __fastcall SCAnimUpdateHook(ue::UObject* anim_instance, float delta_seconds
     for (CosmeticCinematic& active : g_enemy_cinematics) {
         if (active.anim_instance != anim_instance || now >= active.until) continue;
         WriteCinematicWeight(reinterpret_cast<std::uint8_t*>(anim_instance), 1.f);
+        break;
+    }
+
+    // Re-publish this body's locomotion after Sifu's update and before the
+    // graph evaluates, for the reason spelled out at EnemyPresentation. No
+    // reflection here, and nothing written unless the pointers were resolved in
+    // the world we are still in.
+    for (EnemyPresentation& driven : g_enemy_presentation) {
+        if (driven.anim_instance != anim_instance) continue;
+        if (static_cast<LONG>(now - driven.until) >= 0) break;  // stale: leave it alone
+        if (driven.world != ue::GetWorld()) break;
+        WritePresentationVelocity(driven.targets, driven.velocity);
+        SetMovementSpeedState(driven.targets.movement, driven.band);
         break;
     }
 }
@@ -669,6 +785,10 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
         }
         TeleportActor(target_actor, corrected, new_rotation);
         SetPresentationVelocity(target_actor, presentation_velocity);
+        // ...and again from inside the animation update, which is the write
+        // that actually survives to the graph. This one only makes the body
+        // land correctly during the tick itself.
+        NoteEnemyPresentation(target_actor, presentation_velocity);
 
         // Driven enemies need the locomotion band for exactly the same reason
         // the puppet does -- a body with no input computes V0 and slides -- but
@@ -1046,7 +1166,7 @@ void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
     // native call that lands somewhere -- what is in doubt is the READER, not
     // the writer. And it said remote attacks stay off: they do not, orders.cpp
     // gates those on the config flag alone. What actually degrades is friendly
-    // fire between the two players, so that is what the player is told.
+    // fire between the two players, so that is what the diagnostic records.
     static int last_reported = -2;
     if (last_reported != back_player) {
         last_reported = back_player;
@@ -1054,7 +1174,6 @@ void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
                "the two players can hurt each other. "
                "0=Enemy 1=Fight 2=Object 3=Neutral 4=Coop 5=Ally",
                back_player, back_puppet);
-        coop::ReportProblem("friendly fire between players could not be turned off");
     }
 }
 
@@ -1174,12 +1293,29 @@ bool CoopBodiesMayExist() {
 char g_invite_level[192] = {};
 bool g_have_invite = false;
 
+// Saying no is an answer, not silence. Without this the host sees an invite
+// that is simply never taken and cannot tell refusal from a peer stuck in a
+// menu -- so the offer is cleared here AND reported back over the wire.
+void DeclineInvite() {
+    const std::uint32_t id = net::GetPendingInviteId();
+    if (id == 0) return;
+    net::SendInviteReply(id, false);
+    net::ClearPendingInvite();
+    g_have_invite = false;
+    g_invite_level[0] = '\0';
+    SC_LOG("lobby: invitation declined -- the host has been told");
+}
+
 void AcceptInvite() {
     if (!g_have_invite || !g_invite_level[0]) {
         SC_LOG("lobby: no invite to accept");
         coop::ReportProblem("no invite pending");
         return;
     }
+    // Answer before clearing: the id lives with the pending offer, and
+    // OpenLevel below tears this world down mid-call.
+    const std::uint32_t invite_id = net::GetPendingInviteId();
+    if (invite_id != 0) net::SendInviteReply(invite_id, true);
     g_have_invite = false;
     g_coop_started = true;
     // A level package alone is not enough: Sifu restores the joiner's saved
@@ -1433,6 +1569,7 @@ void UpdateLobby(ue::UObject* player) {
         if (requests.despawn_puppet) DespawnPuppet();
         if (requests.invite_peer) InvitePeerHere(current_level, have_level);
         if (requests.accept_invite) AcceptInvite();
+        if (requests.decline_invite) DeclineInvite();
         if (requests.teleport_to_peer) TeleportToPeer(current_level, have_level);
         if (requests.travel && requests.level[0]) {
             g_coop_started = true;
@@ -1480,6 +1617,21 @@ void UpdateLobby(ue::UObject* player) {
 
     status.puppet_alive = g_puppet != nullptr;
     if (g_puppet) status.faction_puppet = GetFaction(g_puppet);
+    // The peer's answer, held briefly so it is readable rather than a flash.
+    static bool answer_valid = false;
+    static bool answer_accepted = false;
+    static DWORD answer_until = 0;
+    bool accepted_now = false;
+    if (net::PopInviteReply(&accepted_now)) {
+        answer_valid = true;
+        answer_accepted = accepted_now;
+        answer_until = GetTickCount() + 8000;
+    } else if (answer_valid && static_cast<LONG>(GetTickCount() - answer_until) >= 0) {
+        answer_valid = false;
+    }
+    status.invite_answer_valid = answer_valid;
+    status.invite_answer_accepted = answer_accepted;
+
     status.invite_pending = g_have_invite;
     lstrcpynA(status.invite_level, LevelLeaf(g_invite_level), sizeof(status.invite_level));
     status.friendly_confirmed = g_friendly_verified;
@@ -1760,7 +1912,10 @@ void DriveActorTo(ue::UObject* actor, const ue::FVector& target,
     DriveTo(actor, target, rotation, reported_velocity, false);
 }
 
-ue::UObject* GetPuppet() { return g_puppet; }
+ue::UObject* GetPuppet() {
+    // Hooks may run before the next game-frame preflight during world teardown.
+    return g_puppet_world == ue::GetWorld() ? g_puppet : nullptr;
+}
 
 bool FriendlyRelationshipVerified() { return g_friendly_verified; }
 
@@ -1769,6 +1924,11 @@ void DespawnPuppet() {
         SC_LOG("puppet: nothing to despawn");
         return;
     }
+    // The combat director holds this exact actor as a target. Release it while
+    // it is still live; attempting to validate/unregister it after destruction
+    // caused the host restart UAF.
+    NotifyPuppetWillBeDestroyed(g_puppet);
+
     // K2_DestroyActor takes no parameters, so reflection handles this without
     // any struct layout knowledge.
     if (SecondPlayerActive()) {
@@ -1790,9 +1950,47 @@ void DespawnPuppet() {
     g_puppet_cinematic_until = 0;
     g_puppet_cinematic_needs_clear = false;
     for (CosmeticCinematic& active : g_enemy_cinematics) active = {};
+    ForgetEnemyPresentation();
     g_puppet_auto_spawned = false;
     g_friendly_applied_for = nullptr;
     g_friendly_verified = false;
+}
+
+void PreparePuppetLifecycle() {
+    ue::UObject* world = ue::GetWorld();
+    if (world == g_puppet_world) return;
+
+    const bool had_cached_world = g_puppet_world != nullptr;
+    g_puppet_world = world;
+
+    // Enemy tracking contains the same old-world actor pointers and, on the
+    // host, a combat-director registration for the puppet. At this point the
+    // world is already different, so forgetting is the only safe operation.
+    ForgetEnemyWorldObjects();
+
+    g_puppet_anim_instance = nullptr;
+    g_have_puppet_presentation_velocity = false;
+    g_puppet_presentation_targets = {};
+    g_puppet_targets_world = nullptr;
+    g_cosmetic_attack_montage_until = 0;
+    g_puppet_cinematic_until = 0;
+    g_puppet_cinematic_needs_clear = false;
+    for (CosmeticCinematic& active : g_enemy_cinematics) active = {};
+
+    if (g_puppet) {
+        SC_LOG("puppet: level changed -- forgetting the old remote character");
+    } else if (had_cached_world) {
+        SC_LOG("puppet: level changed -- old object caches cleared");
+    }
+    g_puppet = nullptr;
+    g_puppet_auto_spawned = false;
+    g_peer_was_down = false;
+    g_friendly_applied_for = nullptr;
+    g_friendly_verified = false;
+    g_last_player = nullptr;
+    g_have_local_velocity = false;
+    ResetSamples();
+    InvalidateAttackTemplate();
 }
 
 void NotifyLocalAttackForCosmetic() {
@@ -1814,41 +2012,6 @@ void TickPuppet() {
     if (!world) return;
     ue::UObject* player = ue::GetPlayerCharacter(world, 0);
     if (!player) return;
-
-    // The puppet is destroyed along with the level it was spawned into, and
-    // nothing tells us -- so the pointer has to be dropped when the world
-    // changes or every subsequent frame dereferences freed memory. This was
-    // survivable while a level change needed a deliberate keypress; now that
-    // the joiner follows the host automatically it is on the ordinary path
-    // through a playthrough, and it must not be a crash.
-    //
-    // Deliberately not DespawnPuppet(): there is nothing left to destroy, and
-    // calling into the corpse is exactly what we are avoiding.
-    static ue::UObject* puppet_world = nullptr;
-    if (world != puppet_world) {
-        puppet_world = world;
-        g_puppet_anim_instance = nullptr;
-        g_have_puppet_presentation_velocity = false;
-        g_puppet_presentation_targets = {};
-        g_puppet_targets_world = nullptr;
-        g_cosmetic_attack_montage_until = 0;
-        g_puppet_cinematic_until = 0;
-        g_puppet_cinematic_needs_clear = false;
-        for (CosmeticCinematic& active : g_enemy_cinematics) active = {};
-        if (g_puppet) {
-            SC_LOG("puppet: level changed -- forgetting the old remote character");
-            g_puppet = nullptr;
-            // Do not touch the cached controller here. This callback happens
-            // while Unreal is tearing the old world down, so even asking it for
-            // K2_GetPawn can enter ProcessEvent with a freed outer. The normal
-            // maintenance path resolves controller 1 from the settled new world
-            // after a short guard interval.
-            g_puppet_auto_spawned = false;
-            g_peer_was_down = false;
-            g_friendly_applied_for = nullptr;
-            g_friendly_verified = false;
-        }
-    }
 
     if (player != g_last_player) {
         if (g_last_player) {
@@ -1970,7 +2133,8 @@ void TickPuppet() {
                     // Sent on the raw-sequence channel so the receiver layers it
                     // through the Cinematic slot rather than replacing the
                     // locomotion graph.
-                    net::SendAnimationSequence(action_path, 0, cursor);
+                    net::SendAnimationSequence(action_path, 0,
+                                               net::AnimationSemantic::Generic, cursor);
                     static unsigned int actions_sent = 0;
                     if (++actions_sent <= 5 || coop::Get().verbose_orders) {
                         SC_LOG("action: sent '%s' cursor=%.2f", action_path, cursor);
@@ -2028,10 +2192,16 @@ void TickPuppet() {
         float position = 0.f;
         bool raw_sequence = false;
         std::uint32_t actor_hash = 0;
+        net::AnimationSemantic semantic = net::AnimationSemantic::Generic;
         if (!net::PopMontageState(path, sizeof(path), &position, &raw_sequence,
-                                  &actor_hash)) {
+                                  &actor_hash, &semantic)) {
             break;
         }
+        const bool enemy_death = actor_hash != 0 && raw_sequence &&
+                                 semantic == net::AnimationSemantic::Death;
+        const bool peer_authored_death =
+            enemy_death && net::GetRole() == net::Role::Host;
+        if (peer_authored_death && !coop::Get().sync_enemy_death_animations) continue;
 
         ue::UObject* visual_actor = actor_hash ? FindEnemyByHash(actor_hash) : g_puppet;
         if (!visual_actor) continue;
@@ -2041,23 +2211,14 @@ void TickPuppet() {
         ue::UObject* animation = ue::FindObjectByPath(wide);
         if (!animation) continue;
 
-        // A body running its own brain must not have the host's copy of a SWING
-        // layered over it -- it is animating that swing itself, and the second,
-        // differently-timed strike is what this guard was added for. But the
-        // guard used to drop the asset entirely, and that took the death
-        // sequence with it, for exactly the enemies the joining player fights
-        // and kills. Every measured death on this side reads `anim=0`: no
-        // animation was ever available, so the body entered the down state and
-        // played nothing, which is a corpse standing up.
-        //
-        // Recording is not playing. Keep handing the asset to the death ledger
-        // -- the death edge in enemies.cpp asks for it by hash on the next
-        // sweep, and a swing that is never claimed simply expires -- and only
-        // skip the immediate playback.
-        if (actor_hash && EnemyRunsLocalBrain(actor_hash)) {
-            if (raw_sequence) NoteEnemyDeathAnimation(actor_hash, animation);
-            continue;
-        }
+        // A body running its own brain must not have the peer's Attack layered
+        // over it -- it is animating that swing itself, and a second copy is out
+        // of step. Explicit Death is allowed past this guard only so it can
+        // pass the AnimSequence type gate and seed the pending-death ledger. The
+        // stored sequence is never played here: enemies.cpp consumes it at the
+        // authoritative dead edge and launches Sifu's kill path exactly once.
+        // Because the semantic is on the wire, an Attack can never enter it.
+        if (actor_hash && EnemyRunsLocalBrain(actor_hash) && !enemy_death) continue;
 
         // Second gate, on the receiving end, because the sender is not the only
         // thing that can be wrong and the cost of being wrong here is a heap
@@ -2076,8 +2237,34 @@ void TickPuppet() {
             }
             continue;
         }
+        if (enemy_death) {
+            NoteEnemyDeathAnimation(actor_hash, animation);
+            SC_LOG("death: exact enemy sequence received actor=%08X", actor_hash);
+            continue;
+        }
 
         if (raw_sequence) {
+            // Sifu keeps m_bIsDown set for the entire resurrection order and
+            // clears it only when the stand-up sequence finishes. That is fine
+            // on the owning machine, where the death state machine itself owns
+            // the sequence. Here the sequence is layered through the AnimBP's
+            // Cinematic slot instead, and the full-body Down branch masks that
+            // slot while m_bIsDown is still true. The montage therefore runs
+            // invisibly, then the body snaps upright when the peer's delayed
+            // down=false snapshot arrives.
+            //
+            // Release only this puppet's presentation state immediately before
+            // an actual player resurrection sequence. Keep g_peer_was_down true
+            // until the real snapshot edge arrives: ApplyPeerVitals will not
+            // reassert Down on the next frame, and it will still log/finalize
+            // the authoritative transition at the end of the order.
+            const bool peer_resurrection =
+                actor_hash == 0 && strstr(path, "/Death/") && strstr(path, "resurrect_");
+            if (peer_resurrection && g_peer_was_down) {
+                SetDown(ResolveFighter(visual_actor), false);
+                SC_LOG("puppet: released local down state for the incoming resurrection sequence");
+            }
+
             if (ue::PlayAnimationAsset(visual_actor, animation, position)) {
                 const DWORD until = AnimationDeadline(animation);
                 ue::UObject* anim_instance = ue::GetAnimInstance(visual_actor);
@@ -2089,23 +2276,22 @@ void TickPuppet() {
                         WriteCinematicWeight(reinterpret_cast<std::uint8_t*>(anim_instance), 1.f);
                     }
                 } else {
-                    // Might be a swing, might be the sequence the host's lethal
-                    // hit chose. Keep it either way: the death edge arrives on
-                    // the next sweep and asks for it by hash, and a swing that
-                    // is never claimed simply expires.
-                    NoteEnemyDeathAnimation(actor_hash, animation);
+                    // Only an explicit Death was recorded in the ledger above;
+                    // all enemy raw events share this cosmetic lifetime path.
                     ArmEnemyCinematic(actor_hash, until);
                     if (anim_instance) {
                         WriteCinematicWeight(reinterpret_cast<std::uint8_t*>(anim_instance), 1.f);
                     }
                 }
-                SC_LOG("attack: cosmetic sequence playing actor=%08X", actor_hash);
+                SC_LOG("anim: cosmetic sequence playing actor=%08X semantic=%u", actor_hash,
+                       static_cast<unsigned int>(semantic));
             } else {
                 static DWORD last_failed_log = 0;
                 const DWORD failed_now = GetTickCount();
                 if (failed_now - last_failed_log >= 5000) {
                     last_failed_log = failed_now;
-                    SC_LOG("attack: cosmetic sequence could not start actor=%08X", actor_hash);
+                    SC_LOG("anim: cosmetic sequence could not start actor=%08X semantic=%u",
+                           actor_hash, static_cast<unsigned int>(semantic));
                 }
             }
         } else if (actor_hash == 0) {

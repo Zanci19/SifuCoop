@@ -7,9 +7,15 @@
 namespace sifucoop::net {
 
 enum class Role { Offline, Host, Client };
+enum class AnimationSemantic : std::uint8_t;
 
 // Reads SifuCoop.ini beside the DLL and opens the socket. Never blocks.
 bool StartSession();
+
+// Human-readable reason for the most recent StartSession failure, or an empty
+// string after a successful start. Bootstrap uses this before any gameplay/UI
+// hooks exist, so a second host can fail loudly while leaving Sifu itself safe.
+const char* GetStartFailure();
 
 // Switches host/join, address or passphrase at runtime, so the in-game menu can
 // change the connection without restarting the game. Writes the choice back to
@@ -97,6 +103,21 @@ void SendLevelPresence(const char* level_path);
 // a re-sent invite cannot restart a level load that is already in progress.
 bool PopLevelSync(char* out_level_path, int out_size);
 
+// Joiner -> host: the answer to the invitation currently on offer. The id
+// comes from GetPendingInviteId so a reply can never be credited to a newer
+// invite than the one the player actually saw.
+void SendInviteReply(std::uint32_t request_id, bool accepted);
+
+// Host: pops the peer's most recent answer. False when nothing new arrived.
+bool PopInviteReply(bool* out_accepted);
+
+// The id of the invite currently offered to this machine, or 0 for none.
+std::uint32_t GetPendingInviteId();
+
+// Drops the offer without answering it -- used when the player declines, so a
+// repeat of the same id is not re-offered.
+void ClearPendingInvite();
+
 // What level the peer last reported being in, for the lobby display.
 const char* GetPeerLevel();
 
@@ -111,6 +132,7 @@ struct EnemyStateOut {
     float max_health = 0.f;
     float guard = 0.f;
     float damage_applied = 0.f;
+    float time_dilation = 1.f;
     std::uint8_t flags = 0;
 };
 
@@ -217,12 +239,12 @@ const char* GetPublicAddress();
 // peer's puppet without running the attack, so it cannot spawn a hitbox or
 // damage anyone. Their damage already resolved on their own machine.
 void SendMontageState(const char* montage_path, float position);
-void SendAnimationSequence(const char* asset_path, std::uint32_t actor_hash = 0,
-                           float position = 0.f);
+void SendAnimationSequence(const char* asset_path, std::uint32_t actor_hash,
+                           AnimationSemantic semantic, float position = 0.f);
 
 // Oldest pending animation from the peer, if any.
 bool PopMontageState(char* out_path, int out_size, float* out_position, bool* out_raw_sequence,
-                     std::uint32_t* out_actor_hash);
+                     std::uint32_t* out_actor_hash, AnimationSemantic* out_semantic);
 
 int GetRoundTripMs();
 

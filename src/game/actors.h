@@ -232,6 +232,13 @@ bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value);
 int RelationshipMapSize(ue::UObject* social);
 bool RelationshipMapProbeTrusted();
 
+// AActor::CustomTimeDilation -- Sifu's per-actor hit-stop. A plain float at a
+// PDB-resolved offset on AActor, so it is valid for players and enemies alike,
+// unlike the UPlayerAnim locomotion fields. Returns 1.0 (normal speed) when the
+// offset is unavailable, so a missing offset can never freeze anything.
+float GetActorTimeDilation(ue::UObject* actor);
+bool SetActorTimeDilation(ue::UObject* actor, float dilation);
+
 // --- Pool ------------------------------------------------------------------
 //
 // Sifu pre-spawns every enemy far below the level and lifts them in as needed,

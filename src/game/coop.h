@@ -61,18 +61,15 @@ struct Config {
     // while standing next to it, and watch whether your health drops.
     bool friendly_relationship = false;
 
-    // Use a REAL second player body for the remote peer. This is required for
-    // host AI to select and fight that peer; a spawned clone is not a player to
-    // Sifu's targeting system.
+    // Failed structural experiment, retained only for diagnosis.
     //
-    // The puppet is not a player as far as Sifu is concerned, which is the root
-    // of three separate complaints at once: enemies only ever fight the host,
-    // the joining player's hits register erratically, and the remote character
-    // cannot perform its own moves. A real PlayerController with a game-mode
-    // spawned pawn is a genuine target, has ordinary hitboxes, and owns its
-    // moveset. Sifu ships the whole path -- a community split-screen mod uses
-    // the same call -- but whether its game mode will hand out a second player
-    // is unknown until it is asked.
+    // CreatePlayer does create controller 1, but Sifu's single-player game mode
+    // gives it player zero's existing pawn instead of spawning another one. The
+    // repair returns that pawn and possesses a SpawnPlayerClone body, leaving us
+    // with the same synthetic body plus an unsupported second-local-player UI
+    // lifecycle. Live tests on both builds produced the placeholder/non-gameplay
+    // state. Do not enable this as a fallback unless the game mode can first be
+    // made to initialize a distinct second pawn itself.
     bool real_second_player = false;
 
     // Whether to force the viewport out of splitscreen when the second player is
@@ -120,7 +117,9 @@ struct Config {
     // cannot be rebuilt from outside the process that owns them. Until the
     // reaction is carried as an Order, this is the honest half: the enemy
     // notices.
-    bool mirror_hit_reactions = true;
+    // The zero-damage BPF_LaunchImpact probe is not live-tested. Keep it off by
+    // default and enable it alone for a later host-observation run.
+    bool mirror_hit_reactions = false;
     // Show your partner at THEIR age rather than yours. Their age is already on
     // the wire; this is the only thing that consumes it. Written to the puppet
     // only -- your own age is your own run and is never touched from the network.
@@ -128,7 +127,9 @@ struct Config {
     // Register the partner with AAIDirectorActor as a combat TARGET, so its
     // ticket manager can allocate DirectOpponent to enemies aimed at them.
     // Without it they are aimed and never permitted to swing.
-    bool director_targets_partner = true;
+    // UNSAFE: later role redistribution dereferences a null candidate (0x24c).
+    // Kept only for diagnosis; never regenerate an enabled config by default.
+    bool director_targets_partner = false;
 
     // Let the JOINING machine's own AI fight its player, for the enemies the
     // host says are already targeting them.
@@ -173,13 +174,22 @@ struct Config {
     // animation base -- carries no current-action asset the way UPlayerAnim does,
     // so there is no equivalent of the player's action channel to build.
     //
-    // With this on, every enemy thinks for itself on both machines and the host
-    // stays authoritative for health, damage and death. Position is corrected on
-    // drift rather than driven every frame, because driving a body that is
-    // walking under its own power makes it slide through its own attacks.
-    bool client_simulates_enemies = true;
+    // This was useful to prove that a live brain restores animation, but it also
+    // gives one enemy two independent attack selectors. The recording from
+    // 2026-08-11 shows the result directly: different attacks on the two
+    // machines. Keep only the action-owning brain alive; the observer replays
+    // that owner's attack orders instead.
+    bool client_simulates_enemies = false;
 
     bool peer_fights_locally = true;
+
+    // Staged live fixes. They remain off until each has had its own paired-log
+    // run; this keeps one risky gameplay change per manual test.
+    bool retarget_from_down_peer = false;
+    bool observer_cosmetic_enemy_attacks_only = false;
+    bool sync_enemy_death_animations = false;
+    bool use_engine_outfit_refresh = false;
+    bool sync_peer_visual_age = false;
 
     bool fix_room_clear = false;      // nudge the local room-clear % to the host's
     // fix_room_clear is a real (if optional) mutation of the joiner's own game
@@ -228,10 +238,10 @@ struct Config {
     // Kept as a switch so the finding is not lost. Do not turn it on except to
     // study that crash.
     // Sets the AI's OWN enemy, which is what grants a combat role -- the attack
-    // component's target only decides where they walk. Requires the partner to
-    // be registered with the director first (director_targets_partner), which is
-    // what its earlier crash was missing.
-    bool force_enemy_engage = true;
+    // component's target only decides where they walk. It needs the custom
+    // puppet-target manager above to allocate that role, and that manager is
+    // now proven unsafe even when no enemy has attacked yet.
+    bool force_enemy_engage = false;
 
     bool puppet_invincible = true;
     // The puppet ignores pawn collision so two player capsules do not shove
@@ -262,6 +272,10 @@ struct Config {
     // before any graphics hook is installed. Everything else stays available
     // through SifuCoop.ini and the hotkeys.
     bool in_game_overlay = true;
+
+    // Input is shared with Sifu while the menu is open by default. Players who
+    // prefer GUI clicks and typing not to reach the game can opt into capture.
+    bool menu_exclusive_input = false;
 
     // Diagnostics, off by default: these log per event and get noisy fast.
     bool verbose_enemies = false;

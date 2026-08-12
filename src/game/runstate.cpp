@@ -125,39 +125,6 @@ int ReadLocalOutfit(ue::UObject* player) {
     return (index < 0 || index > 64) ? -1 : index;
 }
 
-// Rebuild the body after writing stats to it.
-//
-// The age write works and has been measured working: "aged to 45" followed by
-// "max health here 96, theirs 96 -- agreed", so BPF_SetCharacterAge reaches
-// everything computed from it. The FACE still did not change, and the reason is
-// that Sifu rebuilds the model from a callback rather than polling the stats:
-// UPlayerFightingComponent::OnStatsUpdated, private, void(), no arguments, one
-// symbol at its RVA on both builds. Writing the number without ringing the bell
-// left the character aged on paper and unchanged on screen.
-//
-// Direct native call rather than reflection because it is not Blueprint-exposed.
-// Trivial ABI -- a this pointer and nothing else.
-using OnStatsUpdatedFn = void(__fastcall*)(ue::UObject* component);
-OnStatsUpdatedFn g_on_stats_updated = nullptr;
-
-bool RefreshAppearance(ue::UObject* puppet) {
-    // Bound on first use from the game module, so this file needs no init hook.
-    static bool bound = false;
-    if (!bound) {
-        bound = true;
-        if (offsets::UPlayerFightingComponent_OnStatsUpdated != 0) {
-            const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleA(nullptr));
-            g_on_stats_updated = reinterpret_cast<OnStatsUpdatedFn>(
-                base + offsets::UPlayerFightingComponent_OnStatsUpdated);
-        }
-    }
-    if (!g_on_stats_updated || !puppet) return false;
-    ue::UObject* comp = PlayerFightingComponent(puppet);
-    if (!comp) return false;
-    g_on_stats_updated(comp);
-    return true;
-}
-
 // Aimed at the PUPPET only, exactly like the age write. The second argument is
 // an optional material override; passing null means "just the outfit".
 bool WritePuppetOutfit(ue::UObject* puppet, int index) {
@@ -167,14 +134,40 @@ bool WritePuppetOutfit(ue::UObject* puppet, int index) {
     // Three parameters, from the decorated name:
     //   BPF_SwapOutfit(int32, UMaterialInterface*, bool)
     // The second is an optional material override -- null means "just the
-    // outfit" -- and the third is a flag whose meaning is unknown, so it is left
-    // false. Getting the count wrong here would hand ProcessEvent a short frame.
+    // outfit". Disassembly of Sifu's own OnRep_OutfitIndex passes true for the
+    // final flag. Keep that exact path staged independently for its first run.
     struct SwapArgs {
         std::int32_t Index;
         ue::UObject* MaterialOverride;
         bool Flag;
-    } args = {index, nullptr, false};
+    } args = {index, nullptr, coop::Get().use_engine_outfit_refresh};
     return ue::CallFunction(comp, L"BPF_SwapOutfit", &args);
+}
+
+// Sifu's production player Blueprint calls this library after its Age stat
+// changes. Unlike the old OnStatsUpdated call, this function actually updates
+// the face/body morphs and aging textures. The class is a direct dependency of
+// BP_FightingPlayer, but StaticFindObjectSafe does not load packages, so a
+// missing CDO is a retryable "not ready" rather than a reason to call through a
+// guessed pointer.
+bool RefreshPuppetVisualAge(ue::UObject* puppet) {
+    if (!puppet || !IsSafeToDress(puppet)) return false;
+    ue::UObject* world = ue::GetWorld();
+    if (!world) return false;
+    ue::UObject* aging = ue::FindObjectByPath(
+        L"/Game/Maps/Zoos/Newin/Aging/CharacterAging.Default__CharacterAging_C");
+    if (!aging) return false;
+    struct Params {
+        ue::UObject* Character;
+        bool OnlyBodyAging;
+        std::uint8_t Pad[7];
+        ue::UObject* WorldContextObject;
+    } params = {};
+    static_assert(sizeof(Params) == 24, "UpdateMorphTexAging parameter frame changed");
+    params.Character = puppet;
+    params.OnlyBodyAging = false;
+    params.WorldContextObject = world;
+    return ue::CallFunction(aging, L"UpdateMorphTexAging", &params);
 }
 
 // player -> currently held weapon actor -> its UBaseWeaponData asset -> the
@@ -274,6 +267,10 @@ void TickRunState(ue::UObject* player) {
     }
 
     const DWORD now = GetTickCount();
+    static ue::UObject* visual_age_puppet = nullptr;
+    static ue::UObject* visual_age_world = nullptr;
+    static DWORD visual_age_due = 0;
+    static int visual_age_attempts = 0;
     if (now - g_last_send >= 500) {
         g_last_send = now;
 
@@ -328,7 +325,9 @@ void TickRunState(ue::UObject* player) {
         ue::UObject* puppet = GetPuppet();
         if (puppet && net::GetPeerRunState(&ages) && ages.age_valid && ages.age >= 0) {
             static ue::UObject* aged_puppet = nullptr;
+            static ue::UObject* aged_world = nullptr;
             static int aged_to = INT_MIN;
+            static DWORD last_age_attempt = 0;
             if (!IsSafeToDress(puppet)) {
                 static bool warned = false;
                 if (!warned) {
@@ -336,16 +335,27 @@ void TickRunState(ue::UObject* player) {
                     SC_LOG("run: refused to age that body -- it is the one controller 0 is "
                            "possessing, so it is YOURS, not your partner's");
                 }
-            } else if (puppet != aged_puppet || ages.age != aged_to) {
+            } else if ((ue::GetWorld() != aged_world || puppet != aged_puppet ||
+                        ages.age != aged_to) &&
+                       now - last_age_attempt >= 1000) {
+                last_age_attempt = now;
                 const bool ok = WritePuppetAge(puppet, ages.age);
-                aged_puppet = puppet;
-                aged_to = ages.age;
-                const bool refreshed = ok && RefreshAppearance(puppet);
-                SC_LOG("run: partner's body aged to %d %s", ages.age,
-                       !ok ? "FAILED -- BPF_SetCharacterAge did not dispatch"
-                           : refreshed ? "and the model was rebuilt (OnStatsUpdated)"
-                                       : "but OnStatsUpdated is unavailable -- the number "
-                                         "changed and the face will not");
+                if (ok) {
+                    aged_puppet = puppet;
+                    aged_world = ue::GetWorld();
+                    aged_to = ages.age;
+                    if (coop::Get().sync_peer_visual_age) {
+                        visual_age_puppet = puppet;
+                        visual_age_world = ue::GetWorld();
+                        visual_age_due = now + 500;
+                        visual_age_attempts = 0;
+                    }
+                }
+                SC_LOG("run: partner's age stat set to %d %s", ages.age,
+                       ok ? (coop::Get().sync_peer_visual_age
+                                 ? "(visible aging refresh scheduled)"
+                                 : "(stat only; visual refresh switch is off)")
+                          : "FAILED -- BPF_SetCharacterAge did not dispatch");
             }
         }
     }
@@ -359,15 +369,58 @@ void TickRunState(ue::UObject* player) {
         ue::UObject* outfit_puppet = GetPuppet();
         if (outfit_puppet && net::GetPeerRunState(&outfit_state) && outfit_state.outfit_valid) {
             static ue::UObject* dressed_puppet = nullptr;
+            static ue::UObject* dressed_world = nullptr;
             static int dressed_as = INT_MIN;
+            static DWORD last_outfit_attempt = 0;
             if (IsSafeToDress(outfit_puppet) &&
-                (outfit_puppet != dressed_puppet || outfit_state.outfit_index != dressed_as)) {
+                (ue::GetWorld() != dressed_world || outfit_puppet != dressed_puppet ||
+                 outfit_state.outfit_index != dressed_as) &&
+                now - last_outfit_attempt >= 1000) {
+                last_outfit_attempt = now;
                 const bool ok = WritePuppetOutfit(outfit_puppet, outfit_state.outfit_index);
-                dressed_puppet = outfit_puppet;
-                dressed_as = outfit_state.outfit_index;
+                if (ok) {
+                    dressed_puppet = outfit_puppet;
+                    dressed_world = ue::GetWorld();
+                    dressed_as = outfit_state.outfit_index;
+                    // SwapOutfit can replace the mesh asynchronously. Reapply
+                    // aging after it has settled, never before it.
+                    if (coop::Get().sync_peer_visual_age) {
+                        visual_age_puppet = outfit_puppet;
+                        visual_age_world = ue::GetWorld();
+                        visual_age_due = now + 500;
+                        visual_age_attempts = 0;
+                    }
+                }
                 SC_LOG("run: partner's outfit set to %d %s", outfit_state.outfit_index,
                        ok ? "" : "FAILED -- BPF_SwapOutfit did not dispatch");
             }
+        }
+    }
+
+    if (visual_age_puppet && visual_age_due != 0 &&
+        static_cast<LONG>(now - visual_age_due) >= 0) {
+        // Pointer safety is identity-based: never ask Kismet to validate a raw
+        // pointer retained from an old UWorld.
+        if (ue::GetWorld() != visual_age_world || GetPuppet() != visual_age_puppet) {
+            visual_age_puppet = nullptr;
+            visual_age_world = nullptr;
+            visual_age_due = 0;
+            visual_age_attempts = 0;
+        } else if (RefreshPuppetVisualAge(visual_age_puppet)) {
+            SC_LOG("run: partner's visible face/body aging refreshed");
+            visual_age_puppet = nullptr;
+            visual_age_world = nullptr;
+            visual_age_due = 0;
+            visual_age_attempts = 0;
+        } else if (++visual_age_attempts < 10) {
+            visual_age_due = now + 1000;
+        } else {
+            SC_LOG("run: partner visual aging unavailable -- CharacterAging CDO/function "
+                   "did not resolve after 10 guarded attempts");
+            visual_age_puppet = nullptr;
+            visual_age_world = nullptr;
+            visual_age_due = 0;
+            visual_age_attempts = 0;
         }
     }
 

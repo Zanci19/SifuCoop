@@ -303,6 +303,12 @@ WANTED_MEMBERS = {
     # player, so it wears the local outfit -- the same root as the age bug.
     "M_UPlayerFightingComponent_iOutfitIndex": ("UPlayerFightingComponent",
                                                 "m_iOutfitIndex"),
+    # Sifu's hit-stop. OrderFreezeFrame fired 33 times in one measured fight and
+    # is never replicated, so a body that stutters on the owning machine glides
+    # smoothly on the observer -- the two screens disagree about the timing of
+    # every exchange. Per-actor rather than global: slowing the observer's whole
+    # world for a hit they did not throw would be worse than the desync.
+    "M_AActor_CustomTimeDilation": ("AActor", "CustomTimeDilation"),
 }
 
 

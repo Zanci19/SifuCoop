@@ -15,6 +15,11 @@ bool SpawnPuppet();
 // Destroys the puppet if one is alive.
 void DespawnPuppet();
 
+// Drops cross-frame UObject caches as soon as Unreal replaces the current
+// world. Called before any subsystem is allowed to inspect the puppet, so the
+// first frame of a restart cannot expose a freed remote body.
+void PreparePuppetLifecycle();
+
 // Called each frame; handles the debug hotkeys.
 void TickPuppet();
 

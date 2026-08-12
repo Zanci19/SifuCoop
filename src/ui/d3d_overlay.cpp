@@ -4,9 +4,8 @@
 // can, by design -- so the status line is instead rendered as part of Sifu's
 // frame by hooking the swap chain's Present.
 //
-// Deliberately DISPLAY-ONLY: no WndProc hook, no input capture, no mouse. That
-// removes the riskiest half of the usual approach and means the mod can never
-// swallow a keypress the game needed. F1 is the only player-facing hotkey.
+// Input is shared with Sifu by default. An optional exclusive mode suppresses
+// only events ImGui says it wants, while F1 remains a polling-based failsafe.
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -240,13 +239,28 @@ void DrawLobbyTab(const MenuStatus& status) {
     if (status.invite_pending) {
         ImGui::SeparatorText("Invitation");
         ImGui::TextColored(warn, "Your partner is playing %s", status.invite_level);
-        if (ImGui::Button("Join them", ImVec2(180, 0))) {
+        if (ImGui::Button("Join them", ImVec2(160, 0))) {
             MenuRequests r;
             r.accept_invite = true;
             PostRequests(r);
         }
         ImGui::SameLine();
+        if (ImGui::Button("Not now", ImVec2(120, 0))) {
+            MenuRequests r;
+            r.decline_invite = true;
+            PostRequests(r);
+        }
         ImGui::Checkbox("Always join automatically", &coop::Get().auto_join_level);
+    }
+
+    // The host's half of the same conversation.
+    if (status.invite_answer_valid) {
+        ImGui::SeparatorText("Invitation");
+        if (status.invite_answer_accepted) {
+            ImGui::TextColored(good, "Your partner accepted -- they are on their way.");
+        } else {
+            ImGui::TextColored(warn, "Your partner declined for now.");
+        }
     }
 
     if (status.connected && status.together) {
@@ -258,12 +272,6 @@ void DrawLobbyTab(const MenuStatus& status) {
             MenuRequests r;
             r.teleport_to_peer = true;
             PostRequests(r);
-        }
-        ImGui::SameLine();
-        if (status.friendly_confirmed) {
-            ImGui::TextColored(good, "Friendly fire off");
-        } else {
-            ImGui::TextColored(warn, "Friendly fire unconfirmed - partner will not swing");
         }
     }
 
@@ -292,10 +300,9 @@ void DrawDebugTab() {
     ImGui::Checkbox("Detailed enemy log", &config.verbose_enemies);
     ImGui::Checkbox("Detailed combat log", &config.verbose_orders);
     ImGui::Checkbox("Adaptive smoothing", &config.adaptive_interp);
+    ImGui::Checkbox("Block game input while menu is open", &config.menu_exclusive_input);
     ImGui::Checkbox("Partner swings visibly (cosmetic only)",
                     &config.remote_player_attacks);
-    ImGui::Checkbox("Real partner body (enemy aggro)", &config.real_second_player);
-    ImGui::TextDisabled("Created only after host starts co-op in Story.");
     ImGui::Checkbox("Hide partner's health bar", &config.hide_second_player_hud);
     ImGui::Checkbox("Join partner's level without asking", &config.auto_join_level);
 
@@ -318,6 +325,49 @@ void DrawDebugTab() {
         PostRequests(r);
     }
     ImGui::TextDisabled("Log: %%LOCALAPPDATA%%\\Sifu\\Saved\\Logs\\SifuCoop.log");
+}
+
+// An invitation the player never sees is an invitation that looks ignored to
+// the person who sent it. The F1 menu is the full lobby; this is the part that
+// has to reach someone who is playing rather than configuring, so it is drawn
+// every frame while an offer stands and takes its own two clicks.
+void DrawInviteBanner(const MenuStatus& status) {
+    if (!status.invite_pending) return;
+
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const ImVec2 centre(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                        viewport->WorkPos.y + viewport->WorkSize.y * 0.12f);
+    ImGui::SetNextWindowPos(centre, ImGuiCond_Always, ImVec2(0.5f, 0.f));
+    ImGui::SetNextWindowBgAlpha(0.88f);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
+                                   ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoSavedSettings |
+                                   ImGuiWindowFlags_NoFocusOnAppearing |
+                                   ImGuiWindowFlags_NoNav;
+    if (ImGui::Begin("##sifucoop_invite", nullptr, flags)) {
+        ImGui::TextColored(ImVec4(1.f, 0.85f, 0.35f, 1.f), "Your partner invited you");
+        ImGui::TextDisabled("%s", status.invite_level);
+        ImGui::Spacing();
+        // Buttons only respond while the menu owns the mouse. Without the menu
+        // open the banner is a notice and F1 is how it is answered, which is
+        // said here rather than left to be discovered.
+        if (g_menu_open.load()) {
+            if (ImGui::Button("Accept", ImVec2(120, 0))) {
+                MenuRequests r;
+                r.accept_invite = true;
+                PostRequests(r);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Decline", ImVec2(120, 0))) {
+                MenuRequests r;
+                r.decline_invite = true;
+                PostRequests(r);
+            }
+        } else {
+            ImGui::TextDisabled("Press F1 to accept or decline.");
+        }
+    }
+    ImGui::End();
 }
 
 void DrawMenu() {
@@ -346,10 +396,9 @@ void DrawMenu() {
     ImGui::End();
 }
 
-// While the menu is open, events ImGui actually consumes must not also reach
-// Sifu. Forwarding every event made a GUI click double as a punch or a camera
-// turn. F1 remains polled in PresentHook, so the player can always close the
-// menu even if a window-message edge case occurs.
+// Always feed an open menu. Shared mode forwards the same events to Sifu;
+// exclusive mode suppresses only the input class ImGui says it is capturing.
+// F1 remains polled in PresentHook, so it can always close the menu.
 LRESULT CALLBACK WndProcHook(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (g_menu_open.load()) {
         ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
@@ -376,8 +425,23 @@ LRESULT CALLBACK WndProcHook(HWND window, UINT message, WPARAM wparam, LPARAM lp
             case WM_CHAR:
             case WM_SYSCHAR:
             case WM_UNICHAR:
-            case WM_INPUT:
-                return 0;
+            case WM_INPUT: {
+                const ImGuiIO& io = ImGui::GetIO();
+                const bool mouse_message =
+                    message >= WM_MOUSEFIRST && message <= WM_MOUSELAST;
+                const bool keyboard_message =
+                    message >= WM_KEYFIRST && message <= WM_KEYLAST;
+                const bool capture_keyboard =
+                    keyboard_message && (io.WantCaptureKeyboard || io.WantTextInput);
+                const bool capture_raw =
+                    message == WM_INPUT &&
+                    (io.WantCaptureMouse || io.WantCaptureKeyboard || io.WantTextInput);
+                if (coop::Get().menu_exclusive_input &&
+                    ((mouse_message && io.WantCaptureMouse) || capture_keyboard || capture_raw)) {
+                    return 0;
+                }
+                break;
+            }
             default:
                 break;
         }
@@ -488,7 +552,10 @@ HRESULT __stdcall PresentHook(IDXGISwapChain* swap_chain, UINT sync_interval, UI
         if (g_menu_open) FeedMenuInput();
         ImGui::NewFrame();
         // The status line is part of the menu now; showing it permanently was
-        // clutter during play.
+        // clutter during play. The invitation is the one exception: it is a
+        // question from another person and has to reach a player who is playing
+        // rather than one who happens to have the menu open.
+        DrawInviteBanner(CopyStatus());
         if (g_menu_open) DrawMenu();
         ImGui::Render();
 

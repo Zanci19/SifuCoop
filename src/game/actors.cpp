@@ -696,6 +696,28 @@ int RelationshipMapSize(ue::UObject* social) {
     return num;
 }
 
+float GetActorTimeDilation(ue::UObject* actor) {
+    if (!actor || offsets::M_AActor_CustomTimeDilation == 0) return 1.f;
+    float value = 1.f;
+    std::memcpy(&value,
+                reinterpret_cast<const std::uint8_t*>(actor) +
+                    offsets::M_AActor_CustomTimeDilation,
+                sizeof(value));
+    // Never report something that would freeze or launch a body if it were
+    // copied to the other machine.
+    if (!(value > 0.01f) || value > 4.f) return 1.f;
+    return value;
+}
+
+bool SetActorTimeDilation(ue::UObject* actor, float dilation) {
+    if (!actor || offsets::M_AActor_CustomTimeDilation == 0) return false;
+    if (!(dilation > 0.01f) || dilation > 4.f) dilation = 1.f;
+    std::memcpy(reinterpret_cast<std::uint8_t*>(actor) +
+                    offsets::M_AActor_CustomTimeDilation,
+                &dilation, sizeof(dilation));
+    return true;
+}
+
 bool IsPooled(const ue::FVector& location) { return location.Z < kPooledZ; }
 
 std::uint32_t HashName(const char* text) {

@@ -96,17 +96,43 @@ void Load() {
         ReadBool("client_simulates_enemies", g_config.client_simulates_enemies, ini);
     g_config.peer_fights_locally =
         ReadBool("peer_fights_locally", g_config.peer_fights_locally, ini);
+    g_config.retarget_from_down_peer =
+        ReadBool("retarget_from_down_peer", g_config.retarget_from_down_peer, ini);
+    g_config.observer_cosmetic_enemy_attacks_only = ReadBool(
+        "observer_cosmetic_enemy_attacks_only",
+        g_config.observer_cosmetic_enemy_attacks_only, ini);
+    g_config.sync_enemy_death_animations = ReadBool(
+        "sync_enemy_death_animations", g_config.sync_enemy_death_animations, ini);
+    g_config.use_engine_outfit_refresh = ReadBool(
+        "use_engine_outfit_refresh", g_config.use_engine_outfit_refresh, ini);
+    g_config.sync_peer_visual_age =
+        ReadBool("sync_peer_visual_age", g_config.sync_peer_visual_age, ini);
     g_config.mirror_hit_reactions =
         ReadBool("mirror_hit_reactions", g_config.mirror_hit_reactions, ini);
     g_config.sync_peer_age = ReadBool("sync_peer_age", g_config.sync_peer_age, ini);
     g_config.director_targets_partner =
         ReadBool("director_targets_partner", g_config.director_targets_partner, ini);
+
+    // These two switches were an instrumentation experiment, not a shippable
+    // targeting path. Together they did allocate a partner combat role, then
+    // crashed both machines in the director's weak-object bookkeeping. A saved
+    // ini can otherwise silently re-enable the known fault after every deploy.
+    if (g_config.force_enemy_engage || g_config.director_targets_partner) {
+        SC_LOG("coop: disabling unsafe director experiment "
+               "(force_enemy_engage=%d director_targets_partner=%d)",
+               g_config.force_enemy_engage, g_config.director_targets_partner);
+        g_config.force_enemy_engage = false;
+        g_config.director_targets_partner = false;
+    }
+
     g_config.fix_room_clear = ReadBool("fix_room_clear", g_config.fix_room_clear, ini);
     g_config.auto_follow_level = ReadBool("auto_follow_level",
                                           g_config.auto_follow_level, ini);
     g_config.auto_join_level = ReadBool("auto_join_level", g_config.auto_join_level, ini);
     g_config.adaptive_interp = ReadBool("adaptive_interp", g_config.adaptive_interp, ini);
     g_config.in_game_overlay = ReadBool("in_game_overlay", g_config.in_game_overlay, ini);
+    g_config.menu_exclusive_input =
+        ReadBool("menu_exclusive_input", g_config.menu_exclusive_input, ini);
     g_config.selftest = ReadBool("selftest", g_config.selftest, ini);
     g_config.verbose_enemies = ReadBool("verbose_enemies", g_config.verbose_enemies, ini);
     g_config.verbose_orders = ReadBool("verbose_orders", g_config.verbose_orders, ini);
@@ -162,6 +188,12 @@ void Save() {
     WriteBool("sync_run_state", g_config.sync_run_state, ini);
     WriteBool("client_simulates_enemies", g_config.client_simulates_enemies, ini);
     WriteBool("peer_fights_locally", g_config.peer_fights_locally, ini);
+    WriteBool("retarget_from_down_peer", g_config.retarget_from_down_peer, ini);
+    WriteBool("observer_cosmetic_enemy_attacks_only",
+              g_config.observer_cosmetic_enemy_attacks_only, ini);
+    WriteBool("sync_enemy_death_animations", g_config.sync_enemy_death_animations, ini);
+    WriteBool("use_engine_outfit_refresh", g_config.use_engine_outfit_refresh, ini);
+    WriteBool("sync_peer_visual_age", g_config.sync_peer_visual_age, ini);
     WriteBool("mirror_hit_reactions", g_config.mirror_hit_reactions, ini);
     WriteBool("sync_peer_age", g_config.sync_peer_age, ini);
     WriteBool("director_targets_partner", g_config.director_targets_partner, ini);
@@ -170,6 +202,7 @@ void Save() {
     WriteBool("auto_join_level", g_config.auto_join_level, ini);
     WriteBool("adaptive_interp", g_config.adaptive_interp, ini);
     WriteBool("in_game_overlay", g_config.in_game_overlay, ini);
+    WriteBool("menu_exclusive_input", g_config.menu_exclusive_input, ini);
     WriteBool("verbose_enemies", g_config.verbose_enemies, ini);
     WriteBool("verbose_orders", g_config.verbose_orders, ini);
     WriteInt("interp_delay_ms", g_config.interp_delay_ms, ini);

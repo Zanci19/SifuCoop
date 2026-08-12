@@ -1,5 +1,7 @@
 ﻿#include <windows.h>
 
+#include <cstdio>
+
 #include "core/hooks.h"
 #include "core/log.h"
 #include "game/actors.h"
@@ -9,6 +11,7 @@
 #include "game/player2.h"
 #include "game/puppet.h"
 #include "game/selftest.h"
+#include "net/instance_guard.h"
 #include "net/session.h"
 #include "ui/overlay.h"
 #include "core/offsets.g.h"
@@ -21,6 +24,42 @@ bool Init();
 namespace offsets = sifucoop::offsets;
 
 namespace {
+
+// Deliberately never closed by StopSession/RestartSession. The kernel releases
+// it when Sifu exits, leaving no reconnect window in which a second DLL can arm
+// its hooks in another process.
+HANDLE g_game_process_mutex = nullptr;
+
+bool AcquireGameProcessGuard() {
+    SetLastError(ERROR_SUCCESS);
+    HANDLE mutex = CreateMutexA(nullptr, FALSE, sifucoop::net::kGameProcessMutexNameA);
+    const DWORD error = GetLastError();
+    if (!mutex) {
+        char message[192] = {};
+        _snprintf(message, sizeof(message),
+                  "SifuCoop could not create its process guard (Windows error %lu). "
+                  "The mod will stay inactive to avoid unsafe duplicate hooks.",
+                  error);
+        SC_LOG("guard: process mutex creation failed (%lu) -- refusing to hook", error);
+        MessageBoxA(nullptr, message, "SifuCoop not started",
+                    MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        return false;
+    }
+    if (error == ERROR_ALREADY_EXISTS) {
+        CloseHandle(mutex);
+        SC_LOG("guard: another SifuCoop game process is active -- refusing to hook");
+        MessageBoxA(nullptr,
+                    "Another SifuCoop-enabled Sifu process is already running. Close it "
+                    "before starting another copy. This game will continue without the mod.",
+                    "SifuCoop already running",
+                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+        return false;
+    }
+
+    g_game_process_mutex = mutex;
+    SC_LOG("guard: acquired process-lifetime instance guard");
+    return true;
+}
 
 struct PeIdentity {
     DWORD time_date_stamp;
@@ -108,6 +147,8 @@ void LogResolved(uintptr_t base, const char* name, uint32_t rva) {
 }
 
 DWORD WINAPI Bootstrap(LPVOID) {
+    if (!AcquireGameProcessGuard()) return 0;
+
     HMODULE game = GetModuleHandleA(nullptr);
     const auto base = reinterpret_cast<uintptr_t>(game);
 
@@ -157,13 +198,25 @@ DWORD WINAPI Bootstrap(LPVOID) {
     }
 
     sifucoop::coop::Load();
+    const bool network_started = sifucoop::net::StartSession();
+    if (!network_started && sifucoop::net::GetRole() == sifucoop::net::Role::Host) {
+        const char* failure = sifucoop::net::GetStartFailure();
+        if (!failure || !failure[0]) failure = "The SifuCoop host socket could not start.";
+        SC_LOG("bootstrap: host startup failed before hooks -- mod is inert: %s", failure);
+        MessageBoxA(nullptr, failure, "SifuCoop host not started",
+                    MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        return 0;
+    }
+
+    // Network ownership is decided before anything below installs a gameplay
+    // or UI hook. A duplicate host therefore cannot leave a second Sifu process
+    // half-active after its UDP bind fails.
     sifucoop::game::InitActors(base);
     sifucoop::game::InitPuppet(base);
     sifucoop::game::InitPlayer2(base);
     sifucoop::game::InitEnemies(base);
     sifucoop::game::InstallPlayOrderHook(base);
     sifucoop::game::InitSelfTest();
-    sifucoop::net::StartSession();
     // Prefer drawing inside the game: a window cannot appear over exclusive
     // fullscreen. The window overlay is only started if the hook fails -- or if
     // the swap-chain hook has been switched off, which is the escape hatch for

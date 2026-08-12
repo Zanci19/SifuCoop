@@ -16,6 +16,7 @@
 #include "../core/log.h"
 #include "../game/coop.h"
 #include "crypto.h"
+#include "instance_guard.h"
 #include "protocol.h"
 
 namespace sifucoop::net {
@@ -30,6 +31,9 @@ SOCKET g_socket = INVALID_SOCKET;
 Role g_role = Role::Offline;
 bool g_connected = false;
 bool g_winsock_started = false;
+HANDLE g_host_instance_mutex = nullptr;
+int g_host_instance_port = 0;
+char g_start_failure[192] = {};
 
 sockaddr_in g_peer_addr = {};
 bool g_have_peer_addr = false;
@@ -178,6 +182,7 @@ struct QueuedOrder {
 QueuedOrder g_order_queue[kOrderQueueSize];
 int g_order_write = 0;
 int g_order_read = 0;
+std::uint32_t g_last_order_sequence = 0;
 
 // Enemy state is a snapshot, not a queue: only the newest matters, and
 // replaying stale enemy positions would drag them backwards exactly as it
@@ -459,6 +464,48 @@ bool IsFiniteVector(float x, float y, float z) {
     return IsFinite(x) && IsFinite(y) && IsFinite(z);
 }
 
+void ReleaseHostInstanceGuard() {
+    if (!g_host_instance_mutex) return;
+    SC_LOG("net: released host instance guard for UDP port %d", g_host_instance_port);
+    CloseHandle(g_host_instance_mutex);
+    g_host_instance_mutex = nullptr;
+    g_host_instance_port = 0;
+}
+
+bool AcquireHostInstanceGuard(int port) {
+    if (g_host_instance_mutex && g_host_instance_port == port) return true;
+    ReleaseHostInstanceGuard();
+
+    char name[96] = {};
+    _snprintf(name, sizeof(name), kHostPortMutexFormatA, port);
+    SetLastError(ERROR_SUCCESS);
+    HANDLE mutex = CreateMutexA(nullptr, FALSE, name);
+    const DWORD error = GetLastError();
+    if (!mutex) {
+        _snprintf(g_start_failure, sizeof(g_start_failure),
+                  "Could not create the SifuCoop host guard (Windows error %lu).", error);
+        SC_LOG("net: host instance guard creation failed (%lu)", error);
+        coop::ReportProblem("could not create host instance guard (%lu)", error);
+        return false;
+    }
+    if (error == ERROR_ALREADY_EXISTS) {
+        CloseHandle(mutex);
+        _snprintf(g_start_failure, sizeof(g_start_failure),
+                  "Another SifuCoop host is already using UDP port %d. Close the other "
+                  "Sifu process, or choose a different port.",
+                  port);
+        SC_LOG("net: refusing duplicate host -- instance guard already exists for port %d",
+               port);
+        coop::ReportProblem("another SifuCoop host already owns UDP %d", port);
+        return false;
+    }
+
+    g_host_instance_mutex = mutex;
+    g_host_instance_port = port;
+    SC_LOG("net: acquired host instance guard for UDP port %d", port);
+    return true;
+}
+
 void ReadConfig(char* host, int host_size, int* port, bool* is_host) {
     char ini_path[MAX_PATH] = {};
     coop::IniPath(ini_path, sizeof(ini_path));
@@ -577,11 +624,13 @@ struct PendingAnimation {
     float position = 0.f;
     std::uint32_t actor_hash = 0;
     bool raw_sequence = false;
+    AnimationSemantic semantic = AnimationSemantic::Generic;
 };
 constexpr int kAnimationQueueSize = 32;
 PendingAnimation g_animation_queue[kAnimationQueueSize] = {};
 int g_animation_read = 0;
 int g_animation_write = 0;
+std::uint32_t g_last_animation_sequence = 0;
 
 // Enemies the PEER owns, kept exactly as received.
 //
@@ -609,11 +658,13 @@ void HandleOwnedEnemies(const OwnedEnemyPacket& packet) {
 void ResetLevelSyncState();
 void ResetPeerState() {
     g_animation_read = g_animation_write = 0;
+    g_last_animation_sequence = 0;
     ResetLevelSyncState();
     for (PeerState& state : g_peer_buffer) state.valid = false;
     g_peer_head = 0;
     g_last_snapshot_sequence = 0;
     g_order_read = g_order_write;
+    g_last_order_sequence = 0;
     g_peer_state_valid = false;
     g_peer_vitals = PeerVitals();
     g_peer_run_valid = false;
@@ -731,12 +782,17 @@ char g_peer_level[192] = {};
 constexpr DWORD kLevelRetryIntervalMs = 250;
 constexpr DWORD kLevelRetryTimeoutMs = 20000;
 
+bool g_invite_reply_pending = false;
+bool g_invite_reply_accepted = false;
+
 char g_active_level_request[192] = {};
 std::uint32_t g_active_level_request_id = 0;
 DWORD g_active_level_first_sent = 0;
 DWORD g_active_level_last_sent = 0;
 
 void ResetLevelSyncState() {
+    g_invite_reply_pending = false;
+    g_invite_reply_accepted = false;
     g_level_request_seen = 0;
     g_level_request_next = 1;
     g_pending_level[0] = '\0';
@@ -746,6 +802,17 @@ void ResetLevelSyncState() {
     g_active_level_request_id = 0;
     g_active_level_first_sent = 0;
     g_active_level_last_sent = 0;
+}
+
+void HandleInviteReply(const InviteReplyPacket& packet) {
+    // Only ever an answer to the invite this machine still has outstanding. A
+    // reply carrying an older id belongs to a superseded invitation and would
+    // otherwise report "declined" for an offer already replaced.
+    if (packet.request_id == 0 || packet.request_id != g_active_level_request_id) return;
+    g_invite_reply_pending = true;
+    g_invite_reply_accepted = packet.accepted != 0;
+    SC_LOG("net: your partner %s the invitation",
+           g_invite_reply_accepted ? "ACCEPTED" : "DECLINED");
 }
 
 void HandleLevelSync(const LevelSyncPacket& packet) {
@@ -813,7 +880,7 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
         if (!IsFiniteVector(in.x, in.y, in.z) || !IsFinite(in.yaw) ||
             !IsFiniteVector(in.velocity_x, in.velocity_y, in.velocity_z)) continue;
         if (!IsFinite(in.health) || !IsFinite(in.max_health) || !IsFinite(in.guard) ||
-            !IsFinite(in.damage_applied)) {
+            !IsFinite(in.damage_applied) || !IsFinite(in.time_dilation)) {
             continue;
         }
         EnemyStateOut& out = g_enemies_staging[g_enemy_staging_count++];
@@ -830,6 +897,13 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
         out.max_health = in.max_health;
         out.guard = in.guard;
         out.damage_applied = in.damage_applied;
+        // Clamped on arrival, because this value is written straight onto an
+        // actor: a body that receives 0 is frozen for the rest of the level,
+        // and a corrupt large value would run it at many times normal speed.
+        out.time_dilation = in.time_dilation;
+        if (!(out.time_dilation > 0.01f) || out.time_dilation > 4.f) {
+            out.time_dilation = 1.f;
+        }
         out.flags = in.flags;
         if (g_enemy_sweep_seen) MergeEnemyLive(out);
     }
@@ -910,6 +984,22 @@ void HandlePong(const PingPacket& packet) {
 }
 
 void HandleMontage(const MontagePacket& packet) {
+    if (packet.kind > 1 ||
+        packet.semantic > static_cast<std::uint8_t>(AnimationSemantic::Death)) {
+        return;
+    }
+
+    // Event packets may be duplicated or reordered by UDP. The completed
+    // 2026-08-11 test delivered one joiner sequence to the host six times in
+    // 17 ms, restarting the same enemy attack on every copy. Packet sequence is
+    // per type, so accepting only a strictly newer montage removes duplicates
+    // without comparing asset paths or collapsing legitimate repeated attacks.
+    if (g_last_animation_sequence != 0 &&
+        packet.header.sequence <= g_last_animation_sequence) {
+        return;
+    }
+    g_last_animation_sequence = packet.header.sequence;
+
     const int next = (g_animation_write + 1) % kAnimationQueueSize;
     if (next == g_animation_read) {
         g_animation_read = (g_animation_read + 1) % kAnimationQueueSize;
@@ -919,6 +1009,7 @@ void HandleMontage(const MontagePacket& packet) {
     pending.position = packet.position;
     pending.actor_hash = packet.actor_hash;
     pending.raw_sequence = packet.kind == 1;
+    pending.semantic = static_cast<AnimationSemantic>(packet.semantic);
     g_animation_write = next;
 }
 
@@ -942,6 +1033,15 @@ void HandleRunState(const RunStatePacket& packet) {
 }
 
 void QueueOrder(const OrderEventPacket& packet) {
+    // Same event semantics as the animation queue. A stale attack is worse than
+    // a lost one: replaying it later creates an extra hitbox after the owning
+    // machine has already advanced to another move.
+    if (g_last_order_sequence != 0 &&
+        packet.header.sequence <= g_last_order_sequence) {
+        return;
+    }
+    g_last_order_sequence = packet.header.sequence;
+
     const int next = (g_order_write + 1) % kOrderQueueSize;
     if (next == g_order_read) {
         // Full: drop the oldest rather than the newest. A stale move is worth
@@ -1157,6 +1257,13 @@ void PumpReceive() {
                     }
                 }
                 break;
+            case PacketType::InviteReply:
+                if (fits(sizeof(InviteReplyPacket))) {
+                    InviteReplyPacket reply = {};
+                    memcpy(&reply, buffer, sizeof(reply));
+                    HandleInviteReply(reply);
+                }
+                break;
             case PacketType::Ping:
                 if (fits(sizeof(PingPacket))) {
                     PingPacket ping = {};
@@ -1212,14 +1319,31 @@ void UpdateRates(DWORD now) {
 }  // namespace
 
 bool StartSession() {
+    g_start_failure[0] = '\0';
     char host[128] = {};
     int port = kDefaultPort;
     bool is_host = false;
     ReadConfig(host, sizeof(host), &port, &is_host);
 
     if (g_role == Role::Offline) {
+        ReleaseHostInstanceGuard();
         SC_LOG("net: disabled (set mode=host or mode=client in SifuCoop.ini)");
         return false;
+    }
+
+    if (port < 1 || port > 65535) {
+        _snprintf(g_start_failure, sizeof(g_start_failure),
+                  "UDP port %d is invalid; choose a value from 1 to 65535.", port);
+        SC_LOG("net: refusing invalid UDP port %d", port);
+        coop::ReportProblem("UDP port must be between 1 and 65535");
+        ReleaseHostInstanceGuard();
+        return false;
+    }
+
+    if (is_host) {
+        if (!AcquireHostInstanceGuard(port)) return false;
+    } else {
+        ReleaseHostInstanceGuard();
     }
 
     // A fresh nonce per session start. Everything derived from it -- and so
@@ -1231,15 +1355,23 @@ bool StartSession() {
     g_rejected_packets = 0;
 
     WSADATA wsa = {};
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        SC_LOG("net: WSAStartup failed");
+    const int startup_error = WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (startup_error != 0) {
+        _snprintf(g_start_failure, sizeof(g_start_failure),
+                  "Windows networking could not start (error %d).", startup_error);
+        SC_LOG("net: WSAStartup failed (%d)", startup_error);
+        StopSession();
         return false;
     }
     g_winsock_started = true;
 
     g_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (g_socket == INVALID_SOCKET) {
-        SC_LOG("net: socket() failed (%d)", WSAGetLastError());
+        const int error = WSAGetLastError();
+        _snprintf(g_start_failure, sizeof(g_start_failure),
+                  "SifuCoop could not create its UDP socket (error %d).", error);
+        SC_LOG("net: socket() failed (%d)", error);
+        StopSession();
         return false;
     }
 
@@ -1272,11 +1404,14 @@ bool StartSession() {
     local.sin_port = htons(static_cast<u_short>(bind_port));
 
     if (bind(g_socket, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == SOCKET_ERROR) {
-        SC_LOG("net: bind failed (%d) -- is another instance already hosting?",
-               WSAGetLastError());
+        const int error = WSAGetLastError();
+        _snprintf(g_start_failure, sizeof(g_start_failure),
+                  "SifuCoop could not claim UDP port %d (error %d). Close another host or "
+                  "choose a different port.",
+                  bind_port, error);
+        SC_LOG("net: bind failed (%d) -- is another instance already hosting?", error);
         coop::ReportProblem("could not bind UDP %d -- already hosting elsewhere?", port);
-        closesocket(g_socket);
-        g_socket = INVALID_SOCKET;
+        StopSession();
         return false;
     }
 
@@ -1298,10 +1433,11 @@ bool StartSession() {
         g_peer_addr.sin_family = AF_INET;
         g_peer_addr.sin_port = htons(static_cast<u_short>(port));
         if (inet_pton(AF_INET, host, &g_peer_addr.sin_addr) != 1) {
+            _snprintf(g_start_failure, sizeof(g_start_failure),
+                      "'%s' is not a valid IPv4 host address.", host);
             SC_LOG("net: '%s' is not a valid IPv4 address", host);
             coop::ReportProblem("'%s' is not a valid IPv4 address", host);
-            closesocket(g_socket);
-            g_socket = INVALID_SOCKET;
+            StopSession();
             return false;
         }
         g_have_peer_addr = true;
@@ -1309,6 +1445,8 @@ bool StartSession() {
     }
     return true;
 }
+
+const char* GetStartFailure() { return g_start_failure; }
 
 bool RestartSession() {
     const bool was_connected = g_connected;
@@ -1370,6 +1508,7 @@ void StopSession() {
     // Winsock is reference counted, so an early return here without the
     // matching cleanup leaks a reference on every Reconfigure -- which is the
     // one path that calls Stop then Start repeatedly.
+    ReleaseHostInstanceGuard();
     if (g_socket == INVALID_SOCKET) {
         if (g_winsock_started) {
             g_winsock_started = false;
@@ -1475,6 +1614,31 @@ bool PopLevelSync(char* out_level_path, int out_size) {
     return true;
 }
 
+void SendInviteReply(std::uint32_t request_id, bool accepted) {
+    if (!g_connected || request_id == 0) return;
+    InviteReplyPacket packet = {};
+    FillHeader(&packet.header, PacketType::InviteReply);
+    packet.request_id = request_id;
+    packet.accepted = accepted ? 1 : 0;
+    SendPacket(&packet, sizeof(packet));
+}
+
+bool PopInviteReply(bool* out_accepted) {
+    if (!g_invite_reply_pending) return false;
+    g_invite_reply_pending = false;
+    if (out_accepted) *out_accepted = g_invite_reply_accepted;
+    return true;
+}
+
+std::uint32_t GetPendingInviteId() {
+    return g_have_pending_level ? g_level_request_seen : 0;
+}
+
+void ClearPendingInvite() {
+    g_have_pending_level = false;
+    g_pending_level[0] = '\0';
+}
+
 const char* GetPeerLevel() { return g_peer_level; }
 
 void SendEnemyStates(const EnemyStateOut* entries, int count) {
@@ -1520,6 +1684,7 @@ void SendEnemyStates(const EnemyStateOut* entries, int count) {
             out.max_health = in.max_health;
             out.guard = in.guard;
             out.damage_applied = in.damage_applied;
+        out.time_dilation = in.time_dilation;
             out.flags = in.flags;
         }
         SendPacket(&packet, EnemyStatePacketSize(packet.count));
@@ -1646,11 +1811,13 @@ void SendMontageState(const char* montage_path, float position) {
     SendPacket(&packet, sizeof(packet));
 }
 
-void SendAnimationSequence(const char* asset_path, std::uint32_t actor_hash, float position) {
+void SendAnimationSequence(const char* asset_path, std::uint32_t actor_hash,
+                           AnimationSemantic semantic, float position) {
     if (!g_connected || !asset_path || !asset_path[0]) return;
     MontagePacket packet = {};
     FillHeader(&packet.header, PacketType::MontageState);
     packet.kind = 1;
+    packet.semantic = static_cast<std::uint8_t>(semantic);
     // Where the sender already is in it. A strike sends 0 and starts from the
     // top; an action sampled mid-play sends its cursor so the peer joins it at
     // the same point instead of restarting a fall that is half over.
@@ -1661,13 +1828,14 @@ void SendAnimationSequence(const char* asset_path, std::uint32_t actor_hash, flo
 }
 
 bool PopMontageState(char* out_path, int out_size, float* out_position, bool* out_raw_sequence,
-                     std::uint32_t* out_actor_hash) {
+                     std::uint32_t* out_actor_hash, AnimationSemantic* out_semantic) {
     if (g_animation_read == g_animation_write || !out_path || out_size <= 0) return false;
     const PendingAnimation& pending = g_animation_queue[g_animation_read];
     lstrcpynA(out_path, pending.path, out_size);
     if (out_position) *out_position = pending.position;
     if (out_raw_sequence) *out_raw_sequence = pending.raw_sequence;
     if (out_actor_hash) *out_actor_hash = pending.actor_hash;
+    if (out_semantic) *out_semantic = pending.semantic;
     g_animation_read = (g_animation_read + 1) % kAnimationQueueSize;
     return true;
 }

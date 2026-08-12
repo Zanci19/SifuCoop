@@ -211,8 +211,9 @@ void __fastcall SetNextAttackTargetHook(void* attack_component, void* target) {
 
 // The lethal-hit path already selected the archetype-, direction- and move-
 // specific defender sequence. Observe it instead of guessing a generic corpse
-// animation. Only the host publishes it; client health reconciliation re-enters
-// Kill and must not echo the event back.
+// animation. Whichever machine owns that enemy's actions publishes it. The
+// other machine may re-enter Kill during health reconciliation, so the same
+// authority check that protects attacks also prevents a death echo.
 using HealthKillFn = void(__fastcall*)(void* health_component, std::int32_t behavior,
                                       ue::UObject* instigator, ue::UObject* death_animation,
                                       bool option_a, bool option_b);
@@ -223,10 +224,13 @@ void __fastcall HealthKillHook(void* health_component, std::int32_t behavior,
                                bool option_a, bool option_b) {
     std::uint32_t actor_hash = 0;
     char death_path[192] = {};
-    if (net::GetRole() == net::Role::Host && net::IsConnected() &&
-        coop::Get().echo_enemy_attacks && death_animation) {
+    const net::Role role = net::GetRole();
+    const bool publish_death = (role == net::Role::Host && coop::Get().echo_enemy_attacks) ||
+                               (role == net::Role::Client &&
+                                coop::Get().sync_enemy_death_animations);
+    if (net::IsConnected() && publish_death && death_animation) {
         actor_hash = EnemyHashForHealthComponent(health_component);
-        if (!actor_hash ||
+        if (!actor_hash || !EnemyActionsAreLocallyAuthoritative(actor_hash) ||
             !ue::GetObjectPathName(death_animation, death_path, sizeof(death_path))) {
             actor_hash = 0;
         }
@@ -236,7 +240,7 @@ void __fastcall HealthKillHook(void* health_component, std::int32_t behavior,
                            option_a, option_b);
 
     if (actor_hash && death_path[0]) {
-        net::SendAnimationSequence(death_path, actor_hash);
+        net::SendAnimationSequence(death_path, actor_hash, net::AnimationSemantic::Death);
         SC_LOG("death: exact enemy sequence sent actor=%08X", actor_hash);
     }
 }
@@ -837,7 +841,8 @@ void PumpReactionCaptures() {
         if (!ue::GetObjectPathName(pose, path, sizeof(path))) continue;
         // Addressed to the enemy. SendMontageState carries no actor and would
         // land the reaction on the remote player's body instead.
-        net::SendAnimationSequence(path, pending.actor_hash);
+        net::SendAnimationSequence(path, pending.actor_hash,
+                                   net::AnimationSemantic::Reaction);
         static unsigned int sent = 0;
         if (++sent <= 5 || coop::Get().verbose_orders) {
             SC_LOG("reaction: %s sent for %08X '%s'", OrderTypeName(pending.order_type),
@@ -875,7 +880,7 @@ void __fastcall OrderAttackOnStartHook(void* order) {
         SC_LOG("attack: OrderAttack OnStart had no portable sequence");
         return;
     }
-    net::SendAnimationSequence(path, actor_hash);
+    net::SendAnimationSequence(path, actor_hash, net::AnimationSemantic::Attack);
     if (actor_hash == 0) NotifyLocalSequenceSent();
     SC_LOG("attack: cosmetic sequence sent after OnStart actor=%08X", actor_hash);
 }
@@ -907,10 +912,11 @@ extern "C" void sifucoop_on_launch_attack(void* self, const void* order_ref,
     if (exact_local_component && net::IsConnected() &&
         coop::Get().remote_player_attacks) {
         ArmCosmeticSequence(order, 0);
-    } else if (!g_mirroring && net::GetRole() == net::Role::Host &&
-               net::IsConnected() && coop::Get().echo_enemy_attacks) {
+    } else if (!g_mirroring && net::IsConnected() && coop::Get().echo_enemy_attacks) {
         const std::uint32_t enemy_hash = EnemyHashForAttackComponent(self);
-        if (enemy_hash != 0) ArmCosmeticSequence(order, enemy_hash);
+        if (enemy_hash != 0 && EnemyActionsAreLocallyAuthoritative(enemy_hash)) {
+            ArmCosmeticSequence(order, enemy_hash);
+        }
     }
 
     if (log_this) {
@@ -997,14 +1003,14 @@ extern "C" void sifucoop_on_prepare_attack(void* self, const void* delayed_actio
             net::SendOrderEvent(0, 0, index, depth);
             // OnStart sends the finished UAnimSequence; TickPuppet samples a
             // montage fallback. Neither route invokes a remote attack component.
-        } else if (net::GetRole() == net::Role::Host && net::IsConnected() &&
-                   coop::Get().echo_enemy_attacks) {
-            // An enemy swung. The host owns that decision, so the joiner is
-            // told about it rather than being left to watch enemies slide
-            // around in silence -- which is the difference between a fight it
-            // can react to and one it can only lose.
+        } else if (net::IsConnected() && coop::Get().echo_enemy_attacks) {
+            // An enemy swung on the machine that owns its actions. Host-owned
+            // swings go to the joiner; peer-owned swings now go back to the
+            // host. A non-owner's hook can still fire during a handoff, so the
+            // authority test is the guard against rebroadcasting that stale
+            // private decision.
             const std::uint32_t hash = EnemyHashForAttackComponent(self);
-            if (hash != 0) {
+            if (hash != 0 && EnemyActionsAreLocallyAuthoritative(hash)) {
                 net::SendOrderEvent(hash, 0, index, depth);
                 ++coop::GetStats().attacks_echoed;
                 if (coop::Get().verbose_orders) {
@@ -1408,18 +1414,30 @@ void PumpRemoteOrders() {
             continue;
         }
 
-        // An enemy's swing, relayed by the host. Only the joining side ever
-        // receives these -- the host is the one deciding them.
+        // An enemy's swing, relayed by whichever machine owns that enemy's
+        // action decisions.
         if (!coop::Get().echo_enemy_attacks) continue;
+        // In co-op the action-owning machine has already run the real order and
+        // adjudicated its hitbox. Re-running Sifu's selector on the observer is
+        // neither deterministic nor cosmetic: measured captures launched only
+        // 9/80 and 3/17 requests, and the few that did launch could choose a
+        // different move and create a second hitbox. The exact AnimSequence is
+        // transported separately, so co-op observers only present that asset.
+        // Keep the native path for Versus/diagnostics, where a real local hitbox
+        // can be intentional, and leave it reachable in co-op through the switch
+        // rather than hardcoding the rule -- the flag existed but nothing read
+        // it, so turning it off changed nothing.
+        if (coop::Get().observer_cosmetic_enemy_attacks_only &&
+            coop::Get().mode == coop::Mode::Coop) {
+            continue;
+        }
         // This path deliberately has no local-template prerequisite. Sifu's AI
         // task creates a valid delayed action from this exact enemy, so attacks
         // work from the first frame of a room even if the joining player has
         // not thrown a punch yet.
-        // An enemy thinking for itself here is already swinging on its own
-        // schedule. Replaying the host's copy of that swing on top gives it two
-        // attacks for one, a beat apart -- which is what "their attacks are
-        // unsynced with host and peer" describes.
-        if (EnemyRunsLocalBrain(actor_hash)) continue;
+        // The owner is already performing this attack locally. The observer's
+        // private brain is stopped and gets exactly one replayed OrderAttack.
+        if (EnemyActionsAreLocallyAuthoritative(actor_hash)) continue;
         if (ApplyEnemyAttack(actor_hash, attack_index, attack_depth)) {
             ++coop::GetStats().attacks_echoed;
         }

@@ -29,7 +29,7 @@ constexpr std::uint32_t kMagic = 0x53434F50;  // 'SCOP'
 // MEANING changes: `sequence` is now per packet type rather than one counter for
 // the whole socket, and a v11 peer's numbering would read as constant loss.
 // Peers refuse to talk across a mismatch rather than misinterpreting each other.
-constexpr std::uint16_t kProtocolVersion = 15;
+constexpr std::uint16_t kProtocolVersion = 17;
 
 // AUTHENTICATION
 //
@@ -103,6 +103,19 @@ enum class PacketType : std::uint16_t {
     RunState = 11,    // either: age, room-clear progress, held weapon (Phase D)
     MontageState = 12,  // either: "my character is now playing this animation" (cosmetic)
     OwnedEnemy = 13,    // client: "these enemies are fighting ME, here is where they are"
+    InviteReply = 14,   // joiner: "I accepted / declined your invitation"
+};
+
+// Why a raw animation asset crossed the wire. `kind` below still describes the
+// UObject type (montage vs UAnimSequence); this describes the event's meaning.
+// Keeping those orthogonal is important: enemy attacks and enemy deaths are
+// both UAnimSequences, but only a Death event may seed the pending-death ledger.
+enum class AnimationSemantic : std::uint8_t {
+    Generic = 0,
+    Attack = 1,
+    Reaction = 2,
+    Fall = 3,
+    Death = 4,
 };
 
 #pragma pack(push, 1)
@@ -185,6 +198,20 @@ struct LevelSyncPacket {
     char level_path[192] = {};
 };
 
+// The answer to a LevelSyncPacket invite.
+//
+// An invitation whose answer the host cannot see is a conversation with one
+// participant: the host presses Invite and then guesses from the level census
+// whether their partner declined, was in a menu, or never noticed. The reply
+// carries the request id it answers, so a late reply to a superseded invite is
+// ignored instead of being credited to the current one.
+struct InviteReplyPacket {
+    PacketHeader header;
+    std::uint32_t request_id = 0;
+    std::uint8_t accepted = 0;
+    std::uint8_t reserved[3] = {};
+};
+
 struct EnemyEntry {
     std::uint32_t name_hash = 0;
     // Stable placed-spawner identity. Runtime actor names are process-local,
@@ -206,6 +233,11 @@ struct EnemyEntry {
     // sent -- otherwise the host's older, higher value would visibly heal an
     // enemy the client just hit.
     float damage_applied = 0.f;
+    // Sifu's hit-stop, per actor. OrderFreezeFrame fired 33 times in one
+    // measured fight and never crossed the wire, so an exchange that stutters
+    // on the owning machine glides on the observer and the two screens disagree
+    // about the timing of every hit. 1.0 is normal speed.
+    float time_dilation = 1.f;
     std::uint8_t flags = 0;
     std::uint8_t reserved[3] = {};
 };
@@ -337,7 +369,8 @@ struct MontagePacket {
     float position = 0.f;              // playback position when captured, for seeking
     std::uint8_t kind = 0;             // 0 = UAnimMontage, 1 = raw UAnimationAsset
     std::uint32_t actor_hash = 0;       // 0 = remote player, otherwise replicated enemy
-    std::uint8_t reserved[3] = {};
+    std::uint8_t semantic = 0;          // AnimationSemantic; meaningful for raw assets
+    std::uint8_t reserved[2] = {};
     char montage_path[192] = {};       // portable path of the animation asset
 };
 
@@ -346,7 +379,7 @@ struct MontagePacket {
 static_assert(sizeof(PacketHeader) == 24, "header layout changed");
 static_assert(sizeof(SnapshotPacket) == 24 + 36 + 12 + 4, "snapshot layout changed");
 static_assert(sizeof(OrderEventPacket) == 24 + 16, "order event layout changed");
-static_assert(sizeof(EnemyEntry) == 56, "enemy entry layout changed");
+static_assert(sizeof(EnemyEntry) == 60, "enemy entry layout changed");
 static_assert(sizeof(RunStatePacket) == 24 + 4 + 4 + 4 + 192, "run state layout changed");
 static_assert(sizeof(MontagePacket) == 228, "montage packet layout changed");
 static_assert(sizeof(EnemyStatePacket) <= kMaxPacketSize, "enemy packet exceeds the buffer");
