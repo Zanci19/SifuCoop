@@ -166,6 +166,11 @@ struct Tracked {
     // When the host first stopped saying this enemy fights the peer. Ownership
     // is held for a few seconds past that, so a flickering flag cannot thrash it.
     DWORD not_ours_since = 0;
+    // Ownership hysteresis. Claiming used to be instantaneous while releasing
+    // took three seconds, so a body released on a distance comparison was
+    // re-claimed on the very next sweep. See the decision in ApplyRemoteEnemies.
+    DWORD ours_wanted_since = 0;
+    DWORD owned_since = 0;
     // Per-enemy throttle for the esync diagnostic.
     DWORD last_esync_ms = 0;
     // The exact death sequence the host's lethal hit selected, handed over by
@@ -1050,6 +1055,8 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
             // until the first unmatched enemy and no longer.
             entry.local_brain = previous[k].local_brain;
             entry.not_ours_since = previous[k].not_ours_since;
+            entry.ours_wanted_since = previous[k].ours_wanted_since;
+            entry.owned_since = previous[k].owned_since;
             entry.last_esync_ms = previous[k].last_esync_ms;
             break;
         }
@@ -1750,25 +1757,60 @@ void ApplyRemoteEnemies() {
         const bool must_release = host_says_dead || !entry.active ||
                                   (config.retarget_from_down_peer && local_player_is_out);
 
+        const DWORD own_now = GetTickCount();
         if (host_says_ours && !must_release) {
             entry.not_ours_since = 0;
-        } else if (entry.local_brain && entry.not_ours_since == 0) {
-            entry.not_ours_since = GetTickCount();
+            if (entry.ours_wanted_since == 0) entry.ours_wanted_since = own_now;
+        } else {
+            entry.ours_wanted_since = 0;
+            if (entry.local_brain && entry.not_ours_since == 0) {
+                entry.not_ours_since = own_now;
+            }
         }
 
-        constexpr DWORD kReleaseAfterMs = 3000;
+        // OWNERSHIP MUST BE STICKY. This is the systemic fault behind most of
+        // what still felt broken.
+        //
+        // Measured over 90 s of one fight: 17 handoffs across 5 enemies, one
+        // body changing hands 5 times. Every handoff starts or stops a
+        // behaviour tree, which interrupts whatever order was playing, changes
+        // who the body is aiming at, and swaps it between self-moving and
+        // teleport-driven. A body mid-handoff is neither properly simulated nor
+        // properly driven, and that is what "the other player's attacks phase
+        // through that enemy, and its attacks phase through him" describes.
+        //
+        // The old rule made this inevitable: claiming was instantaneous while
+        // releasing took three seconds, so a body released on a distance
+        // comparison was re-claimed on the very next sweep. Both inputs flap by
+        // nature -- `near_us` is a 300-unit margin between two players standing
+        // in the same room, and the host's targets-peer flag follows its own
+        // AI's retargeting.
+        //
+        // So: a claim must be wanted continuously before it is taken, and a body
+        // once claimed is held for a minimum spell before any distance or
+        // targeting opinion can take it away. Neither delay applies to
+        // must_release -- death, deactivation and a downed player are facts, not
+        // opinions, and those still release immediately.
+        constexpr DWORD kClaimDebounceMs = 600;
+        constexpr DWORD kReleaseAfterMs = 4000;
+        constexpr DWORD kMinimumOwnershipMs = 5000;
+
         bool fights_us = entry.local_brain;
         if (!entry.local_brain && host_says_ours && !must_release) {
-            fights_us = true;
+            fights_us = entry.ours_wanted_since != 0 &&
+                        own_now - entry.ours_wanted_since >= kClaimDebounceMs;
         } else if (entry.local_brain && must_release) {
             fights_us = false;
         } else if (entry.local_brain && entry.not_ours_since != 0 &&
-                   GetTickCount() - entry.not_ours_since >= kReleaseAfterMs) {
+                   own_now - entry.not_ours_since >= kReleaseAfterMs &&
+                   (entry.owned_since == 0 ||
+                    own_now - entry.owned_since >= kMinimumOwnershipMs)) {
             fights_us = false;
         }
 
         if (fights_us != entry.local_brain) {
             entry.local_brain = fights_us;
+            entry.owned_since = fights_us ? own_now : 0;
             if (fights_us) {
                 if (StartBrain(entry.actor)) {
                     entry.ai_stopped = false;

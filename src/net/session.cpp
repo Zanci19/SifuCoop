@@ -1748,7 +1748,15 @@ void SendOwnedEnemies(const OwnedEnemy* entries, int count) {
 // simulation rather than freezing the body wherever the last packet left it.
 bool GetOwnedEnemy(std::uint32_t name_hash, OwnedEnemy* out) {
     if (!out || g_owned_enemy_count <= 0) return false;
-    constexpr DWORD kOwnershipStaleMs = 500;
+    // Raised from 500 ms. The peer publishes owned enemies at 10 Hz, so 500 ms
+    // is five packets -- a brief loss burst was enough to expire the lease, and
+    // expiry restarts the host's copy of that enemy's brain. Combined with the
+    // joiner re-claiming a moment later, that produced measured handoff churn of
+    // 17 changes across 5 enemies in 90 s, each one interrupting whatever order
+    // the body was playing. This tolerates fifteen consecutive lost packets and
+    // still releases well inside a second and a half if the peer really has
+    // stopped fighting that body.
+    constexpr DWORD kOwnershipStaleMs = 1500;
     if (NowMs() - g_owned_enemies_at > kOwnershipStaleMs) return false;
     for (int i = 0; i < g_owned_enemy_count; ++i) {
         if (g_owned_enemies[i].name_hash != name_hash) continue;
