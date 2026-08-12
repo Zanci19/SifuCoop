@@ -310,6 +310,11 @@ void TickEnemyCinematics() {
 // moves the boundaries, and picking a different band than the rest of the graph
 // expects is exactly how you get a transition that starts and never finishes.
 int RawSpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
+    // Say ONCE which numbers this is actually using. Every band disagreement in
+    // the log is unreadable without it: a mismatch means something completely
+    // different depending on whether these came from the character or from the
+    // hardcoded fallback below.
+    static bool announced = false;
     float v0 = ReadFloatAt(bytes, kAnimVelocityMaxV0);
     float v1 = ReadFloatAt(bytes, kAnimVelocityMaxV1);
     float v2 = ReadFloatAt(bytes, kAnimVelocityMaxV2);
@@ -321,6 +326,17 @@ int RawSpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
         v0 = 20.f;
         v1 = 240.f;
         v2 = 475.f;
+        if (!announced) {
+            announced = true;
+            SC_LOG("puppet: locomotion thresholds UNAVAILABLE on this anim instance -- "
+                   "using the fallback %.0f/%.0f/%.0f, so any band disagreement with Sifu "
+                   "is probably ours",
+                   v0, v1, v2);
+        }
+    } else if (!announced) {
+        announced = true;
+        SC_LOG("puppet: locomotion thresholds read from the character: %.0f/%.0f/%.0f",
+               v0, v1, v2);
     }
     if (speed <= v0) return 0;
     if (speed < v1) return 1;
@@ -451,9 +467,31 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
         // graph. It belongs to the movement component, and m_SpeedState below is
         // a copy NativeUpdateAnimation refreshes from there every frame. Writing
         // the copy was writing a mirror; this writes the thing being mirrored.
+        // ...but only when Sifu's own answer is actually wrong.
+        //
+        // The 09:18 host log has 25 band rejections in about ninety seconds --
+        // `ours 850/V3, Sifu's 850/V2`, `ours 0/V0, Sifu's 0/V1`. Both sides
+        // agree about the SPEED in every one of them; they disagree about which
+        // band that speed belongs to, and each disagreement overwrote Sifu's
+        // value. A band overwritten while a blend is running restarts that
+        // blend, which is the documented "lifts a leg and stops".
+        //
+        // Our thresholds are a guess when the anim instance does not yield real
+        // ones (20/240/475, versus whatever this character's DB row actually
+        // says), so disagreeing with Sifu at 850 is far more likely to be us
+        // being wrong than the graph. The one case this override was written for
+        // is not a disagreement about the boundary at all -- it is the graph
+        // sitting at V0 while the body is plainly moving, which is the idle
+        // state playing at a run. That is the only case worth forcing, and
+        // outside it Sifu's own classification is left alone.
         if (targets_live) {
-            SetMovementSpeedState(g_puppet_presentation_targets.movement,
-                                  SpeedStateForSpeed(bytes, speed));
+            const int graph_band_now = bytes[kAnimSpeedState + 4];
+            const int wanted_band = SpeedStateForSpeed(bytes, speed);
+            const bool graph_is_idling_a_moving_body = graph_band_now == 0 && speed > 25.f;
+            if (graph_is_idling_a_moving_body) {
+                SetMovementSpeedState(g_puppet_presentation_targets.movement,
+                                      wanted_band > 0 ? wanted_band : 1);
+            }
         }
 
         std::memcpy(bytes + kAnimOwnerVelocity, &g_puppet_presentation_velocity,
