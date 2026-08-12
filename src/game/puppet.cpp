@@ -533,10 +533,19 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
     const int mode = (native_agrees ? 1 : 0) | (band_accepted ? 2 : 0);
     if (mode != last_mode) {
         last_mode = mode;
+        // This said "REJECTED -- forcing the anim copy" for every disagreement,
+        // which stopped being true when the override was narrowed to the only
+        // case worth forcing. 88 of those lines in one session described
+        // something the code no longer does. A disagreement while Sifu is
+        // mid-blend is normal and is now named as such; the thresholds are read
+        // from the character (measured 40/300/550), so ours is not a guess.
         SC_LOG("puppet: locomotion speed %s, band %s (ours %.0f/V%d, Sifu's %.0f/V%d)",
                native_agrees ? "agreed" : "RECOMPUTED IDLE",
-               band_accepted ? "held by the movement component"
-                             : "REJECTED -- forcing the anim copy",
+               band_accepted
+                   ? "matches"
+                   : (graph_band == 0 && speed > 25.f
+                          ? "IDLE AT SPEED -- overriding"
+                          : "differs, left alone (Sifu is mid-blend)"),
                speed, wanted, native_speed, graph_band);
     }
 

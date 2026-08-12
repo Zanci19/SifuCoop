@@ -1184,7 +1184,12 @@ void ApplyPeerDamage() {
         //
         // Only when this hit is actually going to be lethal, so an ordinary
         // exchange never disturbs the handoff.
-        const bool lethal = GetHealth(fighter) - delta <= 0.5f;
+        // Once, for the blow that actually kills it. The 11:58 log restarted one
+        // enemy's brain twice 113 ms apart: the first lethal report restored it,
+        // ownership stopped it again, and the next report in the same burst
+        // restored it a second time -- on a body that was already a corpse.
+        const bool already_dead = GetHealth(fighter) <= 0.5f || IsDead(fighter);
+        const bool lethal = !already_dead && GetHealth(fighter) - delta <= 0.5f;
         if (lethal && entry.ai_stopped && StartBrain(entry.actor)) {
             entry.ai_stopped = false;
             if (coop::Get().verbose_enemies) {
