@@ -117,6 +117,9 @@ struct Tracked {
     // Held until the host says dead too, because until then its sweep still
     // says alive and acting on that resurrects a corpse mid-death-animation.
     bool died_locally = false;
+    // Whether this body has already been shown its death sequence, so a late
+    // arrival is played once and a repeat is ignored.
+    bool death_anim_presented = false;
 
     // --- Host-side ---
     // (How much of the peer's total has been applied lives in the ledger above,
@@ -1015,6 +1018,7 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
             // between our kill and the host's confirmation drops the latch and
             // the corpse is resurrected after all.
             entry.died_locally = previous[k].died_locally;
+            entry.death_anim_presented = previous[k].death_anim_presented;
             entry.parked = previous[k].parked;
             entry.present = previous[k].present;
             entry.missing_since = previous[k].missing_since;
@@ -1841,12 +1845,31 @@ void ApplyRemoteEnemies() {
         // back upright but no longer a valid hit target, which the handoff
         // already documented for knockdowns: that is the "attacks go straight
         // through enemies that were already attacked" report, same cause.
-        if (locally_dead_before_sync && entry.local_brain && !entry.died_locally) {
+        // ...and `entry.local_brain` was wrong here, which is why this only ever
+        // half-worked.
+        //
+        // A body dies locally for two reasons, not one. It can be killed by this
+        // player under our own brain -- which is what the note above describes
+        // -- or it can reach zero because we applied the HOST's authoritative
+        // damage through Sifu's own damage path, which is every enemy the host
+        // kills while we are the observer. The second kind never latched, so the
+        // revive below stood it straight back up, and the two symptoms that
+        // produced are exactly what was reported after the last build: the death
+        // animation plays and the body immediately gets up, and a body walked
+        // back out of the down-state machine is upright but no longer a valid
+        // hit target, so attacks pass through it.
+        //
+        // The reason the host still says "alive" for a moment is ordinary: our
+        // ApplyDamage lands before the host's next sweep carries kEnemyDead. The
+        // race is the same one; only the population was too narrow.
+        //
+        // Waking a pooled body is still honoured -- that is the recycle branch
+        // further down, which requires full health rather than merely "alive".
+        if (locally_dead_before_sync && !entry.died_locally) {
             entry.died_locally = true;
             if (config.verbose_enemies) {
-                SC_LOG("enemies: %s died HERE under our own brain -- holding the corpse "
-                       "until the host agrees",
-                       entry.name);
+                SC_LOG("enemies: %s died HERE (%s) -- holding the corpse until the host agrees",
+                       entry.name, entry.local_brain ? "our brain" : "host damage applied here");
             }
         }
 
@@ -2009,13 +2032,25 @@ void ApplyRemoteEnemies() {
         // with a full health bar. That is the one case where a host "alive"
         // against a local corpse is real rather than merely early, and it is
         // what the revive below was written for.
-        if (entry.died_locally && !dead && state.health > 1.f && state.max_health > 0.f &&
-            state.health >= state.max_health - 0.5f) {
+        //
+        // ...and the FIRST authoritative state for a body is the other one.
+        // Widening the latch to cover host-applied deaths would otherwise trap a
+        // corpse restored from the joiner's own save: it is already lying down
+        // when the level loads, the host has it alive at whatever health its own
+        // run reached, and that is a disagreement about the past rather than a
+        // race about the present. There is no local death to protect there,
+        // because nothing in this session killed it.
+        const bool stale_save_corpse = first_host_state && !dead;
+        if (entry.died_locally && !dead &&
+            (stale_save_corpse ||
+             (state.health > 1.f && state.max_health > 0.f &&
+              state.health >= state.max_health - 0.5f))) {
             entry.died_locally = false;
+            entry.death_anim_presented = false;
             if (config.verbose_enemies) {
-                SC_LOG("enemies: %s came back from the pool at full health -- the host's "
-                       "'alive' is real this time",
-                       entry.name);
+                SC_LOG("enemies: %s -- the host's 'alive' is real this time (%s)", entry.name,
+                       stale_save_corpse ? "corpse from our own save, first host state"
+                                         : "back from the pool at full health");
             }
         }
         // The host agrees. Nothing left to hold: the two machines have converged
@@ -2126,6 +2161,9 @@ void ApplyRemoteEnemies() {
                 // fall is the one UE runs on a replication client, and there
                 // is no replication here to run it.
                 NotifyDownStateChanged(fighter, true);
+                // Claimed, so a sequence that arrives after this edge is played
+                // once by NoteEnemyDeathAnimation rather than twice here.
+                if (have_death_anim) entry.death_anim_presented = true;
                 SC_LOG("death: %s kill=%d anim=%d health_comp=%d -> down=%d", entry.name,
                        killed ? 1 : 0, have_death_anim ? 1 : 0, fighter.health ? 1 : 0,
                        IsDown(fighter) ? 1 : 0);
@@ -2588,8 +2626,33 @@ void NoteEnemyDeathAnimation(std::uint32_t hash, ue::UObject* animation) {
     if (!animation) return;
     const int index = FindTracked(hash);
     if (index < 0) return;
-    g_tracked[index].pending_death_anim = animation;
-    g_tracked[index].pending_death_anim_ms = GetTickCount();
+    Tracked& entry = g_tracked[index];
+    entry.pending_death_anim = animation;
+    entry.pending_death_anim_ms = GetTickCount();
+
+    // The sequence can arrive AFTER the body is already down.
+    //
+    // Measured on the joiner, 2026-08-12:
+    //   04:28:12.790  death: ... kill=1 anim=0 health_comp=1 -> down=1
+    //   04:28:13.998  death: exact enemy sequence received actor=844037D6
+    // 1.2 s apart. Health reconciliation reaches zero from the enemy sweep,
+    // while the death animation is a separate event on a separate path -- so
+    // the death edge ran with nothing to play (`anim=0`) and the ledger was
+    // filled a moment too late to be read.
+    //
+    // Claim it here instead of discarding it. The body is already in Sifu's
+    // down state; this only layers the sequence the killing machine actually
+    // chose over a fall that has already begun, which is the difference between
+    // a corpse that dropped the way it was hit and a generic one.
+    if (!entry.death_anim_presented && entry.was_down) {
+        Fighter fighter = ResolveFighter(entry.actor);
+        if (fighter.health && (GetHealth(fighter) <= 0.5f || IsDead(fighter))) {
+            entry.death_anim_presented = true;
+            if (ue::PlayAnimationAsset(entry.actor, animation, 0.f)) {
+                SC_LOG("death: %s late sequence layered onto the corpse", entry.name);
+            }
+        }
+    }
 }
 
 bool ApplyMirroredEnemyTargetForAttack(std::uint32_t hash) {
