@@ -1167,6 +1167,31 @@ void ApplyPeerDamage() {
         // again, so the hit is gone for good.
         Fighter fighter = ResolveFighter(entry.actor);
         if (!fighter.health) continue;
+
+        // A body with a stopped brain cannot play its own death. That is this
+        // project's oldest finding and it applies here in the one place nobody
+        // checked: by the time the partner's killing blow arrives, the host has
+        // ALREADY stopped this enemy's brain to hand the fight over. So the
+        // damage lands, Sifu starts a death sequence, and there is nothing
+        // running to enact it -- the corpse stands up on the host exactly as it
+        // used to on the joiner.
+        //
+        // Restarting it AFTER the kill is what was tried before, on lease
+        // expiry, and it aborted the fall. Order is the whole difference: give
+        // the body its brain back BEFORE the lethal hit and Sifu runs its own
+        // death from a working state machine, which is what happens for every
+        // enemy the host kills itself.
+        //
+        // Only when this hit is actually going to be lethal, so an ordinary
+        // exchange never disturbs the handoff.
+        const bool lethal = GetHealth(fighter) - delta <= 0.5f;
+        if (lethal && entry.ai_stopped && StartBrain(entry.actor)) {
+            entry.ai_stopped = false;
+            if (coop::Get().verbose_enemies) {
+                SC_LOG("enemies: %s given its brain back to die with", entry.name);
+            }
+        }
+
         ApplyDamage(fighter, delta);
         *applied = reports[i].total;
         if (GetHealth(fighter) > 0.5f) LaunchReplicatedImpact(entry, delta);
@@ -1376,6 +1401,31 @@ void PublishEnemies() {
         Fighter fighter = ResolveFighter(entry.actor);
         entry.health = GetHealth(fighter);
         entry.max_health = GetMaxHealth(fighter);
+
+        // The host needs the same self-healing repair the joiner has.
+        //
+        // Reported: the host fights someone, dies, revives, and then its own
+        // attacks pass through that enemy. Nothing on this side ever restored an
+        // enemy's collision or targetable registration -- both calls existed
+        // only in the joiner's path, on the assumption that the host's own
+        // simulation looks after itself. It mostly does, but this mod stops and
+        // restarts these brains to hand fights over, forces their targets, and
+        // drives some of them from the peer, and the host's own death sequence
+        // churns the room on top of that. Whenever Sifu retires a body's
+        // collision through any of that, nothing here notices or puts it back.
+        //
+        // Re-assert rather than infer, twice a second, and only for a body that
+        // should be standing and fighting. Never for one that is down, where the
+        // reduced collision is deliberate and restoring it would be the bug.
+        if (fighter.health && !IsDown(fighter) && GetHealth(fighter) > 0.5f) {
+            const DWORD presence_now = GetTickCount();
+            if (entry.next_presence_refresh == 0 ||
+                static_cast<LONG>(presence_now - entry.next_presence_refresh) >= 0) {
+                entry.next_presence_refresh = presence_now + 500;
+                SetActorPresent(entry.actor, true);
+                RegisterEnemyTargetable(entry.actor);
+            }
+        }
 
         net::EnemyStateOut& state = out[count++];
         state.name_hash = entry.hash;
