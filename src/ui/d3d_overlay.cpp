@@ -168,74 +168,49 @@ MenuStatus CopyStatus() {
     return copy;
 }
 
-void DrawLobbyTab(const MenuStatus& status) {
+// The menu is split by WHAT YOU ARE DOING, not by what the code is made of.
+//
+// Play is for someone in a session and stays nearly empty during a fight.
+// Setup is the connection, which you touch once. Options are preferences.
+// Diagnostics is for me, not for a player, and says so.
+//
+// The old single Play tab put a passphrase box and three network buttons on
+// screen during combat, which is the "unused things / make it simpler" report.
+void DrawPlayTab(const MenuStatus& status) {
     const coop::Stats& stats = coop::GetStats();
     const ImVec4 good(0.45f, 0.90f, 0.45f, 1.f);
     const ImVec4 warn(0.95f, 0.72f, 0.30f, 1.f);
+    const ImVec4 dim(0.65f, 0.65f, 0.65f, 1.f);
 
-    ImGui::TextColored(status.connected ? good : warn, "%s",
-                       status.connected ? "CONNECTED" : "Waiting for player");
-    if (status.connected && stats.rtt_ms >= 0) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("%d ms", stats.rtt_ms);
+    if (!status.connected) {
+        ImGui::TextColored(warn, "Not connected");
+        ImGui::TextColored(dim, "Open Setup, enter your partner's details, then Connect.");
+        if (status.detail[0]) ImGui::TextColored(warn, "%s", status.detail);
+        return;
     }
+
+    ImGui::TextColored(good, "Connected");
+    ImGui::SameLine();
+    if (stats.rtt_ms >= 0) ImGui::TextColored(dim, "  %d ms", stats.rtt_ms);
     if (status.detail[0]) ImGui::TextColored(warn, "%s", status.detail);
 
-    ImGui::TextDisabled("Use the host's ZeroTier IP.");
-    if (status.connected) {
-        ImGui::Text("Level: %s", status.my_level[0] ? status.my_level : "loading...");
-        ImGui::SameLine();
-        ImGui::TextDisabled("Partner: %s", status.peer_known ? "ready" : "loading...");
+    ImGui::Spacing();
+    ImGui::Text("You:     %s", status.my_level[0] ? status.my_level : "loading...");
+    ImGui::Text("Partner: %s",
+                status.together ? "here with you"
+                                : (status.peer_known ? status.peer_level : "loading..."));
+
+    // The one thing worth acting on while you are actually playing.
+    if (status.together) {
+        ImGui::Spacing();
+        if (ImGui::Button("Teleport to partner", ImVec2(200, 0))) {
+            MenuRequests r;
+            r.teleport_to_peer = true;
+            PostRequests(r);
+        }
     }
 
-    ImGui::SeparatorText("Connection");
-    ImGui::RadioButton("Host", g_field_hosting);
-    if (ImGui::IsItemClicked()) g_field_hosting = true;
-    ImGui::SameLine();
-    ImGui::RadioButton("Join", !g_field_hosting);
-    if (ImGui::IsItemClicked()) g_field_hosting = false;
-
-    ImGui::BeginDisabled(g_field_hosting);
-    ImGui::InputText("Host ZeroTier IP", g_field_address, sizeof(g_field_address));
-    ImGui::EndDisabled();
-    ImGui::InputInt("Port", &g_field_port);
-    ImGui::InputText("Shared passphrase", g_field_passphrase, sizeof(g_field_passphrase),
-                     ImGuiInputTextFlags_Password);
-    ImGui::TextDisabled("Same passphrase on both PCs.");
-
-    if (ImGui::Button("Save & Connect", ImVec2(180, 0))) {
-        MenuRequests r;
-        r.apply_network = true;
-        r.host_mode = g_field_hosting;
-        lstrcpynA(r.address, g_field_address, sizeof(r.address));
-        lstrcpynA(r.passphrase, g_field_passphrase, sizeof(r.passphrase));
-        r.port = g_field_port;
-        PostRequests(r);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Restart network")) {
-        MenuRequests r;
-        r.restart_network = true;
-        PostRequests(r);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("End connection")) {
-        MenuRequests r;
-        r.disconnect_network = true;
-        PostRequests(r);
-    }
-
-    ImGui::BeginDisabled(!status.connected || !status.hosting);
-    if (ImGui::Button("Start co-op here")) {
-        MenuRequests r;
-        r.invite_peer = true;
-        PostRequests(r);
-    }
-    ImGui::EndDisabled();
-
-    // A standing invite from the host. It is deliberately an offer rather than
-    // something that just happens: the host loading a level used to drag the
-    // other player out of whatever they were doing without a prompt.
+    // The invitation, for whichever side of it this machine is on.
     if (status.invite_pending) {
         ImGui::SeparatorText("Invitation");
         ImGui::TextColored(warn, "Your partner is playing %s", status.invite_level);
@@ -251,11 +226,21 @@ void DrawLobbyTab(const MenuStatus& status) {
             PostRequests(r);
         }
         ImGui::Checkbox("Always join automatically", &coop::Get().auto_join_level);
+    } else if (status.hosting && !status.together) {
+        ImGui::Spacing();
+        if (ImGui::Button("Start co-op here", ImVec2(200, 0))) {
+            MenuRequests r;
+            r.invite_peer = true;
+            PostRequests(r);
+        }
+        ImGui::TextColored(dim, "Invites your partner into the level you are in.");
+    } else if (!status.together) {
+        ImGui::Spacing();
+        ImGui::TextColored(dim, "Waiting for the host to start co-op.");
     }
 
-    // The host's half of the same conversation.
     if (status.invite_answer_valid) {
-        ImGui::SeparatorText("Invitation");
+        ImGui::Spacing();
         if (status.invite_answer_accepted) {
             ImGui::TextColored(good, "Your partner accepted -- they are on their way.");
         } else {
@@ -263,68 +248,133 @@ void DrawLobbyTab(const MenuStatus& status) {
         }
     }
 
-    if (status.connected && status.together) {
-        ImGui::SeparatorText("Together");
-        // The "meet me at the boss" request from the play-testers, generalised:
-        // rather than scripting a trigger per boss door, either player can close
-        // the gap whenever they want to start something together.
-        if (ImGui::Button("Teleport to partner", ImVec2(180, 0))) {
-            MenuRequests r;
-            r.teleport_to_peer = true;
-            PostRequests(r);
-        }
-    }
-
-    if (status.connected && !status.together && !status.invite_pending) {
-        ImGui::TextColored(warn, "%s", status.hosting ? "Press Start co-op here when ready."
-                                                        : "Waiting for host to start co-op.");
-    }
     if (stats.packets_rejected > 0) {
-        if (status.connected) {
-            ImGui::TextColored(warn, "Ignored %u unauthenticated packets; current peer is connected.",
-                               stats.packets_rejected);
-        } else {
-            ImGui::TextColored(warn, "Unauthenticated packets rejected: check the shared passphrase.");
-        }
+        ImGui::Spacing();
+        ImGui::TextColored(warn, "%u packets rejected -- check both passphrases match.",
+                           stats.packets_rejected);
     }
 }
 
-void DrawDebugTab() {
-    const coop::Stats& stats = coop::GetStats();
+void DrawSetupTab(const MenuStatus& status) {
+    const ImVec4 dim(0.65f, 0.65f, 0.65f, 1.f);
+
+    ImGui::RadioButton("Host the game", g_field_hosting);
+    if (ImGui::IsItemClicked()) g_field_hosting = true;
+    ImGui::SameLine();
+    ImGui::RadioButton("Join a game", !g_field_hosting);
+    if (ImGui::IsItemClicked()) g_field_hosting = false;
+
+    ImGui::Spacing();
+    ImGui::BeginDisabled(g_field_hosting);
+    ImGui::InputText("Partner's IP", g_field_address, sizeof(g_field_address));
+    ImGui::EndDisabled();
+    if (g_field_hosting) {
+        ImGui::TextColored(dim, "Give your partner your ZeroTier address (the 10.x one).");
+        if (g_public_address[0]) ImGui::TextColored(dim, "Seen from outside: %s",
+                                                    g_public_address);
+    } else {
+        ImGui::TextColored(dim, "Use the host's ZeroTier address.");
+    }
+
+    ImGui::InputInt("Port", &g_field_port);
+    ImGui::InputText("Passphrase", g_field_passphrase, sizeof(g_field_passphrase),
+                     ImGuiInputTextFlags_Password);
+    ImGui::TextColored(dim, "Must match on both PCs.");
+
+    ImGui::Spacing();
+    if (ImGui::Button("Connect", ImVec2(140, 0))) {
+        MenuRequests r;
+        r.apply_network = true;
+        r.host_mode = g_field_hosting;
+        lstrcpynA(r.address, g_field_address, sizeof(r.address));
+        lstrcpynA(r.passphrase, g_field_passphrase, sizeof(r.passphrase));
+        r.port = g_field_port;
+        PostRequests(r);
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!status.connected);
+    if (ImGui::Button("Disconnect", ImVec2(140, 0))) {
+        MenuRequests r;
+        r.disconnect_network = true;
+        PostRequests(r);
+    }
+    ImGui::EndDisabled();
+
+    if (ImGui::TreeNode("Connection trouble?")) {
+        if (ImGui::Button("Restart networking", ImVec2(180, 0))) {
+            MenuRequests r;
+            r.restart_network = true;
+            PostRequests(r);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Find my public address", ImVec2(200, 0))) {
+            MenuRequests r;
+            r.discover_address = true;
+            PostRequests(r);
+        }
+        ImGui::TextColored(dim, "ZeroTier is the supported way to reach each other.");
+        ImGui::TreePop();
+    }
+}
+
+void DrawOptionsTab() {
     coop::Config& config = coop::Get();
+    const ImVec4 dim(0.65f, 0.65f, 0.65f, 1.f);
 
-    ImGui::Text("Network: %s", net::IsConnected() ? "connected" : "not connected");
-    ImGui::Text("Ping: %d ms   Enemies: %d active / %d synced", stats.rtt_ms,
-                stats.enemies_active, stats.enemies_driven);
-    ImGui::Separator();
-    ImGui::Checkbox("Detailed enemy log", &config.verbose_enemies);
-    ImGui::Checkbox("Detailed combat log", &config.verbose_orders);
-    ImGui::Checkbox("Adaptive smoothing", &config.adaptive_interp);
-    ImGui::Checkbox("Block game input while menu is open", &config.menu_exclusive_input);
-    ImGui::Checkbox("Partner swings visibly (cosmetic only)",
-                    &config.remote_player_attacks);
-    ImGui::Checkbox("Hide partner's health bar", &config.hide_second_player_hud);
-    ImGui::Checkbox("Join partner's level without asking", &config.auto_join_level);
+    ImGui::SeparatorText("Playing together");
+    ImGui::Checkbox("Join my partner's level without asking", &config.auto_join_level);
+    ImGui::Checkbox("Hide my partner's health bar", &config.hide_second_player_hud);
+    ImGui::Checkbox("Show my partner's attacks", &config.remote_player_attacks);
+    ImGui::TextColored(dim, "Visual only -- their hits are resolved on their own PC.");
 
-    ImGui::TextDisabled("Custom UDP mirror is the supported networking mode.");
-    if (ImGui::Button("Save settings")) {
+    ImGui::SeparatorText("This menu");
+    ImGui::Checkbox("Block the game while this menu is open", &config.menu_exclusive_input);
+    ImGui::TextColored(dim, "Off by default, so clicks and keys still reach Sifu.");
+
+    ImGui::SeparatorText("Smoothing");
+    ImGui::Checkbox("Adapt to connection quality", &config.adaptive_interp);
+
+    ImGui::Spacing();
+    if (ImGui::Button("Save settings", ImVec2(160, 0))) {
         MenuRequests r;
         r.save_config = true;
         PostRequests(r);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Dump debug log")) {
+    ImGui::TextColored(dim, "Kept in SifuCoop.ini next to the game.");
+}
+
+void DrawDiagnosticsTab() {
+    const coop::Stats& stats = coop::GetStats();
+    coop::Config& config = coop::Get();
+    const ImVec4 dim(0.65f, 0.65f, 0.65f, 1.f);
+
+    ImGui::TextColored(dim, "For bug reports. Nothing here is needed to play.");
+    ImGui::Spacing();
+    ImGui::Text("Ping           %d ms", stats.rtt_ms);
+    ImGui::Text("Enemies        %d active, %d synced", stats.enemies_active,
+                stats.enemies_driven);
+    ImGui::Text("Damage         %.0f sent, %.0f applied", stats.damage_reported_total,
+                stats.damage_applied_total);
+    ImGui::Text("Attacks echoed %u", stats.attacks_echoed);
+
+    ImGui::SeparatorText("Extra logging");
+    ImGui::Checkbox("Enemy detail", &config.verbose_enemies);
+    ImGui::Checkbox("Combat detail", &config.verbose_orders);
+
+    ImGui::Spacing();
+    if (ImGui::Button("Write roster to log", ImVec2(180, 0))) {
         MenuRequests r;
         r.log_roster = true;
         PostRequests(r);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Restart remote player")) {
+    if (ImGui::Button("Respawn partner's body", ImVec2(190, 0))) {
         MenuRequests r;
         r.despawn_puppet = true;
         PostRequests(r);
     }
-    ImGui::TextDisabled("Log: %%LOCALAPPDATA%%\\Sifu\\Saved\\Logs\\SifuCoop.log");
+    ImGui::TextColored(dim, "Log: %%LOCALAPPDATA%%\\Sifu\\Saved\\Logs\\SifuCoop.log");
 }
 
 // An invitation the player never sees is an invitation that looks ignored to
@@ -381,11 +431,19 @@ void DrawMenu() {
     const MenuStatus status = CopyStatus();
     if (ImGui::BeginTabBar("tabs")) {
         if (ImGui::BeginTabItem("Play")) {
-            DrawLobbyTab(status);
+            DrawPlayTab(status);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Debug")) {
-            DrawDebugTab();
+        if (ImGui::BeginTabItem("Setup")) {
+            DrawSetupTab(status);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Options")) {
+            DrawOptionsTab();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Diagnostics")) {
+            DrawDiagnosticsTab();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
