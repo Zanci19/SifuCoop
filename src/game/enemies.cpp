@@ -1422,7 +1422,10 @@ void PublishEnemies() {
             if (entry.next_presence_refresh == 0 ||
                 static_cast<LONG>(presence_now - entry.next_presence_refresh) >= 0) {
                 entry.next_presence_refresh = presence_now + 500;
-                SetActorPresent(entry.actor, true);
+                // Collision and registration only. Re-asserting VISIBILITY on a
+                // timer would override whatever Sifu hid a body for, and a
+                // repeating repair must never be able to make something appear.
+                SetActorCollisionEnabled(entry.actor, true);
                 RegisterEnemyTargetable(entry.actor);
             }
         }
@@ -1963,7 +1966,10 @@ void ApplyRemoteEnemies() {
             if (entry.next_presence_refresh == 0 ||
                 static_cast<LONG>(presence_now - entry.next_presence_refresh) >= 0) {
                 entry.next_presence_refresh = presence_now + 500;
-                SetActorPresent(entry.actor, true);
+                // Collision and registration only. Re-asserting VISIBILITY on a
+                // timer would override whatever Sifu hid a body for, and a
+                // repeating repair must never be able to make something appear.
+                SetActorCollisionEnabled(entry.actor, true);
                 RegisterEnemyTargetable(entry.actor);
             }
         }

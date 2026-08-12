@@ -340,6 +340,15 @@ bool StartBrain(ue::UObject* actor) {
     return ue::CallFunction(component.ReturnValue, L"RestartLogic", &none);
 }
 
+void SetActorCollisionEnabled(ue::UObject* actor, bool enabled) {
+    if (!actor) return;
+    struct CollisionParams {
+        bool bNewActorEnableCollision;
+    } collision = {};
+    collision.bNewActorEnableCollision = enabled;
+    ue::CallFunction(actor, L"SetActorEnableCollision", &collision);
+}
+
 void SetActorPresent(ue::UObject* actor, bool present) {
     if (!actor) return;
 

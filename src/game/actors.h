@@ -116,6 +116,15 @@ bool StartBrain(ue::UObject* actor);
 // has not -- a teleport alone leaves a pooled enemy invisible and intangible.
 void SetActorPresent(ue::UObject* actor, bool present);
 
+// Collision ONLY, without touching visibility.
+//
+// SetActorPresent writes both, which is right on a real transition and wrong on
+// a repeating repair: forcing a body VISIBLE twice a second overrides whatever
+// Sifu hid it for -- a takedown cinematic, a pooled body mid-lift -- and that
+// shows up as characters appearing and behaving where they should not. A repair
+// that only ever restores hittability cannot do that.
+void SetActorCollisionEnabled(ue::UObject* actor, bool enabled);
+
 // Sends a desired world-space velocity through the character movement component.
 // This is native engine steering (not a transform write), so movement, collision
 // and locomotion animation stay on the normal Sifu path. A true result means the

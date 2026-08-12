@@ -1247,20 +1247,32 @@ void ApplyPeerVitals(ue::UObject* puppet, const net::PeerVitals& vitals) {
     // transition but the puppet stayed standing. InternalSetDownState is what
     // drives the visible state machine; SetDown does both.
     SetDown(fighter, vitals.is_down);
-    // ...and RUN it, which is the half that was missing.
+
+    // DEATHS ONLY. Presenting every down state here was a regression, and the
+    // report for it was "people fall even when they're not supposed to".
     //
-    // Reported: the remote player "animates down but does not stay down". Both
-    // halves of that are literally true. The fall is played by the action
-    // channel, which carries whatever UPlayerAnim was showing; the STATE is set
-    // here by SetDown -- and on a machine with no replication nothing ever runs
-    // the OnRep callback that makes the state stick, so the body finishes the
-    // animation and stands straight back up.
+    // NotifyDownStateChanged does not mark anything -- it PLAYS the fall. And
+    // `is_down` is Sifu's IsDown, which is true for every knockdown, not only
+    // for death. Knockdowns are frequent, and the puppet is already receiving
+    // the peer's real animation over the action channel, so presenting here put
+    // a second, generic fall on top of the correct one every time the partner
+    // was staggered.
     //
-    // Same defect as the enemy corpses, same fix, and it has to be here rather
-    // than at the animation: an actor that is not really down is also not
-    // really a corpse, which is the other half of what was reported.
-    NotifyDownStateChanged(fighter, vitals.is_down);
-    SC_LOG("puppet: peer %s", vitals.is_down ? "went DOWN" : "got back up");
+    // The original complaint -- animates down but does not stay down -- is only
+    // about death, where the body has to remain a corpse afterwards. A knockdown
+    // is supposed to end with standing back up, so for those SetDown alone is
+    // both sufficient and correct.
+    const bool peer_is_dead = vitals.max_health > 0.f && vitals.health <= 0.5f;
+    if (vitals.is_down && peer_is_dead) {
+        NotifyDownStateChanged(fighter, true);
+    } else if (!vitals.is_down) {
+        // Getting up is safe to present unconditionally: it is the transition
+        // that restores collision and combat bookkeeping, and a body that is
+        // already standing is unaffected by it.
+        NotifyDownStateChanged(fighter, false);
+    }
+    SC_LOG("puppet: peer %s%s", vitals.is_down ? "went DOWN" : "got back up",
+           vitals.is_down && !peer_is_dead ? " (knockdown -- state only)" : "");
 }
 
 // Just the leaf name, for display: the full package path is far too long for a
