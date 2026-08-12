@@ -120,6 +120,9 @@ struct Tracked {
     // Whether this body has already been shown its death sequence, so a late
     // arrival is played once and a repeat is ignored.
     bool death_anim_presented = false;
+    // Next time this body's presence is re-asserted rather than merely checked
+    // against our own bookkeeping. See the refresh in ApplyRemoteEnemies.
+    DWORD next_presence_refresh = 0;
 
     // --- Host-side ---
     // (How much of the peer's total has been applied lives in the ledger above,
@@ -1172,8 +1175,22 @@ void ApplyPeerDamage() {
         // down. A body that falls generically beats one that stands.
         if (GetHealth(fighter) <= 0.5f && !IsDown(fighter)) {
             SetDown(fighter, true);
+            // The host has the same problem the joiner had, for a sharper
+            // reason: by the time the partner kills this body, the host has
+            // ALREADY stopped its brain to hand the fight over. The 05:11 log
+            // shows it plainly --
+            //   05:11:10  authority: ...Receptionist_Left actions handed to peer;
+            //             host brain stopped
+            //   05:11:13  enemies: ...Receptionist_Left killed by your partner
+            //             -- forced down
+            // -- and a body with a stopped brain cannot play its own death.
+            // SetDown alone marks it and leaves it standing, so the host sees
+            // the corpse the joiner is looking at from the other side of the
+            // same bug. Run the presentation here too.
+            NotifyDownStateChanged(fighter, true);
             if (coop::Get().verbose_enemies) {
-                SC_LOG("enemies: %s killed by your partner -- forced down", entry.name);
+                SC_LOG("enemies: %s killed by your partner -- forced down and presented",
+                       entry.name);
             }
         }
 
@@ -1828,6 +1845,36 @@ void ApplyRemoteEnemies() {
         }
 
         Fighter fighter = ResolveFighter(entry.actor);
+
+        // ...and the test above only ever catches OUR bookkeeping changing.
+        //
+        // The comment above is right about the symptom and wrong about the
+        // sufficiency. `entry.present` records what we last asked for, not what
+        // the body actually has, and Sifu retires and restores collision and
+        // targetable registration on its own -- around knockdowns, deaths,
+        // pooling and the resurrection sequence. Whenever it does that behind
+        // us, our flag still reads "present", the transition never fires, and
+        // the repair never runs. The body stays alive, visible, and untouchable
+        // for the rest of the fight.
+        //
+        // Reported exactly that way: an enemy one player is fighting cannot be
+        // hit by the other, and it persists after that enemy dies. The bodies
+        // that change hands are the ones whose liveness churns, which is why it
+        // is always those.
+        //
+        // So re-assert rather than infer. Idempotent reflected calls, twice a
+        // second, and only for a body that is supposed to be standing and
+        // fighting -- never for one that is down, where Sifu's reduced collision
+        // is deliberate and putting it back would be the bug.
+        if (should_be_present && fighter.health && !IsDown(fighter)) {
+            const DWORD presence_now = GetTickCount();
+            if (entry.next_presence_refresh == 0 ||
+                static_cast<LONG>(presence_now - entry.next_presence_refresh) >= 0) {
+                entry.next_presence_refresh = presence_now + 500;
+                SetActorPresent(entry.actor, true);
+                RegisterEnemyTargetable(entry.actor);
+            }
+        }
         const bool locally_dead_before_sync =
             fighter.health && (GetHealth(fighter) <= 0.5f || IsDead(fighter));
 

@@ -1247,6 +1247,19 @@ void ApplyPeerVitals(ue::UObject* puppet, const net::PeerVitals& vitals) {
     // transition but the puppet stayed standing. InternalSetDownState is what
     // drives the visible state machine; SetDown does both.
     SetDown(fighter, vitals.is_down);
+    // ...and RUN it, which is the half that was missing.
+    //
+    // Reported: the remote player "animates down but does not stay down". Both
+    // halves of that are literally true. The fall is played by the action
+    // channel, which carries whatever UPlayerAnim was showing; the STATE is set
+    // here by SetDown -- and on a machine with no replication nothing ever runs
+    // the OnRep callback that makes the state stick, so the body finishes the
+    // animation and stands straight back up.
+    //
+    // Same defect as the enemy corpses, same fix, and it has to be here rather
+    // than at the animation: an actor that is not really down is also not
+    // really a corpse, which is the other half of what was reported.
+    NotifyDownStateChanged(fighter, vitals.is_down);
     SC_LOG("puppet: peer %s", vitals.is_down ? "went DOWN" : "got back up");
 }
 
