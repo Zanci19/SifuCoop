@@ -1110,10 +1110,15 @@ bool LaunchReplicatedImpact(Tracked& entry, float replicated_delta) {
     const bool launched = ue::CallFunction(entry.actor, L"BPF_LaunchImpact", &params);
     static unsigned int attempts = 0;
     if (++attempts <= 8 || coop::Get().verbose_enemies) {
-        SC_LOG("reaction: replicated %.1f damage on %08X '%s' -- zero-damage fake impact %s "
-               "(stun=%.2f)",
-               replicated_delta, entry.hash, entry.name, launched ? "LAUNCHED" : "UNAVAILABLE",
-               params.fStunTime);
+        // `owner` is the field that decides whether this line means anything.
+        // A reaction on a body we are simulating would have happened without
+        // us; only the OBSERVED ones test whether the replicated impact works,
+        // and the census cannot tell the two apart on its own.
+        SC_LOG("reaction: replicated %.1f damage on %08X '%s' [%s] -- zero-damage fake "
+               "impact %s (stun=%.2f)",
+               replicated_delta, entry.hash, entry.name,
+               entry.local_brain ? "we simulate it" : "OBSERVED",
+               launched ? "LAUNCHED" : "UNAVAILABLE", params.fStunTime);
     }
     return launched;
 }
@@ -2053,10 +2058,18 @@ void ApplyRemoteEnemies() {
                                          : "back from the pool at full health");
             }
         }
-        // The host agrees. Nothing left to hold: the two machines have converged
-        // on dead, and the body here is already lying where its own death
-        // sequence put it.
-        if (entry.died_locally && dead) entry.died_locally = false;
+        // Deliberately NOT cleared when the host agrees.
+        //
+        // Clearing on `dead` made the latch flap: it was set at the top of this
+        // loop, cleared here, and set again on the next sweep, ~80 times a
+        // second for as long as the corpse existed. The 04:56 log is one enemy
+        // repeating "died HERE" every 12 ms. The latch only ever gates a
+        // REVIVAL, and a revival requires !dead, so holding it while dead costs
+        // nothing and the flap costs a flooded log.
+        //
+        // It is released by the two branches above -- a genuine pool recycle at
+        // full health, or the first authoritative state for a body -- which are
+        // the only two ways a dead body legitimately comes back.
 
         if (!dead && locally_dead_before_sync && !entry.died_locally &&
             net::EnemySweepIsFresh()) {
@@ -2068,6 +2081,18 @@ void ApplyRemoteEnemies() {
                 entry.last_local_health = revive_health;
             }
             SetDown(fighter, false);
+            // ...and RUN the stand-up, not just clear the flag.
+            //
+            // Reported: "after revive collisions are effed up, all goes
+            // through". SetDown changes the state machine;
+            // UCharacterHealthComponent::OnCharacterStandsUp is what Sifu runs
+            // at the END of a get-up to put the body back into the fight, and
+            // on a machine with no replication nothing else ever calls it. A
+            // body revived without it is upright in state, has never re-entered
+            // its own combat bookkeeping, and is exactly as hittable as a
+            // corpse. SetActorEnableCollision below restores the actor's
+            // collision; this restores the character's.
+            NotifyDownStateChanged(fighter, false);
             SetActorPresent(entry.actor, true);
             RegisterEnemyTargetable(entry.actor);
             entry.present = true;
@@ -2085,11 +2110,32 @@ void ApplyRemoteEnemies() {
                            ? "we killed it, the host has not caught up yet"
                            : "the host's sweep is stale and its 'alive' cannot be trusted");
             }
-            // Its death is ours and it has already happened. Do not let the
-            // host's late confirmation re-run a kill on a body that is lying
-            // down: that is what turned a finished death sequence back into a
-            // forced down-state.
-            entry.was_down = true;
+
+            // PRESENT the death here, and only then claim the edge.
+            //
+            // Setting was_down without presenting is the bug the 04:56 log
+            // caught: `hp=0/0 dead=1 hostdown=1 down=0`, held for the rest of
+            // the fight. Claiming the edge suppressed the host's later
+            // confirmation -- which is the branch that calls SetDown and
+            // NotifyDownStateChanged -- so the corpse never entered Sifu's
+            // down state at all. A body at zero health that is not down has not
+            // retired its collision and is not a corpse: it neither lies down
+            // nor can be hit, which is exactly "they don't stay down" and
+            // "everything goes through" reported together.
+            //
+            // Do both, once. The host's edge below then finds the body already
+            // down and its `if (!IsDown)` guard makes it a no-op, so the fall
+            // that is playing is never interrupted by a second forced state.
+            if (!entry.was_down) {
+                entry.was_down = true;
+                if (fighter.health) {
+                    if (!IsDown(fighter)) SetDown(fighter, true);
+                    NotifyDownStateChanged(fighter, true);
+                    SC_LOG("death: %s presented locally (down=%d) ahead of the host's "
+                           "confirmation",
+                           entry.name, IsDown(fighter) ? 1 : 0);
+                }
+            }
         } else if (entry.was_down != dead) {
             entry.was_down = dead;
             // A death is not a knockdown, and InternalSetDownState only knows
