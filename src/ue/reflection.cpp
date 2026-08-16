@@ -46,6 +46,19 @@ UObject** g_gworld = nullptr;
 
 bool g_ready = false;
 
+// Committed and readable, without faulting to find out.
+bool RangeReadable(const void* address, std::size_t size) {
+    MEMORY_BASIC_INFORMATION info = {};
+    if (VirtualQuery(address, &info, sizeof(info)) == 0) return false;
+    if (info.State != MEM_COMMIT) return false;
+    constexpr DWORD kNoRead = PAGE_NOACCESS | PAGE_GUARD;
+    if (info.Protect & kNoRead) return false;
+    const auto start = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+    const auto end = start + info.RegionSize;
+    return reinterpret_cast<std::uintptr_t>(address) + size <= end;
+}
+std::uintptr_t g_module_base = 0;
+
 FName MakeName(const wchar_t* text) {
     FName name = {};
     g_fname_ctor(&name, text, kFNameAdd);
@@ -55,6 +68,7 @@ FName MakeName(const wchar_t* text) {
 }
 
 bool InitReflection(std::uintptr_t base) {
+    g_module_base = base;
     g_fname_ctor = reinterpret_cast<FNameCtorFn>(base + offsets::FName_FromWide);
     g_find_function = reinterpret_cast<FindFunctionFn>(base + offsets::UObject_FindFunction);
     g_process_event = reinterpret_cast<ProcessEventFn>(base + offsets::UObject_ProcessEvent);
@@ -385,16 +399,49 @@ bool RestoreAnimationBlueprint(UObject* actor, void* anim_class) {
     return GetAnimInstance(actor) != nullptr;
 }
 
+// Whether this pointer can be TOUCHED. Deliberately not "is this UObject alive".
+//
+// This used to ask Kismet's IsValid through ProcessEvent, which is a
+// contradiction: dispatching a UFunction on the object dereferences the very
+// pointer the call is meant to vet. Every caller was a stale-pointer guard, so
+// the guard was the fault. It crashed the host on 2026-08-16 at 16:05 --
+//
+//   EXCEPTION_ACCESS_VIOLATION reading 0x8
+//   UKismetSystemLibrary::execIsValidClass -> UFunction::Invoke
+//   -> UObject::ProcessEvent -> dsound
+//
+// -- reached from WriteRelationship, which validates a social component and a
+// target on every relationship assert.
+//
+// Structural instead, and no call at all: committed readable memory, a vtable
+// inside the game module, and a ClassPrivate that is itself a readable object
+// with a module vtable. That is the same bar orders.cpp already applies before
+// touching an order, and it is the strongest test available without walking
+// GUObjectArray.
+//
+// It proves the memory is safe to read. It does NOT prove the object is live,
+// so it must not be used to decide gameplay -- only to avoid faulting. Callers
+// that need liveness track it themselves (world identity, sweep freshness).
 bool IsValidObject(UObject* object) {
-    if (!g_ready || !object) return false;
-    UObject* kismet = FindObjectByPath(L"/Script/Engine.Default__KismetSystemLibrary");
-    if (!kismet) return false;
-    struct Params {
-        UObject* Object;
-        bool ReturnValue;
-    } params = {object, false};
-    if (!CallFunction(kismet, L"IsValid", &params)) return false;
-    return params.ReturnValue;
+    if (!object || g_module_base == 0) return false;
+
+    const auto address = reinterpret_cast<std::uintptr_t>(object);
+    if (address < 0x10000 || (address & 7) != 0) return false;
+    if (!RangeReadable(object, 0x20)) return false;
+
+    constexpr std::uintptr_t kModuleSpan = 0x10000000u;
+    const auto vtable = *reinterpret_cast<const std::uintptr_t*>(object);
+    if (vtable < g_module_base || vtable - g_module_base > kModuleSpan) return false;
+
+    // UObjectBase::ClassPrivate, the one fixed offset this codebase takes on
+    // faith everywhere else too.
+    const auto class_private = *reinterpret_cast<const std::uintptr_t*>(
+        reinterpret_cast<const std::uint8_t*>(object) + 0x10);
+    if (class_private < 0x10000 || (class_private & 7) != 0) return false;
+    if (!RangeReadable(reinterpret_cast<const void*>(class_private), 8)) return false;
+
+    const auto class_vtable = *reinterpret_cast<const std::uintptr_t*>(class_private);
+    return class_vtable >= g_module_base && class_vtable - g_module_base <= kModuleSpan;
 }
 
 float GetAnimationAssetLength(UObject* animation_asset) {

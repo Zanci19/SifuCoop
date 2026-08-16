@@ -752,6 +752,8 @@ struct PendingReaction {
     unsigned int order_type = 0;
     DWORD until_ms = 0;
     ue::UObject* last_sent = nullptr;
+    // Why the last capture attempt gave up, for the expiry message.
+    const char* reason = nullptr;
 };
 constexpr int kPendingReactionCount = 8;
 PendingReaction g_pending_reactions[kPendingReactionCount] = {};
@@ -822,11 +824,19 @@ void PumpReactionCaptures() {
         if (static_cast<LONG>(pending.until_ms - now) <= 0) {
 
 
-            if (!pending.last_sent) {
+            // Only complain for orders that are supposed to HAVE a hit
+            // animation. StructureBroken and Dizzy are consequences of a hit
+            // rather than hit reactions, and Sifu appends nothing to the
+            // history for them -- counting those as failures buried the real
+            // ones in noise.
+            const unsigned int t = pending.order_type;
+            const bool expects_sequence = t == 3 || t == 58 || t == 12 || t == 10;
+            if (!pending.last_sent && expects_sequence) {
                 static unsigned int missed = 0;
-                if (++missed <= 5 || coop::Get().verbose_orders) {
-                    SC_LOG("reaction: %s on %08X -- HitAnimHistory produced no new sequence",
-                           OrderTypeName(pending.order_type), pending.actor_hash);
+                if (++missed <= 8 || coop::Get().verbose_orders) {
+                    SC_LOG("reaction: %s on %08X -- no sequence (%s)",
+                           OrderTypeName(pending.order_type), pending.actor_hash,
+                           pending.reason ? pending.reason : "window expired with no attempt");
                 }
             }
             pending = {};
@@ -835,17 +845,28 @@ void PumpReactionCaptures() {
 
 
 
+        // Every failure below used to be a bare `continue`, so the expiry
+        // message could not say which step failed -- call, array, type or
+        // duplicate. Four different faults shared one line. Record the last
+        // reason so the expiry message names it.
         ue::UObject* actor = FindEnemyByHash(pending.actor_hash);
-        if (!actor) continue;
-        if (!ue::CallFunction(actor, L"GetHitAnimHistory", &history)) continue;
+        if (!actor) { pending.reason = "enemy not tracked here"; continue; }
+        if (!ue::CallFunction(actor, L"GetHitAnimHistory", &history)) {
+            pending.reason = "GetHitAnimHistory did not dispatch on this class";
+            continue;
+        }
         if (!history.data || history.num <= 0 || history.num > history.max ||
-            history.max > 256) continue;
+            history.max > 256) {
+            pending.reason = "history empty";
+            continue;
+        }
         ue::UObject* sequence = history.data[history.num - 1];
-
-
-
-        if (!sequence || !ue::ObjectClassIs(sequence, "AnimSequence")) continue;
-        if (sequence == pending.last_sent) continue;
+        if (!sequence) { pending.reason = "history entry null"; continue; }
+        if (!ue::ObjectClassIs(sequence, "AnimSequence")) {
+            pending.reason = "history entry is not an AnimSequence";
+            continue;
+        }
+        if (sequence == pending.last_sent) { pending.reason = "unchanged"; continue; }
         pending.last_sent = sequence;
 
         char path[192] = {};

@@ -41,6 +41,11 @@ bool g_have_peer_addr = false;
 std::uint32_t g_send_sequence = 0;
 std::uint32_t g_last_snapshot_sequence = 0;
 DWORD g_last_recv_ms = 0;
+// When either machine last did something level-shaped: sent an invite, received
+// one, or reported a different level. A machine loading a map does not send for
+// several seconds and cannot say so, which is exactly when the ordinary timeout
+// must not fire.
+DWORD g_level_activity_ms = 0;
 DWORD g_last_send_ms = 0;
 DWORD g_last_ping_ms = 0;
 DWORD g_last_hello_ms = 0;
@@ -835,7 +840,10 @@ void HandleLevelSync(const LevelSyncPacket& packet) {
     }
 
 
+    const bool level_changed = _stricmp(g_peer_level, packet.level_path) != 0;
     lstrcpynA(g_peer_level, packet.level_path, sizeof(g_peer_level));
+    // Level-shaped traffic: see the timeout grace in TickSession.
+    if (level_changed || packet.request_id != 0) g_level_activity_ms = NowMs();
 
     if (packet.request_id == 0 || packet.request_id == g_level_request_seen) return;
     g_level_request_seen = packet.request_id;
@@ -1473,6 +1481,7 @@ bool RestartSession() {
     g_send_sequence = 0;
     for (std::uint32_t& value : g_send_sequence_by_type) value = 0;
     g_last_recv_ms = 0;
+    g_level_activity_ms = 0;
     g_last_send_ms = 0;
     g_last_ping_ms = 0;
     g_last_hello_ms = 0;
@@ -1489,6 +1498,7 @@ void DisconnectSession() {
     g_have_peer_addr = false;
     g_role = Role::Offline;
     g_last_recv_ms = 0;
+    g_level_activity_ms = 0;
     g_last_send_ms = 0;
     g_last_ping_ms = 0;
     g_last_hello_ms = 0;
@@ -1602,6 +1612,7 @@ void SendLevelSyncPacket(const char* level_path, std::uint32_t request_id) {
 }
 
 void SendLevelSync(const char* level_path) {
+    g_level_activity_ms = NowMs();
     if (!g_connected || !level_path || !level_path[0]) return;
     lstrcpynA(g_active_level_request, level_path, sizeof(g_active_level_request));
     g_active_level_request_id = g_level_request_next;
@@ -1615,6 +1626,7 @@ void BumpLevelRequest() {
 }
 
 void SendLevelPresence(const char* level_path) {
+    g_level_activity_ms = NowMs();
     if (!g_connected || !level_path || !level_path[0]) return;
     LevelSyncPacket packet = {};
     FillHeader(&packet.header, PacketType::LevelSync);
@@ -2030,7 +2042,18 @@ void TickSession(const LocalState& local) {
 
 
 
-    const bool peer_loading = g_role == Role::Host && g_active_level_request[0] != '\0';
+    // The grace used to apply only when the HOST had an invite outstanding, so a
+    // joiner loading for any other reason -- joining, restarting, travelling on
+    // its own -- got none. Measured 2026-08-16: the joiner dumped its enemy
+    // roster at 16:53:39 mid-load and the host cut it at 16:53:51 with "peer
+    // timed out after 12003ms", killing the session at the moment both sides
+    // were trying to meet.
+    //
+    // Loading is silent by nature and cannot be announced. Grace is granted to
+    // either role whenever anything level-shaped happened recently.
+    const bool level_traffic_recent =
+        g_level_activity_ms != 0 && now - g_level_activity_ms <= kLevelRetryTimeoutMs;
+    const bool peer_loading = g_active_level_request[0] != 0 || level_traffic_recent;
     const DWORD timeout_ms = peer_loading ? kLevelRetryTimeoutMs : kTimeoutMs;
     if (g_connected && g_last_recv_ms != 0 && now - g_last_recv_ms > timeout_ms) {
         SC_LOG("net: peer timed out after %lums", now - g_last_recv_ms);

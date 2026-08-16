@@ -486,10 +486,31 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
 
         if (targets_live) {
             const int wanted_band = SpeedStateForSpeed(bytes, speed);
-            if (wanted_band != g_puppet_last_commanded_speed_band) {
+            const int graph_band_now = bytes[kAnimSpeedState + 4];
+
+            // Command on a change, and ALSO when the graph simply did not take
+            // it. Latching on our own wanted value alone is why the band stayed
+            // wrong: we issue V0 once, the movement component does not adopt it,
+            // and the latch then says "already V0" forever. The 07:09 log is
+            // full of that -- `ours 0/V0, Sifu's 0/V3`, a standing body playing
+            // a sprint, and `ours 850/V3, Sifu's 850/V1`, a sprinting body
+            // playing a walk. 25 disagreements against 7 agreements.
+            //
+            // Re-asserting cannot go back to being per-frame: BaseMovementDB
+            // gives these transitions 0.3-1.0 s and a command restarts the blend
+            // it interrupts. So a disagreement is re-commanded at most every
+            // 400 ms, which is slower than any blend can be restarted by it and
+            // still fast enough that a wrong band cannot persist.
+            const DWORD band_now = GetTickCount();
+            static DWORD last_band_command = 0;
+            const bool wanted_changed = wanted_band != g_puppet_last_commanded_speed_band;
+            const bool graph_refused = graph_band_now != wanted_band &&
+                                       band_now - last_band_command >= 400;
+            if (wanted_changed || graph_refused) {
                 SetMovementSpeedState(g_puppet_presentation_targets.movement,
                                       wanted_band);
                 g_puppet_last_commanded_speed_band = wanted_band;
+                last_band_command = band_now;
             }
         }
 
