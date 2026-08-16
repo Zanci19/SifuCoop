@@ -12,8 +12,8 @@ namespace {
 
 namespace offsets = sifucoop::offsets;
 
-// EFindName::FNAME_Add -- creates the entry if absent, which is harmless and
-// avoids a silent None when a name happens not to be interned yet.
+
+
 constexpr int kFNameAdd = 1;
 
 using FNameCtorFn = FName*(__fastcall*)(FName*, const wchar_t*, int);
@@ -27,8 +27,8 @@ using GetPathNameFn = void(__fastcall*)(const UObject* self, const UObject* stop
                                         void* out_string);
 using StaticFindObjectSafeFn = UObject*(__fastcall*)(void* uclass, UObject* outer,
                                                      const wchar_t* name, bool exact_class);
-// void OpenLevel(const UObject*, FName, bool, FString) -- FName is 8 bytes so
-// it travels in a register; FString is 16 and so is passed by address.
+
+
 using OpenLevelFn = void(__fastcall*)(const UObject* world_context, FName level,
                                       bool absolute, void* options);
 
@@ -52,7 +52,7 @@ FName MakeName(const wchar_t* text) {
     return name;
 }
 
-}  // namespace
+}
 
 bool InitReflection(std::uintptr_t base) {
     g_fname_ctor = reinterpret_cast<FNameCtorFn>(base + offsets::FName_FromWide);
@@ -78,6 +78,12 @@ bool InitReflection(std::uintptr_t base) {
               g_gworld;
     SC_LOG("reflection: %s", g_ready ? "ready" : "FAILED to resolve entry points");
     return g_ready;
+}
+
+bool MakeFName(const wchar_t* text, FName* out) {
+    if (!g_ready || !text || !out) return false;
+    *out = MakeName(text);
+    return true;
 }
 
 bool CallFunction(UObject* object, const wchar_t* function_name, void* params) {
@@ -115,7 +121,7 @@ UObject* GetPlayerCharacter(UObject* world_context, int index) {
 }
 
 UObject* GetWorld() {
-    // GWorld is a UWorldProxy whose first member is the UWorld*.
+
     if (!g_gworld) return nullptr;
     return *g_gworld;
 }
@@ -123,14 +129,14 @@ UObject* GetWorld() {
 bool GetObjectPathName(UObject* object, char* out, int out_size) {
     if (!g_get_path_name || !object || out_size <= 0) return false;
 
-    // FString is TArray<TCHAR>: {TCHAR* Data; int32 Num; int32 Max}.
+
     struct FString {
         wchar_t* data;
         std::int32_t num;
         std::int32_t max;
     } result = {};
 
-    // Out-parameter overload: nothing is returned by value.
+
     g_get_path_name(object, nullptr, &result);
 
     if (!result.data || result.num <= 0) return false;
@@ -143,7 +149,7 @@ bool GetObjectPathName(UObject* object, char* out, int out_size) {
 
 UObject* FindObjectByPath(const wchar_t* path_name) {
     if (!g_static_find_object_safe || !path_name) return nullptr;
-    // (UClass* Class = null -> any type, UObject* Outer = null, name, bExactClass = false)
+
     return g_static_find_object_safe(nullptr, nullptr, path_name, false);
 }
 
@@ -154,8 +160,8 @@ bool GetCurrentLevelPath(char* out, int out_size) {
     char full[512] = {};
     if (!GetObjectPathName(world, full, sizeof(full))) return false;
 
-    // A world's path is "/Game/Maps/X/Y.Y"; OpenLevel wants the package part,
-    // so drop everything from the object separator onwards.
+
+
     char* dot = strrchr(full, '.');
     if (dot) *dot = '\0';
 
@@ -174,13 +180,13 @@ bool OpenLevel(const char* level_path) {
 
     const FName name = MakeName(wide);
 
-    // FString Options, passed by value: 16 bytes, so the ABI passes it by
-    // address. Zeroed is a valid empty FString -- null data, zero length, and
-    // therefore safe for the callee to destroy. Do NOT put a real string in it:
-    // the parameter is by value, so the callee frees it, and pointing it at a
-    // stack buffer crashes the allocator outright
-    // ("Attempt to realloc an unrecognized block"). Learned the hard way while
-    // trying to pass "listen?port=N" -- see HANDOFF section 14.
+
+
+
+
+
+
+
     struct FString {
         wchar_t* data;
         std::int32_t num;
@@ -198,8 +204,8 @@ bool ExecuteConsoleCommand(const char* command, UObject* specific_player) {
     UObject* kismet = FindObjectByPath(L"/Script/Engine.Default__KismetSystemLibrary");
     if (!world || !kismet) return false;
 
-    // ProcessEvent borrows this FString for the duration of the call, so the
-    // stack buffer is sufficient and needs no engine allocator/destructor.
+
+
     wchar_t wide[512] = {};
     const int chars = MultiByteToWideChar(CP_UTF8, 0, command, -1, wide, 512);
     if (chars <= 0) return false;
@@ -218,8 +224,8 @@ bool ExecuteConsoleCommand(const char* command, UObject* specific_player) {
 
 UObject* GetSkeletalMeshComponent(UObject* actor) {
     if (!g_ready || !actor || !g_skeletal_mesh_class) return nullptr;
-    // AActor::GetComponentByClass is BlueprintCallable, so this needs no
-    // knowledge of where the mesh pointer lives in ACharacter.
+
+
     struct ComponentParams {
         void* ComponentClass;
         UObject* ReturnValue;
@@ -262,7 +268,7 @@ bool ApplyAnimState(UObject* actor, const AnimState& state) {
     UObject* anim_instance = GetAnimInstance(actor);
     if (!anim_instance) return false;
 
-    // EMontagePlayReturnType::MontageLength = 0.
+
     g_montage_play(anim_instance, state.montage, 1.f, 0, state.position, true);
     return true;
 }
@@ -272,10 +278,10 @@ bool PlayAnimationAsset(UObject* actor, UObject* animation_asset, float start_at
     UObject* anim_instance = GetAnimInstance(actor);
     if (!anim_instance) return false;
 
-    // The shipped player AnimBlueprint contains full-body AnimNode_Slot nodes
-    // named Cinematic and Cinematic2. Playing a raw sequence as a dynamic
-    // montage through that graph preserves locomotion; PlayAnimation switches
-    // the mesh to single-node mode and destroys the AnimBlueprint instance.
+
+
+
+
     struct Params {
         UObject* Asset;
         FName SlotNodeName;
@@ -294,9 +300,9 @@ bool PlayAnimationAsset(UObject* actor, UObject* animation_asset, float start_at
     params.InPlayRate = 1.f;
     params.LoopCount = 1;
     params.BlendOutTriggerTime = -1.f;
-    // Join an action already in progress at the point the sender had reached,
-    // rather than restarting it. A fall replayed from the top after the body
-    // has already hit the floor reads as a second, phantom knockdown.
+
+
+
     params.InTimeToStartMontageAt = start_at > 0.f ? start_at : 0.f;
     if (!CallFunction(anim_instance, L"PlaySlotAnimationAsDynamicMontage", &params)) {
         return false;
@@ -304,25 +310,25 @@ bool PlayAnimationAsset(UObject* actor, UObject* animation_asset, float start_at
     return params.ReturnValue != nullptr;
 }
 
-// What CLASS an object is, as a path name.
-//
-// Added after feeding a UPoseAsset to PlaySlotAnimationAsDynamicMontage, which
-// takes a UAnimSequenceBase. UPoseAsset is not one -- it derives from
-// UAnimationAsset on a different branch -- so the engine built a dynamic
-// montage around the wrong type and corrupted the heap when it tore it down:
-//
-//   FMallocBinned2::Free() reading 0x3
-//   FPoseDataContainer::~FPoseDataContainer()
-//   UPoseAsset::`scalar deleting destructor'
-//   FAnimMontageInstance::Advance()
-//
-// A field matched by NAME is not a type. Anything handed to the animation
-// system from a raw field read has to be asked what it is first.
-//
-// Safe only for pointers that really are UObjects: this walks ClassPrivate and
-// then the class's own path name, exactly as GetObjectPathName does. Do not
-// call it to TEST whether an arbitrary pointer is an object -- that is the
-// mistake that crashed the order scan.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 bool GetObjectClassPathName(UObject* object, char* out, int out_size) {
     if (!object || !out || out_size <= 0) return false;
     out[0] = 0;
@@ -342,24 +348,24 @@ bool ObjectClassIs(UObject* object, const char* leaf_name) {
 void* GetAnimInstanceClass(UObject* actor) {
     UObject* instance = GetAnimInstance(actor);
     if (!instance) return nullptr;
-    // UObjectBase::ClassPrivate, the one fixed offset this codebase takes on
-    // faith everywhere else too.
+
+
     return *reinterpret_cast<void**>(reinterpret_cast<std::uintptr_t>(instance) + 0x10);
 }
 
-// Put the animation blueprint back after single-node playback.
-//
-// Both previous attempts at this were wrong in the same way -- they assumed an
-// instance survived the strike. It does not: PlayAnimation clears it. Asking
-// for mode AnimationBlueprint without forcing initialisation then left the mesh
-// with no graph at all, which is a T-pose; forcing initialisation rebuilt one
-// that never left idle. The reliable form is to name the class explicitly and
-// check afterwards that an instance actually exists, falling back to setting
-// the class outright when it does not.
+
+
+
+
+
+
+
+
+
 bool RestoreAnimationBlueprint(UObject* actor, void* anim_class) {
     UObject* mesh = GetSkeletalMeshComponent(actor);
     if (!mesh) return false;
-    // EAnimationMode::AnimationBlueprint = 0 in UE4.26.
+
     struct ModeParams {
         std::uint8_t InAnimationMode;
         bool bForceInitAnimScript;
@@ -368,9 +374,9 @@ bool RestoreAnimationBlueprint(UObject* actor, void* anim_class) {
 
     if (GetAnimInstance(actor)) return true;
 
-    // No graph came back. Name the class the puppet had before the strike and
-    // let the engine build one; without this the character stays in the bind
-    // pose for the rest of the session.
+
+
+
     if (!anim_class) return false;
     struct ClassParams {
         void* NewClass;
@@ -400,6 +406,6 @@ float GetAnimationAssetLength(UObject* animation_asset) {
     return params.ReturnValue;
 }
 
-}  // namespace sifucoop::ue
+}
 
 

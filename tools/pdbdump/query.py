@@ -30,7 +30,7 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     pdb, symbols = load_symbols(pdb_path)
 
-    # Deduplicate: the same RVA/name pair shows up in several record kinds.
+
     seen = set()
     unique = []
     for sym in symbols:

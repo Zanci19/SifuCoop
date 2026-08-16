@@ -6,71 +6,81 @@
 
 namespace sifucoop::game {
 
-// Host-authoritative enemy synchronisation.
-//
-// One machine's game is the source of truth for every enemy: their AI decides
-// what happens, and the other machine's copies have their brains stopped and
-// are driven from what the host reports. There is no alternative: hitboxes,
-// animation timings, parry windows and AI all live inside the Windows
-// executable, so only a running Sifu can decide whether a hit landed. A
-// separate server process could relay packets but could never adjudicate.
-//
-// Enemies are paired between machines by a hash of their object name. Sifu
-// pre-spawns every enemy into a pool with deterministic names, so the same
-// enemy carries the same name on both machines -- no spawn hooking, no
-// agreement on ordering, no fragile index matching.
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 void InitEnemies(std::uintptr_t module_base);
 
-// Called each frame from the tick hook.
+
 void TickEnemies();
 
-// Lifecycle notifications from the puppet owner. A world change can only
-// forget cached objects; destroying a still-live puppet may first unregister
-// it from the current world's combat director.
+
+
+
 void ForgetEnemyWorldObjects();
 void NotifyPuppetWillBeDestroyed(ue::UObject* puppet);
 
-// Resolves an enemy by the id used on the wire. Null when this machine has no
-// such enemy, which is normal for a moment after a level loads.
+
+
 ue::UObject* FindEnemyByHash(std::uint32_t hash);
 
-// The wire id of the enemy that owns `attack_component`, or 0 if it is not one
-// of ours. The attack hook only ever sees the component, so this is how an
-// enemy's swing is turned into something the peer can act on -- and it is a
-// table lookup rather than a walk back up to the actor, because it runs on the
-// hot path of every attack in the level.
-// The wire id for a tracked enemy actor, or 0 if it is not one of ours (the
-// local player, the puppet, a civilian outside the roster).
+
+
+
+
+
+
+
 std::uint32_t EnemyHashForActor(const void* actor);
 std::uint32_t EnemyHashForAttackComponent(const void* attack_component);
 std::uint32_t EnemyHashForHealthComponent(const void* health_component);
 
-// Sets the joining machine's attack component target to the body equivalent to
-// the target the host selected. Called immediately before replaying an enemy
-// order, so an old target can never redirect the hitbox to the wrong player.
+
+
+
 bool ApplyMirroredEnemyTargetForAttack(std::uint32_t hash);
 
-// Hands the animation channel's death sequence to the enemy it belongs to, so
-// the body falls the way the host's killing blow made it fall rather than
-// stopping upright.
+
+
+
 void NoteEnemyDeathAnimation(std::uint32_t hash, ue::UObject* animation);
 
-// True when this enemy is running its own behaviour tree on this machine
-// (peer_fights_locally). Its attacks are real and local, so the host's echoed
-// copy of them must be dropped rather than played on top.
+
+
+
 bool EnemyRunsLocalBrain(std::uint32_t hash);
 
-// True only on the machine that owns this enemy's attack decisions. Host-owned
-// enemies are authoritative on the host; peer-owned enemies are authoritative
-// on the joiner. The observer must replay their OrderEvent and must not run a
-// second private selector.
-bool EnemyActionsAreLocallyAuthoritative(std::uint32_t hash);
 
-// Everything Sifu's own AI attack launcher needs for one replicated swing.
-// `target` is the joining machine's body corresponding to the host's selected
-// player and may be null when the host had no readable lock. The other three
-// fields must all be present for a real local attack order to be created.
+
+
+
+bool EnemyActionsAreLocallyAuthoritative(std::uint32_t hash, bool include_dead = false);
+
+
+
+
+void NoteEnemyReactionOrder(const void* actor, unsigned int order_type);
+
+
+
+bool EnemyMustRemainDead(const void* health_component);
+
+
+
+
+
+
 struct EnemyAttackContext {
     ue::UObject* actor = nullptr;
     ue::UObject* attack_component = nullptr;
@@ -80,7 +90,7 @@ struct EnemyAttackContext {
 
 bool PrepareMirroredEnemyAttack(std::uint32_t hash, EnemyAttackContext* out);
 
-// Rows for the overlay's live sync table.
+
 struct EnemyRow {
     std::uint32_t hash;
     float distance;
@@ -95,9 +105,9 @@ struct EnemyRow {
 
 int GetEnemyRows(EnemyRow* out, int max_out);
 
-// Writes the whole tracked set to the log, pooled entries included. The
-// overlay's table deliberately hides those; this is what you read when an
-// enemy is missing and you need to know whether it exists at all.
+
+
+
 void DumpRoster();
 
-}  // namespace sifucoop::game
+}

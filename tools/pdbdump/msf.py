@@ -31,7 +31,7 @@ class MsfFile:
 
         self.streams = self._read_directory()
 
-    # -- block plumbing ---------------------------------------------------
+
 
     def _read_block(self, index):
         self._fh.seek(index * self.block_size)
@@ -50,13 +50,13 @@ class MsfFile:
         return (size + self.block_size - 1) // self.block_size
 
     def _read_directory(self):
-        # The block map holds the block indices of the stream directory itself.
+
         map_blocks = self._block_count(self.directory_bytes)
         raw_map = self._read_blocks(
             [self.block_map_addr], self.block_size
         )
-        # A directory larger than one block's worth of indices spans several
-        # map blocks; they are contiguous starting at block_map_addr.
+
+
         indices_per_block = self.block_size // 4
         map_block_count = (map_blocks + indices_per_block - 1) // indices_per_block
         if map_block_count > 1:
@@ -75,7 +75,7 @@ class MsfFile:
 
         streams = []
         for size in sizes:
-            if size == 0xFFFFFFFF:  # deleted stream
+            if size == 0xFFFFFFFF:
                 streams.append((0, []))
                 continue
             count = self._block_count(size)
@@ -84,7 +84,7 @@ class MsfFile:
             streams.append((size, blocks))
         return streams
 
-    # -- public API -------------------------------------------------------
+
 
     def stream(self, index):
         if index >= len(self.streams) or index == 0xFFFF:

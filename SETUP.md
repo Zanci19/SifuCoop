@@ -10,13 +10,26 @@ fingerprint and refuses to run against a different one rather than corrupting th
 
 ## 1. Install (both players)
 
+**Recommended:** extract the release and run SifuCoopInstaller.exe from the extracted
+folder. It auto-detects Epic and Steam installations, or lets you browse to the Sifu game
+folder. It refuses to change files while Sifu is running. Any existing dsound.dll is backed
+up to a date-and-time-named SifuCoop-backup subfolder before it is replaced; an existing SifuCoop.ini is kept
+unless you select **Replace SifuCoop.ini**.
+
+If auto-detection misses a custom library, choose the folder that contains Binaries
+(normally the game's Sifu folder), not the executable itself.
+
+### Manual install
+
 Copy into `Sifu\Binaries\Win64\` — next to `Sifu-Win64-Shipping.exe`:
 
 - `dsound.dll`
 - `SifuCoop.ini`
 
-No game files are modified or replaced; the mod only *adds* those two. To uninstall, delete
-them. Epic's "verify files" leaves them alone.
+A fresh game install normally has no local dsound.dll; if you already use another proxy DLL,
+do not overwrite it manually. Use the installer so it makes a restorable backup. To
+uninstall a manual installation, delete the two mod files. Epic's "verify files" leaves
+additional mod files alone.
 
 Run Sifu in **borderless**, not exclusive fullscreen, if you want the overlay to be clickable.
 

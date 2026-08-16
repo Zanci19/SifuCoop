@@ -30,7 +30,7 @@ void WriteInt(const char* key, int value, const char* ini) {
     WritePrivateProfileStringA(kSection, key, text, ini);
 }
 
-}  // namespace
+}
 
 Config& Get() { return g_config; }
 Stats& GetStats() { return g_stats; }
@@ -84,9 +84,9 @@ void Load() {
         ReadBool("puppet_invincible", g_config.puppet_invincible, ini);
     g_config.puppet_ignores_pawn_collision = ReadBool(
         "puppet_ignores_pawn_collision", g_config.puppet_ignores_pawn_collision, ini);
-    // Was declared, documented and switchable in the overlay, but never read
-    // from or written to the ini -- so the one thing that carries the peer's
-    // dodges and traversal animations could not actually be configured.
+
+
+
     g_config.sync_montages = ReadBool("sync_montages", g_config.sync_montages, ini);
     g_config.report_damage = ReadBool("report_damage", g_config.report_damage, ini);
     g_config.mirror_peer_vitals = ReadBool("mirror_peer_vitals",
@@ -113,10 +113,17 @@ void Load() {
     g_config.director_targets_partner =
         ReadBool("director_targets_partner", g_config.director_targets_partner, ini);
 
-    // These two switches were an instrumentation experiment, not a shippable
-    // targeting path. Together they did allocate a partner combat role, then
-    // crashed both machines in the director's weak-object bookkeeping. A saved
-    // ini can otherwise silently re-enable the known fault after every deploy.
+
+
+
+    if (g_config.real_second_player) {
+        SC_LOG("coop: disabling unsafe real_second_player experiment");
+        g_config.real_second_player = false;
+    }
+
+
+
+
     if (g_config.force_enemy_engage || g_config.director_targets_partner) {
         SC_LOG("coop: disabling unsafe director experiment "
                "(force_enemy_engage=%d director_targets_partner=%d)",
@@ -125,7 +132,6 @@ void Load() {
         g_config.director_targets_partner = false;
     }
 
-    g_config.fix_room_clear = ReadBool("fix_room_clear", g_config.fix_room_clear, ini);
     g_config.auto_follow_level = ReadBool("auto_follow_level",
                                           g_config.auto_follow_level, ini);
     g_config.auto_join_level = ReadBool("auto_join_level", g_config.auto_join_level, ini);
@@ -142,11 +148,11 @@ void Load() {
     g_config.snapshot_hz = GetPrivateProfileIntA(kSection, "snapshot_hz",
                                                  g_config.snapshot_hz, ini);
 
-    // Out-of-range values in a hand-edited ini would otherwise be silently
-    // catastrophic: 0 Hz stops all sending, and a huge delay looks like a hang.
+
+
     if (g_config.interp_delay_ms < 0) g_config.interp_delay_ms = 0;
     if (g_config.interp_delay_ms > 500) g_config.interp_delay_ms = 500;
-    // Below 30 Hz leaves the interpolation buffer starved on ordinary VPN jitter.
+
     if (g_config.snapshot_hz < 30) g_config.snapshot_hz = 30;
     if (g_config.snapshot_hz > 60) g_config.snapshot_hz = 60;
 
@@ -197,7 +203,6 @@ void Save() {
     WriteBool("mirror_hit_reactions", g_config.mirror_hit_reactions, ini);
     WriteBool("sync_peer_age", g_config.sync_peer_age, ini);
     WriteBool("director_targets_partner", g_config.director_targets_partner, ini);
-    WriteBool("fix_room_clear", g_config.fix_room_clear, ini);
     WriteBool("auto_follow_level", g_config.auto_follow_level, ini);
     WriteBool("auto_join_level", g_config.auto_join_level, ini);
     WriteBool("adaptive_interp", g_config.adaptive_interp, ini);
@@ -216,10 +221,10 @@ void ReportProblem(const char* format, ...) {
     _vsnprintf(text, sizeof(text) - 1, format, args);
     va_end(args);
 
-    // Only log a *change*: the same problem repeating every frame would bury
-    // everything else, but the overlay still wants the current value.
+
+
     if (strcmp(text, g_stats.last_problem) != 0) SC_LOG("coop: %s", text);
     lstrcpynA(g_stats.last_problem, text, sizeof(g_stats.last_problem));
 }
 
-}  // namespace sifucoop::coop
+}

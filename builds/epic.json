@@ -94,6 +94,7 @@
     "UReplaySystem_GetPlayingPlayerCharacter": 28686176,
     "USCActorManager_RegisterTargetableActor": 25573552,
     "USCAnimInstance_NativeUpdateAnimation": 12479968,
+    "USCAnimInstance_SetCurrentPoseAsset": 12508384,
     "USceneComponent_K2_GetComponentLocation": 26602176,
     "USkeletalMeshComponent_StaticClass": 12975344,
     "USocialComponent_SetRelationship": 28801456,

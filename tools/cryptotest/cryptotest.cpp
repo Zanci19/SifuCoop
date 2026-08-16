@@ -1,9 +1,9 @@
-// Checks src/net/crypto.cpp against the published test vectors.
-//
-// This is the one piece of the mod where "it seems to work" is not evidence: a
-// broken HMAC either rejects everything (obvious) or accepts everything
-// (invisible, and the whole point of having it is gone). Vectors from FIPS
-// 180-4 for SHA-256 and RFC 4231 for HMAC-SHA256.
+
+
+
+
+
+
 
 #include <cstddef>
 #include <cstdio>
@@ -33,31 +33,31 @@ void Check(const char* what, const unsigned char* actual, const char* expected) 
     }
 }
 
-}  // namespace
+}
 
 int main() {
     unsigned char digest[kSha256Size];
 
-    // FIPS 180-4, one-block message.
+
     Sha256("abc", 3, digest);
     Check("sha256(\"abc\")", digest,
           "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 
-    // Empty message: exercises the padding-only path.
+
     Sha256("", 0, digest);
     Check("sha256(\"\")", digest,
           "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 
-    // The padding boundaries, where a length that no longer fits forces a
-    // second block. These are the lengths a hand-written SHA-256 gets wrong,
-    // and a packet is not a round number of blocks -- so they are worth more
-    // here than any number of comfortable middle-sized inputs.
-    //
-    // Every expected value below was computed independently (Python hashlib),
-    // not read off this implementation. An earlier version of this file carried
-    // a digest written from memory; it disagreed, and the implementation turned
-    // out to be right. A test whose expectations come from the thing under test
-    // is not a test.
+
+
+
+
+
+
+
+
+
+
     struct Boundary {
         int length;
         const char* expected;
@@ -82,27 +82,27 @@ int main() {
         Check(label, digest, boundary.expected);
     }
 
-    // FIPS 180-4, multi-block message.
+
     const char* two_block =
         "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
     Sha256(two_block, strlen(two_block), digest);
     Check("sha256(two-block message)", digest,
           "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
 
-    // RFC 4231 case 1.
+
     unsigned char key1[20];
     memset(key1, 0x0b, sizeof(key1));
     HmacSha256(key1, sizeof(key1), "Hi There", 8, digest);
     Check("hmac-sha256 rfc4231 case 1", digest,
           "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
 
-    // RFC 4231 case 2: key shorter than the block.
+
     HmacSha256(reinterpret_cast<const unsigned char*>("Jefe"), 4, "what do ya want for nothing?",
                28, digest);
     Check("hmac-sha256 rfc4231 case 2", digest,
           "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
 
-    // RFC 4231 case 3: 50 bytes of 0xdd, exercising a multi-block message.
+
     unsigned char key3[20];
     memset(key3, 0xaa, sizeof(key3));
     unsigned char data3[50];
@@ -111,7 +111,7 @@ int main() {
     Check("hmac-sha256 rfc4231 case 3", digest,
           "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe");
 
-    // RFC 4231 case 6: key longer than the block, so it gets hashed first.
+
     unsigned char key6[131];
     memset(key6, 0xaa, sizeof(key6));
     HmacSha256(key6, sizeof(key6), "Test Using Larger Than Block-Size Key - Hash Key First",
@@ -119,7 +119,7 @@ int main() {
     Check("hmac-sha256 rfc4231 case 6", digest,
           "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
 
-    // A one-bit change must change the tag; equality must be exact.
+
     unsigned char a[kSha256Size], b[kSha256Size];
     Sha256("payload", 7, a);
     Sha256("payloae", 7, b);

@@ -1,15 +1,15 @@
-// dsound.dll proxy.
-//
-// Sifu-Win64-Shipping.exe statically imports DSOUND.dll by ORDINAL (1, 3, 6, 8,
-// 11, 12), and no dsound.dll ships in the game folder -- so dropping ours in
-// Binaries\Win64 injects us before main() while modifying zero game files.
-// That last property matters: Epic's "verify files" would restore a renamed
-// game DLL and silently break the mod, but it leaves an unknown extra file be.
-//
-// Every export is a bare `jmp` through a resolved pointer. A naked jump is
-// signature-agnostic -- it touches no registers and no stack, so the real
-// function sees the arguments exactly as the caller left them. GCC does not
-// support __attribute__((naked)) on x86-64, hence the global asm blocks.
+
+
+
+
+
+
+
+
+
+
+
+
 
 #include <windows.h>
 
@@ -19,23 +19,23 @@ namespace {
 
 HMODULE g_real_dsound = nullptr;
 
-}  // namespace
+}
 
-// Fallback for every export, so a stub is never null.
-//
-// The trampolines are bare `jmp`s through a pointer. If resolving the real
-// dsound ever failed those pointers would be null and the first call would jump
-// to address 0 -- an immediate crash that looks to the user like "the game
-// cannot start because of dsound". Pointing them at a stub that returns E_FAIL
-// instead means the game gets an ordinary DirectSound error it can handle.
+
+
+
+
+
+
+
 asm(".globl sifucoop_dsound_unavailable\n"
     "sifucoop_dsound_unavailable:\n"
-    "\tmov $0x80004005, %eax\n"  // E_FAIL
+    "\tmov $0x80004005, %eax\n"
     "\tret\n");
 
 extern "C" void sifucoop_dsound_unavailable();
 
-// One forwarding pointer per export, plus the trampoline that jumps through it.
+
 #define SC_FORWARD(name)                                              \
     extern "C" {                                                      \
     void* g_ptr_##name = reinterpret_cast<void*>(&sifucoop_dsound_unavailable); \
@@ -44,25 +44,25 @@ extern "C" void sifucoop_dsound_unavailable();
         #name ":\n"                                                   \
         "\tjmp *g_ptr_" #name "(%rip)\n");
 
-SC_FORWARD(DirectSoundCreate)            // @1  -- imported
-SC_FORWARD(DirectSoundEnumerateA)        // @2
-SC_FORWARD(DirectSoundEnumerateW)        // @3  -- imported
-SC_FORWARD(DllCanUnloadNow)              // @4
-SC_FORWARD(DllGetClassObject)            // @5
-SC_FORWARD(DirectSoundCaptureCreate)     // @6  -- imported
-SC_FORWARD(DirectSoundCaptureEnumerateA) // @7
-SC_FORWARD(DirectSoundCaptureEnumerateW) // @8  -- imported
-SC_FORWARD(GetDeviceID)                  // @9
-SC_FORWARD(DirectSoundFullDuplexCreate)  // @10
-SC_FORWARD(DirectSoundCreate8)           // @11 -- imported
-SC_FORWARD(DirectSoundCaptureCreate8)    // @12 -- imported
+SC_FORWARD(DirectSoundCreate)
+SC_FORWARD(DirectSoundEnumerateA)
+SC_FORWARD(DirectSoundEnumerateW)
+SC_FORWARD(DllCanUnloadNow)
+SC_FORWARD(DllGetClassObject)
+SC_FORWARD(DirectSoundCaptureCreate)
+SC_FORWARD(DirectSoundCaptureEnumerateA)
+SC_FORWARD(DirectSoundCaptureEnumerateW)
+SC_FORWARD(GetDeviceID)
+SC_FORWARD(DirectSoundFullDuplexCreate)
+SC_FORWARD(DirectSoundCreate8)
+SC_FORWARD(DirectSoundCaptureCreate8)
 
 #undef SC_FORWARD
 
 namespace sifucoop::proxy {
 
-// Ordinals verified against C:\Windows\System32\dsound.dll rather than assumed:
-// the widely-quoted table has 9-12 in the wrong order.
+
+
 bool Init() {
     char path[MAX_PATH] = {};
     UINT n = GetSystemDirectoryA(path, MAX_PATH);
@@ -102,7 +102,7 @@ bool Init() {
         if (!fn) {
             SC_LOG("proxy: missing ordinal %u (%s)", e.ordinal, e.name);
             ++missing;
-            continue;  // keep the E_FAIL stub rather than storing null
+            continue;
         }
         *e.slot = fn;
     }
@@ -113,4 +113,4 @@ bool Init() {
     return missing == 0;
 }
 
-}  // namespace sifucoop::proxy
+}

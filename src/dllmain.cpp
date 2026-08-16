@@ -1,4 +1,4 @@
-﻿#include <windows.h>
+#include <windows.h>
 
 #include <cstdio>
 
@@ -25,9 +25,9 @@ namespace offsets = sifucoop::offsets;
 
 namespace {
 
-// Deliberately never closed by StopSession/RestartSession. The kernel releases
-// it when Sifu exits, leaving no reconnect window in which a second DLL can arm
-// its hooks in another process.
+
+
+
 HANDLE g_game_process_mutex = nullptr;
 
 bool AcquireGameProcessGuard() {
@@ -77,9 +77,9 @@ bool ReadPeIdentity(HMODULE module, PeIdentity* out) {
     return true;
 }
 
-// Offsets were generated against one exact build. Applied to a different one
-// they point into unrelated code, so a mismatch must stop us before we hook
-// anything -- a loud refusal is far better than corrupting the process.
+
+
+
 bool VerifyGameBuild(HMODULE game, uintptr_t base) {
     PeIdentity id = {};
     if (!ReadPeIdentity(game, &id)) {
@@ -90,9 +90,9 @@ bool VerifyGameBuild(HMODULE game, uintptr_t base) {
     SC_LOG("guard: exe TimeDateStamp=0x%08lX SizeOfImage=0x%08lX", id.time_date_stamp,
            id.size_of_image);
 
-    // Offsets differ per executable, but the protocol does not: Epic and Steam
-    // ship the same game version, so asset paths and combo indices match and
-    // the two stores can play together. Only the address table is per-build.
+
+
+
     const char* build = offsets::SelectBuild(id.time_date_stamp, id.size_of_image);
     if (!build) {
         SC_LOG("guard: UNKNOWN BUILD -- no offsets for this executable.");
@@ -104,22 +104,29 @@ bool VerifyGameBuild(HMODULE game, uintptr_t base) {
         SC_LOG("guard: to add this one, run on THIS machine:");
         SC_LOG("guard:   python pdbdump.py <Sifu-Win64-Shipping.pdb> "
                "--exe <Sifu-Win64-Shipping.exe> --emit-build <name> build.json");
-        return false;
+        char message[512] = {};
+        wsprintfA(message,
+                  "SifuCoop did not start because this Sifu executable is not in its "
+                  "supported-build table.\n\nBuild stamp: 0x%08lX\nImage size: 0x%08lX"
+                  "\n\nThe game will continue normally. Update SifuCoop before hosting or joining.",
+                  id.time_date_stamp, id.size_of_image);
+        MessageBoxA(nullptr, message, "SifuCoop needs an update",
+                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);        return false;
     }
 
     SC_LOG("guard: build '%s' matched. image base = 0x%llX", build,
            static_cast<unsigned long long>(base));
 
-    // How many entries in THIS build's table are zero.
-    //
-    // Adding a symbol regenerates the table for whichever game folder build.ps1
-    // was pointed at, and only that one. The other machine keeps an older table
-    // in which the new entries are zero, every call through them silently does
-    // nothing, and the feature looks broken on exactly one side. That is not
-    // hypothetical: the two callbacks that make a body fall over were resolved
-    // on Epic and zero on Steam, so corpses stood up for the joining player and
-    // nowhere else, and it cost a full test round to find. One number at startup
-    // makes it obvious.
+
+
+
+
+
+
+
+
+
+
     for (const auto& entry : offsets::kBuilds) {
         if (_stricmp(entry.name, build) != 0) continue;
         int missing = 0;
@@ -168,9 +175,9 @@ DWORD WINAPI Bootstrap(LPVOID) {
     LogResolved(base, "GEngine", offsets::GEngine);
     LogResolved(base, "GWorld", offsets::GWorld);
 
-    // GEngine is populated during engine init, well after we load. Watching it
-    // flip from null is the cheapest proof that we are reading the right
-    // address and that our view of the process is correct.
+
+
+
     auto** gengine = reinterpret_cast<void**>(base + offsets::GEngine);
     void* engine = nullptr;
     for (int i = 0; i < 600; ++i) {
@@ -188,9 +195,9 @@ DWORD WINAPI Bootstrap(LPVOID) {
         return 0;
     }
 
-    // GEngine exists but the engine is still bringing itself up; give the
-    // vtable a moment to settle before we touch it.
-    Sleep(2000);
+
+    SC_LOG("bootstrap: engine present; waiting for startup asset loading to settle");
+    Sleep(8000);
 
     if (!sifucoop::ue::InitReflection(base)) {
         SC_LOG("bootstrap: reflection unavailable -- stopping before hooking");
@@ -208,21 +215,21 @@ DWORD WINAPI Bootstrap(LPVOID) {
         return 0;
     }
 
-    // Network ownership is decided before anything below installs a gameplay
-    // or UI hook. A duplicate host therefore cannot leave a second Sifu process
-    // half-active after its UDP bind fails.
+
+
+
     sifucoop::game::InitActors(base);
     sifucoop::game::InitPuppet(base);
     sifucoop::game::InitPlayer2(base);
     sifucoop::game::InitEnemies(base);
     sifucoop::game::InstallPlayOrderHook(base);
     sifucoop::game::InitSelfTest();
-    // Prefer drawing inside the game: a window cannot appear over exclusive
-    // fullscreen. The window overlay is only started if the hook fails -- or if
-    // the swap-chain hook has been switched off, which is the escape hatch for
-    // anyone whose driver or overlay stack does not get on with it. Hooking
-    // somebody else's graphics pipeline is the riskiest thing here and the
-    // least essential, so it has to be optional.
+
+
+
+
+
+
     bool in_game = false;
     if (sifucoop::coop::Get().in_game_overlay) {
         in_game = sifucoop::ui::StartInGameOverlay();
@@ -240,19 +247,19 @@ DWORD WINAPI Bootstrap(LPVOID) {
     return 0;
 }
 
-}  // namespace
+}
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(instance);
         sifucoop::log::Open();
 
-        // Forwarding must be wired up before the game's first dsound call.
+
         if (!sifucoop::proxy::Init()) {
             SC_LOG("proxy: init incomplete -- audio may misbehave");
         }
 
-        // Everything else runs off the loader lock.
+
         HANDLE thread = CreateThread(nullptr, 0, Bootstrap, nullptr, 0, nullptr);
         if (thread) CloseHandle(thread);
     } else if (reason == DLL_PROCESS_DETACH) {

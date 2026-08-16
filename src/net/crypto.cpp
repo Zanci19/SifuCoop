@@ -71,7 +71,7 @@ void TransformBlock(std::uint32_t state[8], const std::uint8_t block[64]) {
     state[7] += h;
 }
 
-}  
+}
 
 void Sha256(const void* data, std::size_t size, std::uint8_t out[kSha256Size]) {
     std::uint32_t state[8];
@@ -85,9 +85,9 @@ void Sha256(const void* data, std::size_t size, std::uint8_t out[kSha256Size]) {
         remaining -= 64;
     }
 
-    
-    
-    
+
+
+
     std::uint8_t tail[128] = {};
     memcpy(tail, bytes, remaining);
     tail[remaining] = 0x80;
@@ -127,9 +127,9 @@ void HmacSha256(const std::uint8_t* key, std::size_t key_size, const void* data,
         outer_pad[i] = static_cast<std::uint8_t>(padded_key[i] ^ 0x5C);
     }
 
-    
-    
-    
+
+
+
     constexpr std::size_t kMaxMessage = 2048;
     if (size > kMaxMessage) size = kMaxMessage;
 
@@ -152,4 +152,4 @@ bool SecureEqual(const std::uint8_t* a, const std::uint8_t* b, std::size_t size)
     return difference == 0;
 }
 
-}  
+}

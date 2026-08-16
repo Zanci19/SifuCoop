@@ -1,4 +1,4 @@
-﻿#include "overlay.h"
+#include "overlay.h"
 
 #include <windows.h>
 
@@ -78,8 +78,8 @@ DWORD WINAPI OverlayThread(LPVOID) {
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
 
-    // Topmost, transparent to input (so clicks reach the game), and never
-    // activated -- it must never steal focus from Sifu.
+
+
     g_window = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         kClassName, L"SifuCoop", WS_POPUP, 24, 24, kWidth, kHeight, nullptr, nullptr,
@@ -104,7 +104,7 @@ DWORD WINAPI OverlayThread(LPVOID) {
             DispatchMessageW(&message);
         }
         InvalidateRect(g_window, nullptr, FALSE);
-        Sleep(250);  // status text does not need to be redrawn per frame
+        Sleep(250);
     }
 
     DestroyWindow(g_window);
@@ -112,7 +112,7 @@ DWORD WINAPI OverlayThread(LPVOID) {
     return 0;
 }
 
-}  // namespace
+}
 
 void StartOverlay() {
     if (!g_lock_ready) {
@@ -136,9 +136,9 @@ void StopOverlay() {
 
 void SetOverlayText(const char* text) {
     if (!text) return;
-    // Feed both: the in-game overlay when it is available, and the window as a
-    // fallback. The window hides itself once the in-game one is running so the
-    // same line is never drawn twice.
+
+
+
     SetInGameOverlayText(text);
     if (!g_lock_ready) return;
     EnterCriticalSection(&g_lock);
@@ -146,5 +146,5 @@ void SetOverlayText(const char* text) {
     LeaveCriticalSection(&g_lock);
 }
 
-}  // namespace sifucoop::ui
+}
 

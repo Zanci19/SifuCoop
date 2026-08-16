@@ -1,40 +1,22 @@
-<#
-    Assembles the self-contained Steam build kit and copies it wherever it is
-    going.
-
-    The kit is everything the OTHER machine needs to compile its own dsound.dll
-    from ITS OWN Sifu-Win64-Shipping.pdb: sources, the build script, the offset
-    generator, and the build definitions already recorded for other stores. It
-    deliberately does NOT ship a compiled dll -- offsets are per-executable, and
-    a dll built here is inert on a different Sifu build (the guard refuses to
-    hook and logs "UNKNOWN BUILD").
-
-    This used to be done by hand, which is why the kit on the USB stick and the
-    one in the repo drifted apart. Now it is one command.
-
-    Usage:
-        .\tools\make-steam-kit.ps1                     # stage + zip locally
-        .\tools\make-steam-kit.ps1 -Destination Z:\    # ...and push it there
-#>
 param(
-    # Where to also place the kit, e.g. Z:\ (the other PC's share) or E:\ (a USB
-    # stick). Skipped, with a plain message, if it is not reachable -- a network
-    # share that happens to be offline is not a reason to fail the whole job.
+
+
+
     [string]$Destination = "",
     [string]$StageRoot = "$env:USERPROFILE",
-    # Folder name to use at the destination. The Steam PC already keeps its copy
-    # as "SifuCoopKit", and it has BUILT there -- so the name has to match or the
-    # push lands beside its build instead of updating it.
+
+
+
     [string]$DestinationName = "",
     [switch]$NoZip,
-    # Update the destination in place instead of replacing it.
-    #
-    # The destination is a machine that has already compiled: it holds a build/
-    # and a dist/ of its own, and its builds/*.json records ITS executable's
-    # offsets. Deleting that to drop a fresh copy on top would throw away the one
-    # thing that machine produced and cannot be regenerated from here. Sources
-    # and the shared build definitions are overwritten; anything the other
-    # machine made is left where it is.
+
+
+
+
+
+
+
+
     [switch]$NoClean
 )
 
@@ -43,7 +25,7 @@ $Root = Split-Path -Parent $PSScriptRoot
 $KitName = "SifuCoop-SteamKit"
 $Stage = Join-Path $StageRoot $KitName
 
-# Exactly what the other machine needs, and nothing that would go stale.
+
 $Dirs  = @("src", "tools", "builds", "third_party", "testclient", "launcher")
 $Files = @("build.ps1", "STEAM-BUILD.md", "SETUP.md", "README.md", "LICENSE",
            "THIRD_PARTY.md")
@@ -62,19 +44,19 @@ foreach ($file in $Files) {
     Copy-Item -Force $source $Stage
 }
 
-# The ini comes from dist/, not from the repo root: dist/ is the one with the
-# end-user comments on every switch, and it is what a player actually reads.
+
+
 Copy-Item -Force (Join-Path $Root "dist\SifuCoop.ini") $Stage
 
-# Build leftovers help nobody and confuse a "why is this here" reading of the
-# kit. __pycache__ in particular is bytecode for a different Python.
+
+
 Get-ChildItem $Stage -Recurse -Directory -Filter "__pycache__" |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-# The offset count is the kit's own sanity check: STEAM-BUILD.md tells the other
-# machine that a lower count than this means the two installs are different game
-# patches, not a build problem. Print it here so the number is known before it
-# leaves.
+
+
+
+
 $epic = Join-Path $Stage "builds\epic.json"
 if (Test-Path $epic) {
     $count = @((Get-Content $epic -Raw | ConvertFrom-Json).offsets.PSObject.Properties).Count

@@ -21,7 +21,7 @@ import sys
 
 from pdbdump import load_symbols
 
-# EPropertyGenFlags, low byte = type. Only the ones we actually meet.
+
 GEN_FLAG_NAMES = {
     0x00: "Byte", 0x01: "Int8", 0x02: "Int16", 0x03: "Int", 0x04: "Int64",
     0x05: "UInt16", 0x06: "UInt32", 0x07: "UInt64", 0x08: "UnsizedInt",
@@ -75,14 +75,14 @@ class Image:
         return raw[:end if end >= 0 else len(raw)].decode("utf-8", "replace")
 
 
-# FPropertyParamsBaseWithOffset, shipping layout (WITH_METADATA off):
-#   +0x00 const char* NameUTF8
-#   +0x08 const char* RepNotifyFuncUTF8
-#   +0x10 uint64      PropertyFlags
-#   +0x18 uint32      EPropertyGenFlags
-#   +0x1C uint32      EObjectFlags
-#   +0x20 int32       ArrayDim
-#   +0x24 uint16      Offset
+
+
+
+
+
+
+
+
 PROP_HEADER = 0x28
 
 
@@ -93,7 +93,7 @@ def parse_prop(image, rva):
     name_va, notify_va, flags, gen_flags, obj_flags, array_dim = struct.unpack_from(
         "<QQQIII", raw, 0)
     offset = struct.unpack_from("<H", raw, 0x24)[0]
-    # Low five bits are the type; the rest are modifiers (NativeBool, Native...).
+
     kind = GEN_FLAG_NAMES.get(gen_flags & 0x1F, f"?{gen_flags & 0x1F:02X}")
     return {
         "name": image.cstring_va(name_va) if name_va else "",
@@ -119,7 +119,7 @@ def main():
     image = Image(exe_path)
     pdb, symbols = load_symbols(pdb_path, verbose=False)
 
-    # ?NewProp_<member>@Z_Construct_U(ScriptStruct|Class|Function)_<Type>_Statics@@2U...
+
     pattern = re.compile(
         r"^\?NewProp_(?P<member>[^@]+)@Z_Construct_U(?:ScriptStruct|Class|Function)_"
         r"(?P<type>[A-Za-z0-9_]+)_Statics@@2U(?P<params>F[A-Za-z]*PropertyParams)@")
@@ -132,7 +132,7 @@ def main():
             by_type.setdefault(match.group("type"), []).append(
                 (match.group("member"), match.group("params"), sym.rva))
             continue
-        # ?ReturnStructParams@Z_Construct_UScriptStruct_X_Statics@@2UFStructParams@...
+
         if sym.name.startswith("?ReturnStructParams@Z_Construct_UScriptStruct_"):
             type_name = sym.name.split("Z_Construct_UScriptStruct_")[1].split("_Statics")[0]
             struct_params[type_name] = sym.rva
@@ -142,8 +142,8 @@ def main():
         print(f"\n=== {want} ===")
         if want in struct_params:
             raw = image.read(struct_params[want], 0x50)
-            # FStructParams: OuterFunc, SuperFunc, StructOpsFunc, NameUTF8,
-            # SizeOf, AlignOf, PropertyArray, NumProperties.
+
+
             size_of = struct.unpack_from("<Q", raw, 0x20)[0]
             align_of = struct.unpack_from("<Q", raw, 0x28)[0]
             num_props = struct.unpack_from("<i", raw, 0x38)[0]

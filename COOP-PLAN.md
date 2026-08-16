@@ -25,14 +25,15 @@ rare and remains the open D2 question; it will surface as the peer's puppet free
 they reappear.
 
 **Room-clear and doors — no door to flip; it is emergent.** There is no `ADoor`/`AGate`/
-`ABarrier` class to force. Room completion is driven by the AI director's
-`OnEnemyDeathDetected` and `AThePlainesGameState::m_fRoomClearedLifePercent` — i.e. by
-enemies dying, which the mod already synchronises host-authoritatively. So a room the host
-clears should clear on the joiner too, *provided the joiner's own game observes its local
-enemies dying* (the mod calls the down-state machine on them, which should feed the
-director). This is the single most important thing to verify on a real two-machine run; if
-it does not follow automatically, the fix is to replicate the game-state clear percentage
-rather than to build a door system. **Status: likely automatic, unverified.**
+`ABarrier` class to force. **Correction, 2026-08-14:** the old
+`m_fRoomClearedLifePercent (+0x39C)` theory was wrong; that member is the percentage of life
+restored after a clear, not progress toward clearing. PDB symbols and raw level exports show
+that `AAISituationActor` owns the relevant `OnAIDeath` / `OnSituationResolved` delegates,
+and level scripts bind their actual continuation callbacks to `OnSituationResolved`.
+Therefore synchronized deaths must travel through Sifu's native kill path with a valid remote
+instigator. Protocol 18 arms that instigator only around replicated lethal damage. The joiner
+landing the last blow is the decisive two-machine test. Do not write `+0x39C` or build a
+parallel door system.
 
 > **Community input (Sifu modding Discord, 2026-08-07).** From Bondi, who has worked on
 > Sifu's doors before: *removing* a door is not the hard part — **the door is what streams
@@ -339,14 +340,14 @@ done is suppressing the joiner's spawn logic at source, so this is a correction 
 than a prevention.
 
 **C2. Room-clear conditions, doors and barriers** agreeing on both machines. Instrumented,
-not yet forced. There is NO door/barrier actor (researched); room completion is emergent
-from `AAIDirectorActor::OnEnemyDeathDetected` + `AThePlainesGameState::m_fRoomClearedLifePercent`
-(member at +0x39C, read via `UGameplayStatics::GetGameState` + a ThePlaines class guard). The
-mod now reads the local percentage and sends it, and logs the peer's, so a two-machine session
-can show whether the joiner's room clears on its own once its synced enemies die (the expected
-behaviour, since enemy death is already host-authoritative). Applying the host's percentage into
-the local game (`fix_room_clear`) is deliberately still dormant — writing a value with
-unverified semantics/direction is a guess until that test is run. See `src/game/runstate.cpp`.
+implemented at the death-bookkeeping boundary, not as a door mutation. There is NO generic
+door/barrier actor to flip. `m_fRoomClearedLifePercent (+0x39C)` was disproven as progress
+and removed from RunState. Raw exports bind callbacks including `015_OnRoomCleared`,
+`060_OnIntelRoom_Cleared`, `300_OnHangarFightEnding`, and `020_OnSituationResolved` to
+`AAISituationActor::OnSituationResolved`. Protocol 18 supplies the remote player as instigator
+to the native kill reached by replicated lethal damage, so Sifu can update its own situation
+and level-script delegates. This is source/export verified but still needs the joiner-final-kill
+two-machine test.
 
 **C3. Environmental interactions** — thrown objects, weapons, destructibles. Not started.
 
@@ -391,5 +392,5 @@ likely disappointments, in order:
    joiner's local physics push their copy elsewhere. The symptom would be jitter, and the
    first thing to try is a longer interpolation delay.
 
-After that, C2 (room clear and doors) is the next thing that stops a level from being
-completable together.
+After that, validate C2 by having the joiner land the final kill and confirming both machines
+receive their native room/streaming continuation.

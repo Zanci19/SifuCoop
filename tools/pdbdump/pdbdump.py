@@ -17,39 +17,39 @@ import time
 
 from pdbfile import PdbFile, S_PUB32
 
-# Symbols the mod needs, keyed by the C++ identifier we will expose.
-# Each entry is a list of substrings that must ALL appear in the mangled name;
-# MSVC mangling keeps identifiers readable, so substring matching is reliable.
+
+
+
 WANTED = {
     "UGameEngine_Tick": ["?Tick@UGameEngine@@"],
-    # This is the real physical-input boundary. Filtering controller 1 here
-    # prevents one keyboard/gamepad from driving both local players without
-    # blocking direct network movement on the remote-player actor.
+
+
+
     "APlayerController_InputKey": ["?InputKey@APlayerController@@"],
-    # Sifu's targeting-reticle widget component. Creating a second local player
-    # crashes inside this during the new controller's BeginPlay: it tries to add
-    # a HUD widget to a player screen that the second player does not have, and
-    # dereferences null. It is suppressed for the duration of the CreatePlayer
-    # call -- a remote player has no use for a reticle on this machine's HUD.
-    # Sifu's own player controller. Its BeginPlay is deferred while a second
-    # player is being created -- see player2.cpp for why the engine runs it too
-    # early to be survivable.
+
+
+
+
+
+
+
+
     "ASCPlayerController_BeginPlay": ["?BeginPlay@ASCPlayerController@@"],
     "UWidgetPoolComponent_BeginPlay": ["?BeginPlay@UWidgetPoolComponent@@"],
-    # Sifu's HUD widget registers itself with the controller through this
-    # virtual. Declining it for the SECOND player's controller is what stops the
-    # remote player's health bar being drawn over the local player's own, which
-    # is unavoidable once splitscreen is force-disabled and both local players
-    # share one full-screen viewport.
+
+
+
+
+
     "AFightingPlayerController_BPF_SetHUD": ["?BPF_SetHUD@AFightingPlayerController@@UEAA"],
     "UTargetableWidgetUpdaterComponent_BeginPlay": [
         "?BeginPlay@UTargetableWidgetUpdaterComponent@@"
     ],
     "UWorld_SpawnActor": ["?SpawnActor@UWorld@@"],
     "AActor_SetActorLocationAndRotation": ["?SetActorLocationAndRotation@AActor@@"],
-    # Native steering route for replicated characters. Sifu's synthetic second
-    # player accepts AddMovementInput but does not consume it; direct movement
-    # is consumed by the character movement component and drives locomotion.
+
+
+
     "ACharacter_GetMovementComponent": [
         "?GetMovementComponent@ACharacter@@UEBAPEAVUPawnMovementComponent@@XZ"
     ],
@@ -60,23 +60,23 @@ WANTED = {
     "UEngine_GetWorldFromContextObject": ["?GetWorldFromContextObject@UEngine@@"],
     "GEngine": ["?GEngine@@"],
     "GWorld": ["?GWorld@@"],
-    # Reflection layer. These let us call any Blueprint-exposed UFunction by
-    # name, so the mod never has to hardcode C++ struct field offsets -- which
-    # is both the fragile part of this kind of work and the part a game patch
-    # silently breaks.
+
+
+
+
     "UObject_ProcessEvent": ["?ProcessEvent@UObject@@"],
     "UObject_FindFunction": ["?FindFunction@UObject@@"],
     "FName_FromWide": ["??0FName@@QEAA@PEB_WW4EFindName@@@Z"],
     "StaticFindObjectSafe": ["?StaticFindObjectSafe@@"],
-    # The out-parameter overload specifically: the FString-returning one would
-    # need a by-value return convention, which is what crashed us via GetType.
+
+
     "UObjectBaseUtility_GetPathName": [
         "?GetPathName@UObjectBaseUtility@@QEBAXPEBVUObject@@AEAVFString@@@Z"
     ],
-    # Game-side accessors we can call directly.
+
     "UGameplayStatics_GetPlayerCharacter": ["?GetPlayerCharacter@UGameplayStatics@@"],
     "UGameplayStatics_OpenLevel": ["?OpenLevel@UGameplayStatics@@SAXPEBVUObject@@VFName@@_NVFString@@@Z"],
-    # Phase A: enemy enumeration and AI suppression.
+
     "UGameplayStatics_GetAllActorsOfClass": ["?GetAllActorsOfClass@UGameplayStatics@@SA"],
     "AFightingCharacter_StaticClass": ["?StaticClass@AFightingCharacter@@SA"],
     "UBrainComponent_StaticClass": ["?StaticClass@UBrainComponent@@SA"],
@@ -84,8 +84,8 @@ WANTED = {
     "UReplaySystem_GetPlayingPlayerCharacter": [
         "?BPF_GetPlayingPlayerCharacter@UReplaySystem@@SA"
     ],
-    # M2. The FVector/FRotator overload is named exactly: the FTransform one
-    # would drag in that struct's 16-byte alignment rules for no benefit.
+
+
     "UWorld_SpawnActor_VecRot": [
         "?SpawnActor@UWorld@@QEAAPEAVAActor@@PEAVUClass@@PEBUFVector@@PEBUFRotator@@"
         "AEBUFActorSpawnParameters@@@Z"
@@ -97,17 +97,17 @@ WANTED = {
         "?BPF_SetInvincibility@AFightingCharacter@@QEAA"
     ],
     "AFightingCharacter_GetFaction": ["?GetFaction_Implementation@AFightingCharacter@@UEBA"],
-    # M4 animation.
+
     "USkeletalMeshComponent_StaticClass": ["?StaticClass@USkeletalMeshComponent@@SA"],
     "UAnimInstance_Montage_GetPosition": ["?Montage_GetPosition@UAnimInstance@@QEBA"],
     "UAnimInstance_Montage_Play": ["?Montage_Play@UAnimInstance@@QEAA"],
-    # Orders: Sifu's real combat/animation currency. Attacks, hit reactions,
-    # traversal and animation are all Orders, they serialise to a buffer, and
-    # the engine already has a multicast RPC to replay them elsewhere.
+
+
+
     "ABaseCharacter_OnLocalPlayOrder": ["?OnLocalPlayOrder@ABaseCharacter@@UEAA"],
     "AFightingCharacter_OnLocalPlayOrder": ["?OnLocalPlayOrder@AFightingCharacter@@UEAA"],
-    # The base class vtable itself, so the virtual's slot index can be derived
-    # rather than guessed -- subclasses override the entry but never move it.
+
+
     "ABaseCharacter_vftable": ["??_7ABaseCharacter@@6B@"],
     "ABaseCharacter_PlayOrder": ["?PlayOrder@ABaseCharacter@@QEAA"],
     "AFightingCharacter_PlayOrder": ["?PlayOrder@AFightingCharacter@@QEAA"],
@@ -120,35 +120,35 @@ WANTED = {
         "?GetAttackHandler@UAIFightingComponent@@QEBAAEAVFAIAttackHandler"
     ],
     "FAIAttackHandler_PrepareNextAttack": ["?PrepareNextAttack@FAIAttackHandler@@AEAA_NXZ"],
-    # Builds a fresh delayed action from one AI fighter's own ability state.
-    # This is the safe receiving-side entry point for host enemy attacks.
+
+
     "UAttackBTTask_LaunchAttack": [
         "?LaunchAttack@UAttackBTTask@@CAEAEAVAFightingCharacter"
     ],
-    # The AI launcher copies its handler target through this method immediately
-    # before PrepareToLaunchAttack. Hooking it lets a stopped client AI use the
-    # host's mirrored target without touching FAIAttackHandler private memory.
+
+
+
     "UAttackComponent_SetNextAttackTarget": ["?SetNextAttackTarget@UAttackComponent@@QEAA"],
-    # The actual "perform this attack" call, downstream of move selection.
+
     "UAttackComponent_LaunchAttack": ["?LaunchAttack@UAttackComponent@@AEAA"],
     "OrderAttack_GetAnimPlayed": ["?GetAnimPlayed@OrderAttack@@UEBAPEAVUAnimSequence@@XZ"],
     "OrderAttack_OnStart": ["?OnStart@OrderAttack@@UEAAXXZ"],
-    # The hit reaction. OrderHitted does NOT override GetAnimPlayed, and
-    # OrderBase::GetAnimPlayed is an ICF-folded stub (11,097 symbols share its
-    # address), so there is no accessor for the sequence it chose -- the object
-    # itself has to be read. OnStart is real and unique, so it is the moment.
+
+
+
+
     "OrderHitted_OnStart": ["?OnStart@OrderHitted@@UEAAXXZ"],
-    # The AI director's own front door for "this actor is a TARGET".
-    #
-    # Measured cause of the partner never being attacked: the host census reads
-    # `3 on the second player` beside `fighting your partner direct=0 indirect=0
-    # non=0 none=0` -- all four counters zero, so the director has no combat-role
-    # entry for the partner AT ALL. It keeps a ticket manager per TARGET, and no
-    # one ever asked it to make one for the puppet.
-    #
-    # This is also why BPF_ForceEnemy crashed: it handed out a ticket for a
-    # target the director had never registered, so removal on death walked a
-    # null. Registering through this door first is the difference.
+
+
+
+
+
+
+
+
+
+
+
     "AAIDirectorActor_RegisterOrRemoveForTarget": [
         "?RegisterOrRemoveFromCombatRoleTicketManagerForTarget@AAIDirectorActor@@QEAAXPEAVAActor@@W4EGlobalBehaviors@@AEBV2@@Z"
     ],
@@ -159,65 +159,70 @@ WANTED = {
         "?RequestCombatRoleRedistribution@AAIDirectorActor@@SAXPEBVAActor@@_NW4ESCAICombatRolesChangeReason@@@Z"
     ],
     "AAIDirectorActor_StaticClass": ["?StaticClass@AAIDirectorActor@@SAPEAVUClass@@XZ"],
-    # What makes an age change VISIBLE.
-    #
-    # BPF_SetCharacterAge lands and the stats derived from it follow -- measured:
-    # "aged to 45" then "max health here 96, theirs 96 -- agreed". The face did
-    # not change, because the model is rebuilt by a callback rather than polled.
-    # This is that callback: private, void(), no arguments, one symbol at its RVA.
+
+
+
+
+
+
     "UPlayerFightingComponent_OnStatsUpdated": [
         "?OnStatsUpdated@UPlayerFightingComponent@@AEAAXXZ"
     ],
-    # Shared base update used by enemy animation instances. Raw sequences are
-    # layered through USCAnimInstance's Cinematic slot; its weight must be
-    # restored after this update, immediately before graph evaluation.
+
+
+
     "USCAnimInstance_NativeUpdateAnimation": [
         "?NativeUpdateAnimation@USCAnimInstance@@UEAAXM@Z"
     ],
+
+
+    "USCAnimInstance_SetCurrentPoseAsset": [
+        "?SetCurrentPoseAsset@USCAnimInstance@@QEAAXPEAVUPoseAsset@@@Z"
+    ],
     "UPlayerAnim_NativeUpdateAnimation": ["?NativeUpdateAnimation@UPlayerAnim@@EEAAXM@Z"],
-    # Exact locomotion-state setter. FSpeedState is five bytes (four booleans
-    # plus ESpeedState); writing only the booleans left the graph's enum at V0.
+
+
     "UPlayerAnim_BPF_SetSpeedState": ["?BPF_SetSpeedState@UPlayerAnim@@QEAAXW4ESpeedState@@@Z"],
-    # ...but the anim instance only holds a COPY. The speed state belongs to the
-    # movement component, which computes it during its own tick from input a
-    # replicated body does not have -- so it read V0 at every speed, and writing
-    # the anim's copy was writing a mirror. This is the source of the value.
+
+
+
+
     "UFightingMovementComponent_SetSpeedState": [
         "?SetSpeedState@UFightingMovementComponent@@UEAAXE@Z"
     ],
-    # Sifu allocates the RIGHT to attack centrally, per target, through combat
-    # role tickets -- which is why only one or two enemies swing at you at a
-    # time. An actor with no ticket manager gets only IndirectOpponents, who
-    # circle and deflect and never commit. Needed to reach the AI's own
-    # BPF_ForceEnemy / BPF_GetCurrentCombatRole via GetComponentByClass.
+
+
+
+
+
     "UAIFightingComponent_StaticClass": ["?StaticClass@UAIFightingComponent@@SA"],
-    # A spawned player-class clone runs BeginPlay, but is not guaranteed to be
-    # in Sifu's global target registry. AI selection only considers registered
-    # UTargetableActorComponents.
+
+
+
     "UTargetableActorHelper_GetTargetableActorComponent": [
         "?GetTargetableActorComponent@UTargetableActorHelper@@"
     ],
     "USCActorManager_RegisterTargetableActor": [
         "?RegisterTargetableActor@USCActorManager@@SAX"
     ],
-    # Host-side aggro handoff when damage arrived from the joining player.
+
     "UAttackComponent_SetTarget": ["?SetTarget@UAttackComponent@@QEAAXPEAVAActor@@@Z"],
-    # BPF_ServerChangeRelationship dispatched successfully but did not mutate
-    # the authoritative relationship on either shipped build. This native
-    # setter updates the social map and broadcasts its change callback.
+
+
+
     "USocialComponent_SetRelationship": [
         "?SetRelationship@USocialComponent@@QEAAXPEAVAActor@@W4ERelationshipTypes@@@Z"
     ],
-    # THE move selector. Returns the attack id that ends up in the delayed
-    # action struct, so overriding its return value is how a specific move is
-    # chosen -- the struct itself is downstream and ignores what we write.
+
+
+
     "FComboTransitions_GeNextAttackID": ["?GeNextAttackID@FComboTransitions@@QEBA"],
     "UAttackComponent_BPF_OverrideCombo": ["?BPF_OverrideCombo@UAttackComponent@@QEAA"],
-    # Returns FString BY VALUE -> hidden return pointer in RCX, `this` in RDX.
-    # Same convention that crashed us via GetType; here it is declared correctly.
+
+
     "DelayedActionAttack_ToString": ["?ToString@DelayedActionAttack@@UEBA"],
-    # The puppet is invincible so it never resolves its own death; when the peer
-    # reports they died, we put their puppet down explicitly.
+
+
     "UCharacterHealthComponent_SetIsDown": ["?SetIsDown@UCharacterHealthComponent@@QEAA"],
     "UCharacterHealthComponent_IsDown": ["?IsDown@UCharacterHealthComponent@@QEBA"],
     "UCharacterHealthComponent_StaticClass": ["?StaticClass@UCharacterHealthComponent@@SA"],
@@ -226,25 +231,25 @@ WANTED = {
     ],
     "UOrderComponent_MultiCastPlayOrder_Impl": ["?MultiCastPlayOrder_Implementation@UOrderComponent@@"],
     "OrderBase_LoadFrom": ["?LoadFrom@OrderBase@@QEAA"],
-    # Co-op. Static Get(AActor*) accessors: one call instead of a ProcessEvent
-    # into GetComponentByClass, which matters when it runs per enemy per frame.
+
+
     "UCharacterHealthComponent_Get": ["?Get@UCharacterHealthComponent@@SAPEAV1@PEAVAActor@@@Z"],
     "UAttackComponent_Get": ["?Get@UAttackComponent@@SAPEAV1@PEAVAActor@@@Z"],
     "UDefenseComponent_Get": ["?Get@UDefenseComponent@@SAPEAV1@PEAVAActor@@@Z"],
     "UDefenseComponent_StaticClass": ["?StaticClass@UDefenseComponent@@SA"],
-    # How the host applies the damage its peer dealt: a plain float, so there is
-    # no FDamageInfos to reconstruct (its damage value is not even reflected).
+
+
     "UHealthComponent_BPF_ApplyDamage": ["?BPF_ApplyDamage@UHealthComponent@@QEAAXM@Z"],
-    # Carries the exact death UAnimSequence selected from the lethal hit.
+
     "UHealthComponent_Kill": ["?Kill@UHealthComponent@@UEAAXW4EApplyDamageBehavior@@"],
-    # (BPF_SetCanBeDamaged is inlined away -- only its exec thunk survives, so
-    # invincibility goes through AFightingCharacter::BPF_SetInvincibility.)
-    # The presentation half of dying, and the reason a replicated corpse stands
-    # up straight. InternalSetDownState changes the STATE; OnRepSetIsDown is
-    # what UE runs on a machine that did not do the killing to make the body
-    # actually go to the floor. Without native replication it never fires, so
-    # the mod has to call it itself. OnCharacterStandsUp is its counterpart for
-    # a body coming back up.
+
+
+
+
+
+
+
+
     "UCharacterHealthComponent_OnRepSetIsDown": [
         "?OnRepSetIsDown@UCharacterHealthComponent@@AEAAXXZ"
     ],
@@ -252,13 +257,13 @@ WANTED = {
         "?OnCharacterStandsUp@UCharacterHealthComponent@@AEAAXXZ"
     ],
     "UHealthComponent_IsDead": ["?IsDead@UHealthComponent@@UEBA_NXZ"],
-    # The real StopLogic: UBrainComponent's is an empty base that ICF folded
-    # onto several unrelated stubs, so it is only useful through reflection
-    # (execStopLogic dispatches virtually). This is the direct fallback.
+
+
+
     "UBehaviorTreeComponent_StopLogic": ["?StopLogic@UBehaviorTreeComponent@@UEAA"],
-    # Run-state sync (Phase D visibility): the story-game state and the
-    # per-character stats component, so each player can see the other's age,
-    # room-clear progress and held weapon. All read-only queries.
+
+
+
     "UWorld_GetGameState": [
         "?GetGameState@UWorld@@QEBAPEAVAThePlainesGameState@@"
     ],
@@ -272,10 +277,10 @@ WANTED = {
     ],
 }
 
-# Member offsets recovered from Unreal's generated reflection tables rather
-# than from hand-diffed hex dumps. Every reflected property records its byte
-# offset inside the owning type, and the PDB names the table entry, so these
-# are exact and re-derived per build instead of being hardcoded.
+
+
+
+
 WANTED_MEMBERS = {
     "M_UHealthComponent_fHealth": ("UHealthComponent", "m_fHealth"),
     "M_UHealthComponent_fMaxHealth": ("UHealthComponent", "m_fMaxHealth"),
@@ -287,27 +292,27 @@ WANTED_MEMBERS = {
     "M_AFightingCharacter_AttackComponent": ("AFightingCharacter", "m_AttackComponent"),
     "M_AFightingCharacter_DefenseComponent": ("AFightingCharacter", "m_DefenseComponent"),
     "M_UAttackComponent_DefaultCombo": ("UAttackComponent", "m_DefaultCombo"),
-    # Story-mode room progress (C2). Host-authoritative; the joiner merely reads
-    # its own copy, and can optionally be nudged toward the host's percentage.
+
+
     "M_AThePlainesGameState_fRoomClearedLifePercent": ("AThePlainesGameState",
                                                       "m_fRoomClearedLifePercent"),
-    # The enemy equivalent of UPlayerAnim::m_LastActionAnim, and the reason hit
-    # reactions never replicated. HANDOFF recorded that USCAnimInstance "has no
-    # current-action asset ... it was dumped and checked" -- it has this, listed
-    # plainly in its own property table. The montage route was measured dead:
-    # `nothing on its anim instance for 400ms`, dozens of times, because Sifu
-    # plays reactions as pose assets rather than montages.
+
+
+
+
+
+
     "M_USCAnimInstance_CachedCurrentPoseAsset": ("USCAnimInstance",
                                                  "m_CachedCurrentPoseAsset"),
-    # Which costume the player is wearing. The puppet is a clone of the LOCAL
-    # player, so it wears the local outfit -- the same root as the age bug.
+
+
     "M_UPlayerFightingComponent_iOutfitIndex": ("UPlayerFightingComponent",
                                                 "m_iOutfitIndex"),
-    # Sifu's hit-stop. OrderFreezeFrame fired 33 times in one measured fight and
-    # is never replicated, so a body that stutters on the owning machine glides
-    # smoothly on the observer -- the two screens disagree about the timing of
-    # every exchange. Per-actor rather than global: slowing the observer's whole
-    # world for a hit they did not throw would be worse than the desync.
+
+
+
+
+
     "M_AActor_CustomTimeDilation": ("AActor", "CustomTimeDilation"),
 }
 
@@ -350,17 +355,17 @@ class Image:
         return raw[:end if end >= 0 else len(raw)].decode("utf-8", "replace")
 
 
-# UE4CodeGen_Private::FPropertyParamsBaseWithOffset, shipping layout:
-#   +0x00 const char* NameUTF8      +0x18 EPropertyGenFlags
-#   +0x08 const char* RepNotifyFunc +0x1C EObjectFlags
-#   +0x10 uint64      PropertyFlags +0x20 int32 ArrayDim   +0x24 uint16 Offset
-#
-# Bool properties are the exception: they carry a SetBitFunc instead of an
-# offset, so a bitfield's address cannot be recovered this way. Nothing here
-# needs one -- IsDown()/SetIsDown() cover the only bool that matters.
+
+
+
+
+
+
+
+
 PROP_PARAMS_SIZE = 0x28
 
-PROP_SYMBOL_RE = None  # compiled lazily; `re` import lives at module top
+PROP_SYMBOL_RE = None
 
 
 def resolve_members(symbols, exe_path, wanted_members, verbose=True):
@@ -419,10 +424,10 @@ def load_symbols(path, verbose=True):
     return pdb, symbols
 
 
-# Symbols worth keeping offline so work can continue without the 925 MB PDB
-# mounted (e.g. from the Ubuntu boot). Matched case-sensitively as substrings.
+
+
 CATALOGUE_TERMS = [
-    "SC",  # game class prefix
+    "SC",
     "FightingCharacter",
     "Replay",
     "DemoNetDriver",
@@ -489,7 +494,7 @@ def resolve_wanted(symbols):
         matches = [s for s in symbols if all(n in s.name for n in needles)]
         if not matches:
             continue
-        # Prefer the shortest mangled name: the least-decorated overload.
+
         matches.sort(key=lambda s: len(s.name))
         resolved[alias] = matches[0]
         if len(matches) > 1:
@@ -545,8 +550,8 @@ def generate_multi_build_header(path, builds):
     if not builds:
         raise ValueError("no build definitions found")
 
-    # Union of aliases, so a build missing one still compiles (it gets 0 and
-    # the loader reports it rather than jumping to the image base).
+
+
     aliases = sorted({alias for b in builds for alias in b["offsets"]})
 
     lines = [
@@ -657,8 +662,8 @@ def main():
                         help="directory of build .json files to combine into --gen")
     args = parser.parse_args()
 
-    # Combining existing build definitions needs no PDB at all, so a machine
-    # that only has someone else's .json can still produce the header.
+
+
     if args.gen and args.builds and not args.emit_build:
         files = sorted(glob.glob(os.path.join(args.builds, "*.json")))
         builds = []

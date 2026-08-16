@@ -23,7 +23,7 @@ def display_name(package_path):
     leaf = package_path.rsplit("/", 1)[-1]
     leaf = re.sub(r"_[Mm]ain$", "", leaf)
     leaf = leaf.replace("Arena_", "")
-    # CamelCase and underscores -> spaced words.
+
     leaf = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", leaf).replace("_", " ")
     return " ".join(w for w in leaf.split() if w)
 

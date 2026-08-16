@@ -1,5 +1,169 @@
 # SifuCoop — Full Project Handoff
 
+## 2026-08-15 locomotion and alternating-hit correction (protocol 19)
+
+Newest 21:19 paired host log made both regressions concrete. The remote player's
+measured speed repeatedly reached V2/V3 while its AnimBP stayed at V1; the recent
+V0-only override therefore left real band transitions uncommanded. Puppet
+locomotion now sends one movement-component speed-state command per hysteretic
+band transition and resets that state across pawn/world changes. It does not
+repeat the setter every frame, so blends can finish.
+
+Nonlethal replicated health was also passed through BPF_ApplyDamage on an enemy
+whose brain had been stopped for remote ownership. That can enter hit/down
+bookkeeping with no brain available to finish it, retiring local collision after
+the other player touches the enemy. Both directions now mirror already-resolved
+nonlethal health directly. Lethal damage still uses Sifu's real damage/death
+path. This preserves simultaneous local hit detection and cumulative accounting.
+
+Full warning-clean verification DLL:
+SHA-256 575A5B3C3B242F0F55C2F6B6277B1298F8DEDA548BA7B6746FA89E10A9A04AB7.
+It is packaged in dist. Epic remained on the prior DLL because Sifu was running;
+Z: Steam was not reachable during deployment.
+
+## Installer - 2026-08-15
+
+Release package now includes dist\SifuCoopInstaller.exe, built from
+installer\installer.cpp (SHA-256
+669F2DBB70366D406716C5453649F38DA4181B0CD280EBC26DC7883C31CE191A).
+It auto-detects Epic LauncherInstalled.dat and Steam registry/libraryfolders.vdf
+installs, including the normal nested Sifu\Sifu\Binaries\Win64 layout. The GUI
+also accepts Browse/manual paths, refuses when Sifu is running, backs up any
+existing dsound.dll to a timestamped SifuCoop-backup folder, preserves the
+existing config unless explicitly replaced, stages file writes, and elevates via
+UAC for protected game folders. build.ps1 builds/packages it; README.md and
+SETUP.md describe it.
+
+The full DLL rebuild was blocked this session because build\dsound.dll is locked
+by a running process. The installer itself compiled warning-clean independently;
+the packaged dsound.dll was not changed by this installer work.
+
+## Current build - 2026-08-15 late correction (protocol 19)
+
+Built successfully; crypto vectors pass. Final artifact:
+SHA-256 78660449DE2F8323EC59CA1B7172DBA5EF3456F6D4AA16CEBD9E9ACF580C49B4.
+Deployed to Epic and Steam; both installed DLLs match the hash above. This build
+is not yet validated by a two-machine playtest.
+
+Corrections proved by the latest paired logs and D: exports:
+
+- The previous reaction sender was wrong. Every transmitted
+  USCAnimInstance.m_CachedCurrentPoseAsset was a facial PoseAsset (42 Epic,
+  39 Steam), and neither observer applied one. BP_TPSCharacter exports the real
+  GetHitAnimHistory output as Array<AnimSequence>. Reaction publication now
+  sends its newest body sequence and only from the enemy's action owner.
+- HealthKillHook asked normal liveness authority after health had reached zero,
+  so it rejected the lethal animation it was meant to publish. Lethal
+  publication now has a narrow dead-inclusive authority check.
+- Received exact death sequences were recorded and then skipped before the
+  common playback path. They now enter that path, which arms the enemy
+  Cinematic AnimBP layer. NoteEnemyDeathAnimation no longer attempts a second
+  invisible direct playback.
+- BP_TPSCharacter exports CLast Hitted(bool Client Replica Fast Death), the
+  game's explicit replicated-death presentation event. Observer death edges
+  call it, and zero-health bodies that missed the edge receive at most three
+  bounded repair attempts.
+- Live logs still showed repeated mid-fight ownership handoffs. Ownership is
+  now lifetime-sticky until death/deactivation. Push reaction motion no longer
+  starts a whole behavior tree or transiently publishes a host-owned enemy.
+  A down player causes retargeting, not simulator handoff.
+- CharacterAging.UpdateMorphTexAging targets the Character argument but reads
+  controller-0 age. The refresh temporarily stages peer age for that synchronous
+  call, restores local age immediately, and retains the morph-only fallback.
+- Outfit application now mirrors native replication: write
+  UPlayerFightingComponent.m_iOutfitIndex and invoke OnRep_OutfitIndex, with
+  BPF_SwapOutfit as fallback. Latest logs showed both players transmitting
+  outfit index 1, so that particular test did not contain two different outfits.
+
+Newest Epic crash report (18:01) is a D3D11 access violation on the render
+thread, with no dsound/SifuCoop frame in the crashed stack. It is distinct from
+the earlier CameraOverriderPresetEnum async-load fatal.
+
+
+
+## Current build - 2026-08-15 (protocol 18)
+
+Built successfully; crypto vectors pass. Epic and Steam contain the same DLL:
+SHA-256 `1E1044FC6D571F13BF4588267EA370BE5B2DFA55645B0E262886DB403171A649`.
+The build artifact is `C:\Users\zanci\SifuCoop\build\dsound.dll`; both configured
+installation paths were verified after copying.
+
+Newest paired-log fixes:
+
+- Replicated corpses now have a native `SetIsDown(false)` guard. It blocks the
+  stand-up transition only while the tracked body is latched dead and remains
+  outside the pool; legitimate pool recycling is allowed.
+- The ambiguous generic `BPF_LaunchImpact` reaction is suppressed. It had no
+  move semantics and caused duck strike/crotch punch false knockdowns.
+- Pushed/FallFromPushed victim orders temporarily own transform publication for
+  1.2 seconds, so another machine's stale movement lease cannot erase push root motion.
+- Grunt/BodyGuard victim animations leaking from `UPlayerAnim::m_LastActionAnim`
+  are filtered from the actor-0 player animation channel.
+
+This pass fixes concrete runtime faults found in the Aug-14 log and source:
+
+- Latest playtest proved the corpse defect is observer-only. Logs held observer bodies at
+  `hp=0/down=1/dead=1` for 10+ minutes while they rendered standing. PDB extraction gives
+  `EDownState::Down=0`, `StandingUp=1`, and `DeathNoRespawn=7`; mod had forced state 0.
+  Observer reconciliation now uses terminal state 7; killer keeps Sifu's native death path.
+- Late cumulative damage reports are acknowledged but cannot damage, stagger, guard-break,
+  or retarget a corpse.
+- Death now clears aggro/target mirroring and rejects corpse ownership and queued attacks;
+  active/target/role diagnostics count live fighters only.
+- Mirrored attacks re-check Sifu's real attack target at launch instead of accepting a stale
+  cached pointer that could aim attacks through the wrong actor.
+
+
+
+- Bootstrap waits eight seconds after `GEngine` before reflection/hooks, avoiding the startup
+  async-load window implicated by the Epic `CameraOverriderPresetEnum` crash.
+- Observer brains are restored for the lethal edge so Sifu can stage a real death fall.
+- Corpse/out-player `OwnedEnemy` leases are rejected; they can no longer stop a death
+  animation or keep the dead player selected.
+- Missing host sweep entries are parked, never killed. The removed forced lethal/down/revive
+  cycle was a direct source of false falls and broken collision/phase-through.
+- Same-world roster refresh preserves pending death animation, presence repair, mirrored target,
+  revive latch, and sticky ownership state.
+- Peer aggro is ineligible while the partner is down/dead.
+
+Not yet verified in a live two-machine fight. Test: host and joiner each kill; observe both
+screens through fall/corpse cleanup; knock down without killing; die/revive while an enemy is
+engaged; simultaneously attack one enemy; watch target changes and motion. Nonlethal
+hurt/push presentation and reliable director permission toward the puppet remain open risks.
+
+## Current build - 2026-08-14 (protocol 18)
+
+Built successfully and deployed to both:
+
+- Epic: `C:\Program Files\Epic Games\Sifu\Sifu\Binaries\Win64\dsound.dll`
+- Steam: `Z:\Program Files (x86)\Steam\steamapps\common\Sifu\Sifu\Binaries\Win64\dsound.dll`
+
+The deployed DLLs have identical SHA-256 hashes. This build is not yet live-tested with two
+real games; claims below distinguish source/export evidence from observed runtime behavior.
+
+Changes in this build:
+
+- Replicated lethal hits now carry the remote player into `UHealthComponent::Kill`, allowing
+  Sifu's native death and AI-situation bookkeeping to observe the real killer.
+- Protocol 18 synchronizes cumulative guard/structure damage independently from health damage,
+  with a host acknowledgement. Guard-only hits now reach the host, trigger presentation, and
+  hand aggro to the joiner's puppet.
+- The remote animation fallback no longer overwrites valid native blend states every frame.
+- Packet-edge forced `SetDown(false)` was removed; it caused interrupted reactions and broken
+  collision/targetability after knockdowns.
+- `testclient` now transmits the count-sized enemy-damage packet required by the receiver.
+
+Important correction: `AThePlainesGameState::m_fRoomClearedLifePercent (+0x39C)` is the life
+percentage restored after a clear, not room progress. The old RunState room field and
+`fix_room_clear` were removed. PDB and raw level exports instead show progression through
+`AAISituationActor::OnSituationResolved` / `OnAIDeath` and level-script callbacks such as
+`015_OnRoomCleared` and `300_OnHangarFightEnding`.
+
+Required two-machine test: joiner kills the final enemy; simultaneous attacks share guard break
+and health; locomotion blends naturally; knocked-down enemies remain hittable after recovery.
+
+---
+
 *This document is a complete, self-contained briefing for an AI assistant taking over
 development of an existing codebase. Read all of it before touching anything. The project's
 defining value is **honesty about what is verified versus assumed** — preserve that. Do not
@@ -109,7 +273,7 @@ executable. No game files are modified; uninstall = delete those two files.
 `[coop]` toggles (all default ON unless noted): `versus` (0), `sync_enemies`,
 `suppress_client_ai`, `sync_enemy_vitals`, `park_extra_enemies`, `echo_enemy_attacks`,
 `echo_player_attacks` (**default 0 — see friendly-fire bug**), `report_damage`,
-`mirror_peer_vitals`, `sync_montages`, `sync_run_state`, `fix_room_clear` (0), `auto_follow_level`,
+`mirror_peer_vitals`, `sync_montages`, `sync_run_state`, `auto_follow_level`,
 `adaptive_interp`, `interp_delay_ms` (60), `snapshot_hz` (60), `in_game_overlay`, `selftest` (0),
 `verbose_enemies` (0), `verbose_orders` (0).
 
@@ -130,7 +294,7 @@ src/
   game/puppet.cpp        remote-player puppet: spawn, drive, vitals, lobby, montage mirror
   game/orders.cpp        attack capture + replay (PrepareToLaunchAttack path)
   game/selftest.cpp      in-game harness: does a replayed enemy attack damage the local player?
-  net/protocol.h         wire format (v7), packet structs, static_asserts
+  net/protocol.h         wire format (v18), packet structs, static_asserts
   net/session.cpp        socket, auth, STUN/punch, interpolation, all packet handlers
   net/crypto.cpp         SHA-256 + HMAC-SHA256 (verified against test vectors)
   ui/d3d_overlay.cpp     ImGui menu via swap-chain hook (Lobby/Levels/Sync/Tuning/Internet/Network/How-to)
@@ -174,9 +338,9 @@ the PDB). Requires WinLibs g++ (MinGW UCRT) and Python 3. Compiles warning-clean
   montages (~2 montage changes in 2 minutes of fighting), so this carries dodges/traversal, NOT
   strikes. It does **not** solve "the remote player should visibly attack." Builds and is wired;
   unverified in a real 2-machine session.
-- **`sync_run_state` / RunState packet (v6 scaffold):** transport exists for age / room-clear% /
-  held-weapon path, but is **dormant** — nothing on the game side reads the local values or
-  applies the peer's. `fix_room_clear` defaults off.
+- **`sync_run_state` / RunState packet:** transports age, outfit and held-weapon path.
+  Age/outfit are applied to the puppet through guarded paths; held-weapon application remains
+  dormant. The former room field was removed in protocol 18 because its source was misidentified.
 - **Jitter fix: NOT applied.** (See open issues.) The plan was: smooth the puppet's facing
   (interpolate yaw instead of snapping every frame in `DriveTo`) and raise the interpolation
   floor (`GetInterpolationDelayMs` currently clamps `delay < 30` → 30 on localhost, too tight).
@@ -338,14 +502,14 @@ the host now leaves the other player where they were.
 
 ## 9. RESEARCHED but NOT (fully) IMPLEMENTED — findings from reading the game binary
 
-- **Doors / room-clear:** there is NO `ADoor`/`AGate`/`ABarrier` actor to flip. Room completion
-  is emergent from `AAIDirectorActor::OnEnemyDeathDetected` + `AThePlainesGameState::
-  m_fRoomClearedLifePercent`. Since the mod already syncs enemy DEATH host-authoritatively, room
-  clear SHOULD follow automatically on the joiner **provided its local game observes its enemies
-  dying** — this is the single most important thing to verify on two machines. If it doesn't
-  follow, the fix is to replicate the clear-percentage (RunState scaffold already carries it) and
-  optionally nudge it via `fix_room_clear`, NOT to build a door system. Transport exists; read/apply
-  is NOT wired.
+- **Doors / room-clear:** there is no generic door actor or percentage to force.
+  `m_fRoomClearedLifePercent` is life restored after a clear, not progress. PDB/export evidence
+  shows `AAISituationActor::OnAIDeath` and `OnSituationResolved` drive level-script callbacks.
+  Protocol 18 therefore keeps replicated lethal damage inside Sifu's native kill path and supplies
+  the remote instigator synchronously. This should preserve situation resolution when the joiner
+  lands the final hit, but it is **not live-verified** until both machines advance after that test.
+  Do not reintroduce the RunState percentage or `fix_room_clear`; inspect native delegate logs if
+  the callback still fails.
 - **Weapons:** `ABaseWeapon::BPF_AttachWeapon`, `BPF_DropWeapon`, `BPF_GetWeaponData` (returns a
   `UBaseWeaponData` asset whose path is portable). `AFightingCharacter` has `OnEquipWeapon`/
   `OnUnequipWeapon` delegates. Observing the local held weapon is feasible; making the puppet hold
@@ -422,7 +586,7 @@ joiner can kill a real enemy; room clears on both; level transitions carry the j
   exit at startup (needs the Epic launcher session). Launch via
   `com.epicgames.launcher://apps/d36336f190094951873ed6138ac208d8?action=launch&silent=true`.
   This is an environment quirk, NOT a mod bug (vanilla Sifu with the dll removed fails identically).
-- Both machines must use the SAME protocol version (currently v7) and the SAME passphrase.
+- Both machines must use the SAME protocol version (currently v18) and the SAME passphrase.
 
 ---
 
@@ -1023,3 +1187,30 @@ how both the relationship bug and the two-target-fields bug were finally found.
 
 Change one risky thing per run. The owner is testing manually across two machines and cannot
 tell which of four changes caused a result.
+
+## 2026-08-15 observer reactions, death, age/outfit pass (protocol v19)
+
+Implemented and built; **not yet live-verified**:
+
+- Observer reactions now send the enemy's real `UPoseAsset` and apply it through
+  `USCAnimInstance::SetCurrentPoseAsset` (Epic RVA `0x00BEDCE0`, Steam RVA `0x00A27270`).
+  The old generic `BPF_LaunchImpact` fallback remains disabled because it made duck strike and
+  crotch punch create false knockdowns.
+- Observer death now enters `EDownState::Death` (4). The previous direct jump to
+  `DeathNoRespawn` (7) skipped the transition that starts the fall.
+- `CharacterAging.UpdateMorphTexAging` was the same-age root cause: its exported Blueprint calls
+  `GetPlayerPawn`, so it refreshes controller 0 instead of the supplied remote character.
+  The new path calls `updateMorphTargets` on the puppet's exact skeletal mesh.
+- Outfit application now calls `BPF_SwapOutfit(..., true)`, matching Sifu's native OnRep path.
+  Latest logs showed both clients transmitting outfit index 1; distinct costumes require the
+  next test to show different peer indices in `run: peer age=... outfit=...`.
+- Latest Epic crash was `EXCEPTION_ACCESS_VIOLATION` in `d3d11.dll` before SifuCoop reflection,
+  gameplay, overlay, or tick hooks started. Relaunch succeeded; current evidence does not
+  attribute that crash to the mod.
+
+Build: `build\dsound.dll`, SHA-256
+`6807D9D3BF9655310918F4493241E0E242AAB5200465C800F6A105F1A1A58DD8`.
+
+Next live test should contain `reaction: ... pose sent`,
+`reaction: observer pose applied`, observer death `down=1`, and
+`run: peer age=<n> outfit=<n> ...`. Do not call these fixes verified until both directions pass.

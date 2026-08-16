@@ -40,7 +40,7 @@ def main():
         data = fh.read()
 
     signature, _version, stream_count, directory_rva = struct.unpack_from("<IIII", data, 0)
-    if signature != 0x504D444D:  # 'MDMP'
+    if signature != 0x504D444D:
         print("not a minidump")
         return 1
 
@@ -52,7 +52,7 @@ def main():
     exception_address = None
     if STREAM_EXCEPTION in streams:
         _size, rva = streams[STREAM_EXCEPTION]
-        # MINIDUMP_EXCEPTION_STREAM: ThreadId, alignment, then the record.
+
         code, flags = struct.unpack_from("<II", data, rva + 8)
         (exception_address,) = struct.unpack_from("<Q", data, rva + 24)
         (param_count,) = struct.unpack_from("<I", data, rva + 32)
@@ -96,9 +96,9 @@ def main():
         print("FAULTING MODULE  none -- the address is not inside any loaded module")
         print("                 (a jump through a bad pointer, or freed/JIT memory)")
 
-    # Whether the mod is even present matters as much as whether it faulted:
-    # dsound.dll is loaded for audio regardless, so its presence in the list is
-    # not evidence of anything on its own.
+
+
+
     for base, size, name in modules:
         if "dsound" in name.lower():
             print(f"\nmod              {name}")

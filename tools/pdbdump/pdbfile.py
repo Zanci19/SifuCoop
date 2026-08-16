@@ -9,14 +9,14 @@ from msf import MsfFile
 
 STREAM_DBI = 3
 
-# CodeView symbol record kinds we care about.
+
 S_PUB32 = 0x110E
 S_GPROC32 = 0x1110
 S_LPROC32 = 0x110F
 S_GDATA32 = 0x110D
 S_LDATA32 = 0x110C
 
-# Index into the DBI optional debug header array.
+
 DBG_SECTION_HDR = 5
 DBG_SECTION_HDR_ORIG = 10
 
@@ -81,7 +81,7 @@ class PdbFile:
         self._dbi_raw = dbi_raw
         self.sections = self._read_sections()
 
-    # -- sections ---------------------------------------------------------
+
 
     def _optional_dbg_header(self):
         offset = (
@@ -110,7 +110,7 @@ class PdbFile:
 
         raw = self.msf.stream(stream_index)
         sections = []
-        # IMAGE_SECTION_HEADER is 40 bytes.
+
         for pos in range(0, len(raw) - 39, 40):
             name = raw[pos : pos + 8].rstrip(b"\x00").decode("ascii", "replace")
             virtual_size, virtual_address = struct.unpack_from("<II", raw, pos + 8)
@@ -118,12 +118,12 @@ class PdbFile:
         return sections
 
     def _to_rva(self, segment, offset):
-        # Segments are 1-based.
+
         if segment == 0 or segment > len(self.sections):
             return None
         return self.sections[segment - 1].virtual_address + offset
 
-    # -- symbols ----------------------------------------------------------
+
 
     def iter_symbols(self):
         """Yield Symbol objects from the global symbol record stream."""
@@ -140,14 +140,14 @@ class PdbFile:
             body = pos + 4
 
             if kind == S_PUB32:
-                # u32 flags, u32 offset, u16 segment, char name[]
+
                 _flags, offset, segment = struct.unpack_from("<IIH", raw, body)
                 name_start = body + 10
                 sym = self._make_symbol(raw, name_start, record_end, segment, offset, kind)
                 if sym is not None:
                     yield sym
             elif kind in (S_GDATA32, S_LDATA32):
-                # u32 typeindex, u32 offset, u16 segment, char name[]
+
                 _type, offset, segment = struct.unpack_from("<IIH", raw, body)
                 name_start = body + 10
                 sym = self._make_symbol(raw, name_start, record_end, segment, offset, kind)

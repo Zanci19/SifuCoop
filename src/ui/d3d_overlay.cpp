@@ -1,11 +1,11 @@
-// In-game overlay, drawn inside the game's own frame.
-//
-// The Win32 overlay window cannot appear over exclusive fullscreen -- nothing
-// can, by design -- so the status line is instead rendered as part of Sifu's
-// frame by hooking the swap chain's Present.
-//
-// Input is shared with Sifu by default. An optional exclusive mode suppresses
-// only events ImGui says it wants, while F1 remains a polling-based failsafe.
+
+
+
+
+
+
+
+
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -26,9 +26,9 @@
 #include "../net/session.h"
 #include "overlay.h"
 
-// imgui_impl_win32.h leaves this declaration inside an #if 0 for the
-// application to provide, so it has to be declared here -- at global scope, or
-// it would become a static of the anonymous namespace and never link.
+
+
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT message,
                                                              WPARAM wparam, LPARAM lparam);
 
@@ -51,16 +51,16 @@ ID3D11DeviceContext* g_context = nullptr;
 ID3D11RenderTargetView* g_render_target = nullptr;
 HWND g_window = nullptr;
 
-// The swap chain we attached to, and the ONLY one we will ever touch.
-//
-// The hook is installed on IDXGISwapChain's vtable, which is shared by every
-// swap chain in the process -- and Sifu is not alone in here. DLSS and the
-// Epic overlay each bring their own, and a game can legitimately present on
-// more than one. Without this check the overlay would bind a render target
-// view created from the game's back buffer while some other swap chain was
-// presenting, possibly on a different device entirely. D3D11 does not
-// diagnose that; it dereferences something that is not what it expects and
-// faults inside itself, with no frame of ours anywhere on the stack.
+
+
+
+
+
+
+
+
+
+
 IDXGISwapChain* g_swap_chain = nullptr;
 
 bool g_initialised = false;
@@ -107,13 +107,13 @@ bool InitialiseFrom(IDXGISwapChain* swap_chain) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr;  // never write imgui.ini into the game folder
+    io.IniFilename = nullptr;
     io.LogFilename = nullptr;
-    // No input: we do not own the mouse or keyboard, the game does.
-    // Keyboard navigation is enabled as a fallback: if the game recentres or
-    // captures the cursor, the menu is still usable with arrows and Enter.
+
+
+
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.MouseDrawCursor = true;  // draw our own; the game hides the system one
+    io.MouseDrawCursor = true;
     ImGui::StyleColorsDark();
 
     if (!ImGui_ImplWin32_Init(g_window) || !ImGui_ImplDX11_Init(g_device, g_context)) {
@@ -129,7 +129,7 @@ bool InitialiseFrom(IDXGISwapChain* swap_chain) {
     return true;
 }
 
-// --- Menu state -------------------------------------------------------------
+
 
 CRITICAL_SECTION g_menu_lock;
 bool g_menu_lock_ready = false;
@@ -138,14 +138,14 @@ std::atomic<bool> g_menu_open{false};
 MenuRequests g_requests;
 bool g_requests_pending = false;
 
-// Live state, published by the game thread for the menu to display.
+
 MenuStatus g_status;
 
 constexpr int kMaxSyncRows = 96;
 SyncRow g_sync_rows[kMaxSyncRows];
 int g_sync_row_count = 0;
 
-// Editable fields.
+
 char g_field_address[64] = "127.0.0.1";
 char g_field_passphrase[64] = {};
 int g_field_port = 7777;
@@ -168,14 +168,14 @@ MenuStatus CopyStatus() {
     return copy;
 }
 
-// The menu is split by WHAT YOU ARE DOING, not by what the code is made of.
-//
-// Play is for someone in a session and stays nearly empty during a fight.
-// Setup is the connection, which you touch once. Options are preferences.
-// Diagnostics is for me, not for a player, and says so.
-//
-// The old single Play tab put a passphrase box and three network buttons on
-// screen during combat, which is the "unused things / make it simpler" report.
+
+
+
+
+
+
+
+
 void DrawPlayTab(const MenuStatus& status) {
     const coop::Stats& stats = coop::GetStats();
     const ImVec4 good(0.45f, 0.90f, 0.45f, 1.f);
@@ -200,7 +200,7 @@ void DrawPlayTab(const MenuStatus& status) {
                 status.together ? "here with you"
                                 : (status.peer_known ? status.peer_level : "loading..."));
 
-    // The one thing worth acting on while you are actually playing.
+
     if (status.together) {
         ImGui::Spacing();
         if (ImGui::Button("Teleport to partner", ImVec2(200, 0))) {
@@ -210,7 +210,7 @@ void DrawPlayTab(const MenuStatus& status) {
         }
     }
 
-    // The invitation, for whichever side of it this machine is on.
+
     if (status.invite_pending) {
         ImGui::SeparatorText("Invitation");
         ImGui::TextColored(warn, "Your partner is playing %s", status.invite_level);
@@ -227,15 +227,15 @@ void DrawPlayTab(const MenuStatus& status) {
         }
         ImGui::Checkbox("Always join automatically", &coop::Get().auto_join_level);
     } else if (status.hosting) {
-        // ALWAYS offered while hosting, never hidden behind `together`.
-        //
-        // `together` only means both players are in the same level package, and
-        // two people sitting in their own saved hideout satisfy that before
-        // co-op has been started at all. Gating the button on it made the button
-        // vanish exactly when it was needed: connected, same level, and no way
-        // to start. And because the invite is what sets g_coop_started, nothing
-        // spawned either body, so the two symptoms -- cannot invite, cannot see
-        // each other -- were one cause.
+
+
+
+
+
+
+
+
+
         ImGui::Spacing();
         if (ImGui::Button("Start co-op here", ImVec2(200, 0))) {
             MenuRequests r;
@@ -388,10 +388,10 @@ void DrawDiagnosticsTab() {
     ImGui::TextColored(dim, "Log: %%LOCALAPPDATA%%\\Sifu\\Saved\\Logs\\SifuCoop.log");
 }
 
-// An invitation the player never sees is an invitation that looks ignored to
-// the person who sent it. The F1 menu is the full lobby; this is the part that
-// has to reach someone who is playing rather than configuring, so it is drawn
-// every frame while an offer stands and takes its own two clicks.
+
+
+
+
 void DrawInviteBanner(const MenuStatus& status) {
     if (!status.invite_pending) return;
 
@@ -409,9 +409,9 @@ void DrawInviteBanner(const MenuStatus& status) {
         ImGui::TextColored(ImVec4(1.f, 0.85f, 0.35f, 1.f), "Your partner invited you");
         ImGui::TextDisabled("%s", status.invite_level);
         ImGui::Spacing();
-        // Buttons only respond while the menu owns the mouse. Without the menu
-        // open the banner is a notice and F1 is how it is answered, which is
-        // said here rather than left to be discovered.
+
+
+
         if (g_menu_open.load()) {
             if (ImGui::Button("Accept", ImVec2(120, 0))) {
                 MenuRequests r;
@@ -465,9 +465,9 @@ void DrawMenu() {
     ImGui::End();
 }
 
-// Always feed an open menu. Shared mode forwards the same events to Sifu;
-// exclusive mode suppresses only the input class ImGui says it is capturing.
-// F1 remains polled in PresentHook, so it can always close the menu.
+
+
+
 LRESULT CALLBACK WndProcHook(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (g_menu_open.load()) {
         ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
@@ -517,10 +517,10 @@ LRESULT CALLBACK WndProcHook(HWND window, UINT message, WPARAM wparam, LPARAM lp
     }
     return CallWindowProcW(g_original_wndproc, window, message, wparam, lparam);
 }
-// Sifu recentres the cursor every frame to drive the camera, which pins the
-// pointer to the middle of the screen -- so no button could ever be clicked, no
-// matter how the input is routed. Suppressing the recentre (and the clip that
-// confines it) only while the menu is open is what actually makes it clickable.
+
+
+
+
 using SetCursorPosFn = BOOL(WINAPI*)(int, int);
 using ClipCursorFn = BOOL(WINAPI*)(const RECT*);
 
@@ -528,20 +528,20 @@ SetCursorPosFn g_original_set_cursor_pos = nullptr;
 ClipCursorFn g_original_clip_cursor = nullptr;
 
 BOOL WINAPI SetCursorPosHook(int x, int y) {
-    if (g_menu_open) return TRUE;  // pretend it worked; leave the cursor alone
+    if (g_menu_open) return TRUE;
     return g_original_set_cursor_pos(x, y);
 }
 
 BOOL WINAPI ClipCursorHook(const RECT* rect) {
-    if (g_menu_open) return g_original_clip_cursor(nullptr);  // unconfine
+    if (g_menu_open) return g_original_clip_cursor(nullptr);
     return g_original_clip_cursor(rect);
 }
 
-// Input is also fed by polling as a fallback. Some fullscreen/input-overlay
-// combinations do not deliver mouse button messages to a subclass reliably;
-// polling keeps the menu clickable in those cases while the WndProc path above
-// prevents normally delivered GUI events from leaking into gameplay.
-// Must run before ImGui::NewFrame(): queued events are consumed there.
+
+
+
+
+
 void FeedMenuInput() {
     ImGuiIO& io = ImGui::GetIO();
 
@@ -553,8 +553,8 @@ void FeedMenuInput() {
     io.AddMouseButtonEvent(0, (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
     io.AddMouseButtonEvent(1, (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0);
 
-    // Keyboard and text are delivered only through WndProc above. Polling them
-    // here would duplicate WM_CHAR (digits) while Backspace arrives once.
+
+
 }
 
 void ReleaseRenderTarget() {
@@ -564,17 +564,17 @@ void ReleaseRenderTarget() {
     }
 }
 
-// ResizeBuffers fails with DXGI_ERROR_INVALID_CALL while ANY reference to the
-// back buffer is outstanding -- and our render target view is exactly that.
-// UE resizes when switching to fullscreen and treats the failure as fatal, so
-// holding that view across a resize crashed the game on startup. Release it
-// here; Present recreates it on the next frame.
+
+
+
+
+
 HRESULT __stdcall ResizeBuffersHook(IDXGISwapChain* swap_chain, UINT buffer_count, UINT width,
                                     UINT height, DXGI_FORMAT format, UINT flags) {
-    // Only ours. Releasing our view because somebody else's swap chain resized
-    // would drop it for no reason; worse, not releasing it when *ours* resizes
-    // makes ResizeBuffers fail with DXGI_ERROR_INVALID_CALL, which UE treats as
-    // fatal -- that is a crash already in this game's history.
+
+
+
+
     if (swap_chain == g_swap_chain) ReleaseRenderTarget();
     return g_original_resize_buffers(swap_chain, buffer_count, width, height, format, flags);
 }
@@ -582,28 +582,28 @@ HRESULT __stdcall ResizeBuffersHook(IDXGISwapChain* swap_chain, UINT buffer_coun
 HRESULT __stdcall PresentHook(IDXGISwapChain* swap_chain, UINT sync_interval, UINT flags) {
     if (!g_failed && !g_initialised) {
         g_initialised = InitialiseFrom(swap_chain);
-        if (!g_initialised) g_failed = true;  // never retry a broken init every frame
+        if (!g_initialised) g_failed = true;
         if (g_initialised) g_swap_chain = swap_chain;
     }
 
-    // Anything that is not the swap chain we attached to is passed straight
-    // through, untouched. See g_swap_chain: drawing into someone else's chain
-    // is a fault inside D3D11 with none of our code on the stack.
+
+
+
     if (swap_chain != g_swap_chain) {
         return g_original_present(swap_chain, sync_interval, flags);
     }
 
-    // Recreate after a resize (fullscreen toggle, resolution change).
+
     if (g_initialised && !g_render_target && g_device) {
         if (!CreateRenderTarget(swap_chain)) {
             return g_original_present(swap_chain, sync_interval, flags);
         }
     }
 
-    // F1 is polled here as well as handled in the WndProc hook. If that hook
-    // ever misbehaves and swallows input, this still closes the menu and hands
-    // control back to the game -- the failsafe for the one change in this mod
-    // that can take input away from the player.
+
+
+
+
     if (g_initialised) {
         static bool f1_was_down = false;
         const bool f1_down = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
@@ -620,16 +620,16 @@ HRESULT __stdcall PresentHook(IDXGISwapChain* swap_chain, UINT sync_interval, UI
         ImGui_ImplWin32_NewFrame();
         if (g_menu_open) FeedMenuInput();
         ImGui::NewFrame();
-        // The status line is part of the menu now; showing it permanently was
-        // clutter during play. The invitation is the one exception: it is a
-        // question from another person and has to reach a player who is playing
-        // rather than one who happens to have the menu open.
+
+
+
+
         DrawInviteBanner(CopyStatus());
         if (g_menu_open) DrawMenu();
         ImGui::Render();
 
-        // Bind only the back buffer; the game's own state is restored by it on
-        // the next frame, and we touch nothing else.
+
+
         g_context->OMSetRenderTargets(1, &g_render_target, nullptr);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     }
@@ -637,9 +637,9 @@ HRESULT __stdcall PresentHook(IDXGISwapChain* swap_chain, UINT sync_interval, UI
     return g_original_present(swap_chain, sync_interval, flags);
 }
 
-// Present cannot be found by symbol: it is a COM virtual. Creating a throwaway
-// swap chain gives a real vtable to read the address from, which is the
-// standard way and stays correct across driver and Windows versions.
+
+
+
 void* FindPresent(void** out_resize_buffers) {
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
@@ -672,7 +672,7 @@ void* FindPresent(void** out_resize_buffers) {
 
     void* present = nullptr;
     if (SUCCEEDED(hr) && swap_chain) {
-        // IDXGISwapChain vtable: 8 = Present, 13 = ResizeBuffers.
+
         void** vtable = *reinterpret_cast<void***>(swap_chain);
         present = vtable[8];
         *out_resize_buffers = vtable[13];
@@ -688,7 +688,7 @@ void* FindPresent(void** out_resize_buffers) {
     return present;
 }
 
-}  // namespace
+}
 
 bool StartInGameOverlay() {
     if (!g_text_lock_ready) {
@@ -707,7 +707,7 @@ bool StartInGameOverlay() {
         return false;
     }
 
-    // MinHook is already initialised by the order hooks; calling twice is safe.
+
     MH_Initialize();
     if (MH_CreateHook(present, reinterpret_cast<void*>(&PresentHook),
                       reinterpret_cast<void**>(&g_original_present)) != MH_OK ||
@@ -716,15 +716,15 @@ bool StartInGameOverlay() {
         return false;
     }
 
-    // Without this second hook the first fullscreen transition kills the game.
+
     if (resize_buffers &&
         MH_CreateHook(resize_buffers, reinterpret_cast<void*>(&ResizeBuffersHook),
                       reinterpret_cast<void**>(&g_original_resize_buffers)) == MH_OK &&
         MH_EnableHook(resize_buffers) == MH_OK) {
         SC_LOG("d3d: Present + ResizeBuffers hooked");
 
-        // Without these the menu draws but cannot be clicked, because the game
-        // pins the cursor to the screen centre every frame for camera control.
+
+
         if (MH_CreateHook(reinterpret_cast<void*>(&SetCursorPos),
                           reinterpret_cast<void*>(&SetCursorPosHook),
                           reinterpret_cast<void**>(&g_original_set_cursor_pos)) == MH_OK &&
@@ -764,8 +764,8 @@ void SetMenuStatus(const MenuStatus& status) {
     EnterCriticalSection(&g_menu_lock);
     g_status = status;
 
-    // Seed the editable fields from the live configuration once, so the menu
-    // opens showing what is actually in effect rather than defaults.
+
+
     if (!g_fields_loaded) {
         g_fields_loaded = true;
         char ini[MAX_PATH] = {};
@@ -805,7 +805,7 @@ void SetInGameOverlayText(const char* text) {
     LeaveCriticalSection(&g_text_lock);
 }
 
-}  // namespace sifucoop::ui
+}
 
 
 

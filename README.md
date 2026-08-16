@@ -3,8 +3,8 @@
 Two-player co-op for [Sifu](https://www.sloclap.com/sifu). Both players fight the game's own
 enemies together: shared encounters, shared kills, shared progress through a level.
 
-Unofficial, unaffiliated with Sloclap, and experimental. It ships as a single DLL you drop
-next to the game executable, modifies no game files, and can be uninstalled by deleting it.
+Unofficial, unaffiliated with Sloclap, and experimental. The release includes a safe installer and can
+be uninstalled by restoring its automatic backup or deleting the mod proxy files.
 
 ```
 Sifu\Binaries\Win64\
@@ -15,6 +15,17 @@ Sifu\Binaries\Win64\
 **[SETUP.md](SETUP.md)** is the install and first-connection guide, and has a step-by-step
 test list that isolates a failure to one layer. **[COOP-PLAN.md](COOP-PLAN.md)** is the
 engineering account: what works, what is approximate, what is untried, and why.
+
+## Install
+
+Extract the release and run SifuCoopInstaller.exe from that same folder. It detects Epic
+and Steam installations, accepts a manually browsed Sifu folder, refuses to install while
+the game is open, and copies an existing dsound.dll to a timestamped SifuCoop-backup folder
+before replacement. Existing SifuCoop.ini settings stay intact unless you explicitly choose
+to replace them.
+
+For a manual install, copy dsound.dll and SifuCoop.ini next to Sifu-Win64-Shipping.exe.
+See [SETUP.md](SETUP.md) for connection steps.
 
 ---
 

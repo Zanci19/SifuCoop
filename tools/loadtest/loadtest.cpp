@@ -1,6 +1,6 @@
-// Loads the built DLL exactly as the game's loader would and reports why it
-// failed. A DLL that dies before DllMain leaves nothing in our own log, so this
-// is the only way to see the real reason.
+
+
+
 
 #include <windows.h>
 

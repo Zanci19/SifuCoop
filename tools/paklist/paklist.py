@@ -47,7 +47,7 @@ def find_footer(data):
 def decrypt(blob, key):
     if len(blob) % 16 != 0:
         raise ValueError(f"encrypted block is not a multiple of 16 ({len(blob)})")
-    # UE encrypts pak indices with AES-256 in ECB.
+
     return AES.new(key, AES.MODE_ECB).decrypt(blob)
 
 
@@ -82,19 +82,19 @@ def main():
         if encrypted:
             index = decrypt(index, key)
 
-        # Primary index: mount point, entry count, then the path-hash and full
-        # directory index locations.
+
+
         pos = 0
         mount_point, pos = read_fstring(index, pos)
         (num_entries,) = struct.unpack_from("<I", index, pos)
         pos += 4
         print(f"mount point: {mount_point}   entries: {num_entries}")
 
-        pos += 8  # PathHashSeed
+        pos += 8
         (has_path_hash,) = struct.unpack_from("<i", index, pos)
         pos += 4
         if has_path_hash:
-            pos += 8 + 8 + 20  # offset, size, hash
+            pos += 8 + 8 + 20
 
         (has_full_dir,) = struct.unpack_from("<i", index, pos)
         pos += 4
@@ -110,7 +110,7 @@ def main():
         if encrypted:
             directory = decrypt(directory, key)
 
-    # Full directory index: TMap<FString dir, TMap<FString file, u32>>
+
     pos = 0
     (dir_count,) = struct.unpack_from("<I", directory, pos)
     pos += 4
@@ -122,7 +122,7 @@ def main():
         pos += 4
         for _ in range(file_count):
             file_name, pos = read_fstring(directory, pos)
-            pos += 4  # entry offset into the encoded entries blob
+            pos += 4
             files.append(dir_name + file_name)
 
     print(f"{len(files)} files in the index")
@@ -130,8 +130,8 @@ def main():
     if args.all:
         selected = sorted(files)
     else:
-        # Levels only. Sifu keeps sublevels next to their _Main map; the mod can
-        # only travel to real maps, so everything else is noise here.
+
+
         selected = sorted(f for f in files if f.lower().endswith(".umap"))
 
     print(f"{len(selected)} selected")

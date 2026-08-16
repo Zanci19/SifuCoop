@@ -1,14 +1,14 @@
-// SifuCoop launcher.
-//
-// Connecting is inherently a pre-launch decision -- you need the peer's address
-// before the game starts -- so the setup UI lives here rather than in-game.
-// Being a separate process, it also cannot crash Sifu.
-//
-// Plain Win32: no dependencies, no runtime to install, builds with the same
-// MinGW toolchain as the mod.
 
-// winsock2.h must precede windows.h, or windows.h pulls in the incompatible
-// winsock 1 headers first.
+
+
+
+
+
+
+
+
+
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -88,14 +88,14 @@ bool IsGameProcessReserved() {
         CloseHandle(mutex);
         return true;
     }
-    // An access-denied result still proves the object exists (for example if
-    // Sifu was launched elevated and this setup window was not).
+
+
     return GetLastError() == ERROR_ACCESS_DENIED;
 }
 
-// Hosting means telling the peer which address to use, and a machine on a VPN
-// has several. ZeroTier hands out 10.x / 172.16-31.x, so those are flagged --
-// the alternative is the user guessing from ipconfig output.
+
+
+
 void RefreshLocalAddresses() {
     WSADATA wsa = {};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return;
@@ -196,7 +196,7 @@ bool SaveSettings() {
     WritePrivateProfileStringW(L"net", L"port", port, ini);
     WritePrivateProfileStringW(L"net", L"passphrase", passphrase, ini);
 
-    // The mod itself must be present, or none of this does anything.
+
     wchar_t dll[MAX_PATH] = {};
     _snwprintf(dll, MAX_PATH, L"%s\\dsound.dll", dir);
     if (!PathFileExistsW(dll)) {
@@ -210,8 +210,8 @@ bool SaveSettings() {
 }
 
 void LaunchGame() {
-    // Check the kernel guard first; process enumeration is the fallback during
-    // the short interval before a newly launched DLL reaches Bootstrap.
+
+
     if (IsGameProcessReserved() || IsSifuProcessRunning()) {
         SetStatus(L"Sifu is already running. Close it before launching another copy.");
         MessageBoxW(nullptr,
@@ -226,8 +226,8 @@ void LaunchGame() {
     wchar_t dir[MAX_PATH] = {};
     GetWindowTextW(g_game_dir, dir, MAX_PATH);
 
-    // Prefer the Epic shim in the install root: launching the shipping exe
-    // directly can bypass Epic's startup and fail on entitlement checks.
+
+
     wchar_t root[MAX_PATH] = {};
     wcsncpy(root, dir, MAX_PATH - 1);
     for (int i = 0; i < 2; ++i) {
@@ -299,10 +299,10 @@ void CreateControls(HWND window) {
                                 window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdPortEdit)),
                                 nullptr, nullptr);
 
-    // Both players must type the same passphrase. It keys the authentication on
-    // every packet, so a mismatch is a silent refusal to connect rather than a
-    // confusing half-working session -- which is exactly why it is on the first
-    // screen rather than buried in the ini.
+
+
+
+
     MakeLabel(window, L"Shared passphrase:", 16, 154, 300, 18, 0);
     g_passphrase_edit =
         CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 16, 174,
@@ -328,7 +328,7 @@ void CreateControls(HWND window) {
 
     g_status = MakeLabel(window, L"", 16, 366, 420, 40, kIdStatusLabel);
 
-    // Use the system UI font; the default is the ancient bitmap one.
+
     HFONT font = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                              DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
@@ -373,7 +373,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     return DefWindowProcW(window, message, wparam, lparam);
 }
 
-}  // namespace
+}
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     WNDCLASSEXW wc = {};

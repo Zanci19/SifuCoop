@@ -46,36 +46,41 @@ BrainClassFn g_brain_class = nullptr;
 GetMovementComponentFn g_get_movement_component = nullptr;
 RequestDirectMoveFn g_request_direct_move = nullptr;
 SetRelationshipFn g_set_relationship = nullptr;
-// UHealthComponent::Kill(EApplyDamageBehavior, AActor* instigator,
-//                        UAnimSequence* death_animation, bool, bool).
+
+
 using HealthKillFn = void(__fastcall*)(ue::UObject*, std::int32_t, ue::UObject*, ue::UObject*,
                                        bool, bool);
 HealthKillFn g_health_kill = nullptr;
-// The PRESENTATION half of going down and getting up.
-//
-// InternalSetDownState changes the state; these two are what UE runs on a
-// machine that did not do the killing, to make the body actually fall and
-// actually stand back up. Without native replication they never fire on their
-// own, which is why a corpse here reported down=1 and stayed on its feet.
+
+
+
+
+
+
 using HealthNotifyFn = void(__fastcall*)(ue::UObject*);
 HealthNotifyFn g_on_rep_set_is_down = nullptr;
 HealthNotifyFn g_on_character_stands_up = nullptr;
-// UFightingMovementComponent::SetSpeedState(ESpeedState). See the note on
-// SetMovementSpeedState below for why this, and not the anim instance, is the
-// thing that has to be written.
+
+
+
 using SetSpeedStateFn = void(__fastcall*)(ue::UObject*, std::uint8_t);
 SetSpeedStateFn g_set_movement_speed_state = nullptr;
+using SetCurrentPoseAssetFn = void(__fastcall*)(ue::UObject*, ue::UObject*);
+SetCurrentPoseAssetFn g_set_current_pose_asset = nullptr;
 
 bool g_ready = false;
 
-// EDownState, in declaration order.
+
 constexpr int kDownStateDown = 0;
+
+
+constexpr int kDownStateDeath = 7;
 constexpr int kDownStateNone = 9;
 
-// Reading a member of a component we resolved ourselves is safe, but the offset
-// arrives from a generated table -- so a zero (meaning "this build did not
-// provide it") must never be treated as "offset 0", which would read the vtable
-// pointer as a float.
+
+
+
+
 float* FloatAt(ue::UObject* object, std::uint32_t offset) {
     if (!object || offset == 0) return nullptr;
     return reinterpret_cast<float*>(reinterpret_cast<std::uint8_t*>(object) + offset);
@@ -86,7 +91,7 @@ ue::UObject** ObjectAt(ue::UObject* object, std::uint32_t offset) {
     return reinterpret_cast<ue::UObject**>(reinterpret_cast<std::uint8_t*>(object) + offset);
 }
 
-}  // namespace
+}
 
 void InitActors(std::uintptr_t base) {
     g_get_health =
@@ -119,6 +124,11 @@ void InitActors(std::uintptr_t base) {
             ? reinterpret_cast<SetSpeedStateFn>(
                   base + offsets::UFightingMovementComponent_SetSpeedState)
             : nullptr;
+    g_set_current_pose_asset =
+        offsets::USCAnimInstance_SetCurrentPoseAsset
+            ? reinterpret_cast<SetCurrentPoseAssetFn>(
+                  base + offsets::USCAnimInstance_SetCurrentPoseAsset)
+            : nullptr;
     g_set_relationship = offsets::USocialComponent_SetRelationship
         ? reinterpret_cast<SetRelationshipFn>(
               base + offsets::USocialComponent_SetRelationship)
@@ -137,8 +147,8 @@ void InitActors(std::uintptr_t base) {
                   base + offsets::UCharacterHealthComponent_OnCharacterStandsUp)
             : nullptr;
 
-    // Only the offsets that would silently corrupt a read are treated as
-    // mandatory; the rest degrade to "that feature is off".
+
+
     g_ready = offsets::UCharacterHealthComponent_Get != 0 &&
               offsets::M_UHealthComponent_fHealth != 0 &&
               offsets::M_UHealthComponent_fMaxHealth != 0;
@@ -190,27 +200,27 @@ void SetGuard(const Fighter& fighter, float guard) {
     *value = guard;
 }
 
-// Kill a body the way the machine that owns it killed it.
-//
-// ApplyDamage past zero reaches death but leaves the animation to a selection
-// step that only runs on the killing machine, so a replicated corpse stopped
-// upright. Sifu carries the chosen sequence into UHealthComponent::Kill, and
-// the host's hook forwards exactly that asset -- this hands it back to the
-// same function on the other side.
+
+
+
+
+
+
+
 bool KillWithAnimation(const Fighter& fighter, ue::UObject* instigator,
                        ue::UObject* death_animation) {
-    // A null animation is allowed, and that is not a loophole -- it is what the
-    // host itself passes for most kills. The exact-sequence hook only fires when
-    // Sifu's hit path chose one, which it does not for damage applied through
-    // BPF_ApplyDamage: the host sent an animation for one death out of six in a
-    // logged session, and the other five are precisely the ones the peer killed.
-    // The host's own bodies fall correctly on those five, so making the same
-    // call with the same null argument is what reproduces that, rather than
-    // falling back to a forced down-state that never looked like dying.
+
+
+
+
+
+
+
+
     if (!fighter.health || !g_health_kill) return false;
-    // Behaviour 0 is the ordinary lethal case. The instigator is only used for
-    // attribution and direction; a live local body is passed rather than null
-    // because the callee dereferences it.
+
+
+
     if (!instigator) return false;
     g_health_kill(fighter.health, 0, instigator, death_animation, false, false);
     return true;
@@ -231,14 +241,14 @@ bool IsDead(const Fighter& fighter) {
     return g_is_dead(fighter.health);
 }
 
-// Runs the callback UE would have run on a replication client.
-//
-// Found by asking what actually puts a body on the floor rather than what
-// marks it dead: UCharacterHealthComponent has OnRepSetIsDown, the OnRep_ for
-// its down flag, and an OnCharacterStandsUp to match. On a real client UE
-// calls those when the flag arrives, and everything visible about falling
-// lives in them. This mod sets the flag itself, so it has to make the call
-// itself too -- which is why every death read down=1 and stood upright.
+
+
+
+
+
+
+
+
 void NotifyDownStateChanged(const Fighter& fighter, bool down) {
     if (!fighter.health) return;
     if (down) {
@@ -250,15 +260,31 @@ void NotifyDownStateChanged(const Fighter& fighter, bool down) {
 
 void SetDown(const Fighter& fighter, bool down) {
     if (!fighter.health) return;
-    // The flag alone only records the fact; InternalSetDownState is what makes
-    // the character actually fall over. Learned when the puppet refused to die.
+
+
     if (g_set_is_down) g_set_is_down(fighter.health, down);
     if (g_set_down_state) {
         bool scratch = false;
         g_set_down_state(fighter.health, down ? kDownStateDown : kDownStateNone, true, &scratch);
     }
 }
+void SetDeathState(const Fighter& fighter) {
+    if (!fighter.health) return;
+    if (g_set_is_down) g_set_is_down(fighter.health, true);
+    if (g_set_down_state) {
+        bool scratch = false;
+        g_set_down_state(fighter.health, kDownStateDeath, true, &scratch);
+    }
+}
 
+
+bool SetCurrentPoseAsset(ue::UObject* actor, ue::UObject* pose_asset) {
+    if (!actor || !pose_asset || !g_set_current_pose_asset) return false;
+    ue::UObject* anim_instance = ue::GetAnimInstance(actor);
+    if (!anim_instance) return false;
+    g_set_current_pose_asset(anim_instance, pose_asset);
+    return true;
+}
 int GetFaction(ue::UObject* actor) {
     if (!actor || !g_get_faction) return -1;
     return g_get_faction(actor) & 0xFF;
@@ -299,8 +325,8 @@ bool StopBrain(ue::UObject* actor) {
         return false;
     }
 
-    // FString Reason, by value. Zeroed is a valid empty string and its
-    // destructor on a null pointer is a no-op.
+
+
     struct FStringParam {
         void* data;
         std::int32_t num;
@@ -309,12 +335,12 @@ bool StopBrain(ue::UObject* actor) {
     return ue::CallFunction(component.ReturnValue, L"StopLogic", &reason);
 }
 
-// The mirror of StopBrain. Restarting the behaviour tree is what lets an enemy
-// on the joining machine fight that player for real instead of being a puppet
-// of the host's transform stream.
-//
-// RestartLogic rather than StartLogic: the tree has already been initialised
-// and stopped, and restarting is the documented way back from that.
+
+
+
+
+
+
 bool StartBrain(ue::UObject* actor) {
     if (!actor || !g_brain_class) return false;
 
@@ -366,27 +392,27 @@ void SetActorPresent(ue::UObject* actor, bool present) {
 }
 
 
-// UE 4.26 fields recovered from the shipped PDB. Sifu's locomotion/foot-IK
-// graph reads the root component's ComponentVelocity (not merely the movement
-// component's Velocity), which is why the first direct-drive presentation fix
-// still left legs idle.
+
+
+
+
 constexpr std::uintptr_t kMovementVelocityOffset = 0xD4;
 constexpr std::uintptr_t kSceneComponentVelocityOffset = 0x150;
 
-// The character's real velocity, straight off its movement component.
-//
-// This replaces differencing the actor's position between frames, which is how
-// the mod used to produce the velocity it puts on the wire. That looked
-// equivalent and is not: the transform only changes on frames where movement
-// actually integrated, and at 165 fps against a 60 Hz movement update most
-// frames repeat the previous position. The derived velocity was therefore the
-// true speed on some frames and exactly zero on the rest.
-//
-// Downstream that strobe is fatal rather than merely noisy. BaseMovementDB
-// gives the V0->V1 blend 0.3 s and V0->V3 a full second, so a speed band that
-// flips several times a second restarts a blend that never completes, and the
-// character stays in the pose it started from. That is "the remote player lifts
-// a leg and stops".
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 bool GetActorVelocity(ue::UObject* actor, ue::FVector* out) {
     if (!actor || !out || !g_get_movement_component) return false;
     ue::UObject* movement = g_get_movement_component(actor);
@@ -401,8 +427,8 @@ PresentationTargets ResolvePresentationTargets(ue::UObject* actor) {
     if (!actor || !g_get_movement_component) return targets;
     targets.movement = g_get_movement_component(actor);
 
-    // AActor::GetVelocity and Sifu's foot IK observe this root-scene value.
-    // K2_GetRootComponent returns the puppet's capsule; never touch player 0.
+
+
     struct RootParams {
         ue::UObject* ReturnValue;
     } root = {};
@@ -422,22 +448,22 @@ void WritePresentationVelocity(const PresentationTargets& targets,
     }
 }
 
-// Where the locomotion band actually lives.
-//
-// UPlayerAnim::m_SpeedState is a COPY. The value belongs to the movement
-// component, which computes it during its own tick from input a replicated body
-// does not have -- so for the puppet and for every driven enemy it read V0 at
-// every speed, and the graph faithfully played the idle state at 850 units/s.
-// Writing the anim instance's copy, which is what the mod did for weeks, is
-// writing a mirror: NativeUpdateAnimation refreshes it from here on the next
-// frame regardless.
-//
-// Order matters as much as the value. Written from inside the animation update,
-// after the movement component has ticked and before the graph samples it --
-// the same placement that made the velocity injection work.
+
+
+
+
+
+
+
+
+
+
+
+
+
 bool SetMovementSpeedState(ue::UObject* movement_component, int state) {
     if (!movement_component || !g_set_movement_speed_state) return false;
-    if (state < 0 || state > 3) return false;  // ESpeedState V0..V3
+    if (state < 0 || state > 3) return false;
     g_set_movement_speed_state(movement_component, static_cast<std::uint8_t>(state));
     return true;
 }
@@ -456,33 +482,33 @@ bool RequestDirectMove(ue::UObject* actor, const ue::FVector& desired_velocity,
                        bool force_max_speed) {
     if (!actor || !g_get_movement_component || !g_request_direct_move) return false;
 
-    // Do not cache this raw pointer. Pawns and their movement components are
-    // rebuilt on respawn, travel and pooling; resolving this lightweight native
-    // getter each tick is safer than ever calling a stale component.
+
+
+
     ue::UObject* component = g_get_movement_component(actor);
     if (!component) return false;
     g_request_direct_move(component, desired_velocity, force_max_speed);
-    return true;  // dispatched; a caller may still watch actual displacement
+    return true;
 }
 
-// How often the sweep-free fallback below was needed, and how often even that
-// left the actor somewhere other than where it was told to go.
+
+
 std::uint32_t g_teleport_fallbacks = 0;
 std::uint32_t g_teleport_hard_failures = 0;
 
-// Move without the encroachment test.
-//
-// K2_SetActorLocation's parameter block contains an FHitResult whose exact
-// layout is not worth recovering, so the buffer is generously oversized and
-// zeroed: ProcessEvent copies each parameter at the offset the UFunction says,
-// and everything we do not fill stays zero. Only the first two parameters
-// matter and both sit at offsets that cannot move -- NewLocation at 0x00,
-// bSweep at 0x0C. bTeleport is left false, which is correct for a body that is
-// not simulating physics.
+
+
+
+
+
+
+
+
+
 bool SetLocationNoSweep(ue::UObject* actor, const ue::FVector& location) {
     std::uint8_t params[512] = {};
     std::memcpy(params + 0x00, &location, sizeof(location));
-    params[0x0C] = 0;  // bSweep
+    params[0x0C] = 0;
     return ue::CallFunction(actor, L"K2_SetActorLocation", params);
 }
 
@@ -499,8 +525,8 @@ bool SetRotationDirect(ue::UObject* actor, const ue::FRotator& rotation) {
 
 bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
                    const ue::FRotator& rotation) {
-    // K2_TeleportTo's parameter block is just (FVector, FRotator, bool) -- no
-    // FHitResult whose layout would have to be guessed.
+
+
     struct Params {
         ue::FVector DestLocation;
         ue::FRotator DestRotation;
@@ -508,35 +534,35 @@ bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
     } params = {};
     params.DestLocation = location;
     params.DestRotation = rotation;
-    // Two different questions, and returning the wrong one hid a failure: the
-    // call succeeding means the UFunction was found, while ReturnValue is
-    // whether the actor actually moved. K2_TeleportTo refuses when the
-    // destination would not fit, so a caller that only checked the former
-    // believed it had repositioned something that had not budged.
+
+
+
+
+
     if (!ue::CallFunction(actor, L"K2_TeleportTo", &params)) return false;
     if (params.ReturnValue) return true;
 
-    // Refused. Until now that was the end of it: the puppet simply was not
-    // moved, and the live log showed 798 of 823 consecutive frames refused
-    // while it sat 70 units behind the peer. It was not lagging, it was being
-    // left where it was -- and driven enemies went through the same path with
-    // the result discarded entirely, so they stood still on the joining side.
-    //
-    // A replicated body is not a physical object arriving somewhere; it is a
-    // picture of where someone else already is. If the capsule does not fit,
-    // the answer is to put it there anyway, not to stay behind.
+
+
+
+
+
+
+
+
+
     ++g_teleport_fallbacks;
     SetLocationNoSweep(actor, location);
     SetRotationDirect(actor, rotation);
 
-    // Trust nothing: confirm it actually landed. Anything that still cannot be
-    // moved is a genuinely stuck body and worth knowing about.
-    //
-    // Sampled rather than checked every time. A refusal can affect the puppet
-    // and every driven enemy on the same frame, and the confirmation is another
-    // ProcessEvent each -- which is exactly the per-enemy-per-frame reflection
-    // cost this file exists to avoid. Four times a second is plenty to notice a
-    // body that is truly stuck.
+
+
+
+
+
+
+
+
     static DWORD last_verify_ms = 0;
     const DWORD verify_now = GetTickCount();
     if (verify_now - last_verify_ms < 250) return true;
@@ -569,7 +595,7 @@ const char* Name(int value) {
         default: return "?";
     }
 }
-}  // namespace relationship
+}
 
 ue::UObject* GetSocialComponent(ue::UObject* character) {
     if (!character) return nullptr;
@@ -580,13 +606,13 @@ ue::UObject* GetSocialComponent(ue::UObject* character) {
     return params.ReturnValue;
 }
 
-// Both readers ask a function with the same NAME, and they are not the same
-// function. The actor's is a virtual that AFightingCharacter overrides
-// (0x019B4910, distinct from ABaseCharacter's 0x019953A0); the component's
-// (0x01B5B7F0) belongs to the class that OWNS m_Relationships, which is what
-// every write in this file targets. Nothing has ever established that the actor
-// override consults the map, and a whole session's worth of "the setter is a
-// no-op" rests on assuming it does. Ask both and let them disagree in the log.
+
+
+
+
+
+
+
 int ReadRelationship(ue::UObject* from_actor, ue::UObject* to_actor) {
     if (!from_actor || !to_actor) return relationship::kUnknown;
     struct Params {
@@ -617,28 +643,28 @@ int ReadRelationshipViaComponent(ue::UObject* from_actor, ue::UObject* to_actor)
 
 bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
     if (!social || !toward || value < 0) return false;
-    // BPF_ServerChangeRelationship forwards to MulticastChangeRelationship, and
-    // that implementation walks the actor it is handed. Restarting a level
-    // crashed here -- reading a live-looking heap address inside
-    // SocialComponent.cpp:420 -- because the enemy or puppet being pointed at
-    // had already been torn down with the old world while this side was still
-    // asserting relationships against it. Both ends are checked, because either
-    // one can be the dead one.
+
+
+
+
+
+
+
     if (!ue::IsValidObject(social) || !ue::IsValidObject(toward)) return false;
 
-    // ...and IsValid is not enough on a level restart.
-    //
-    // The second crash here read 0xFFFFFFFFFFFFFFFF inside SetRelationship
-    // itself (SocialComponent.cpp:246), which is an empty map indexed with -1,
-    // not a freed one. That is the opposite end of the actor's life from the
-    // first crash: these are brand-new bodies whose social component exists but
-    // whose relationship storage has not been built yet, and this side was
-    // asserting against them within a frame or two of the world appearing.
-    //
-    // Both failures are the same rule in the end -- only talk to a settled
-    // world. The gate lives here rather than in the callers because there are
-    // now several of them and forgetting it crashes the game rather than
-    // producing a wrong colour somewhere.
+
+
+
+
+
+
+
+
+
+
+
+
+
     static ue::UObject* seen_world = nullptr;
     static DWORD world_settled_at = 0;
     ue::UObject* world = ue::GetWorld();
@@ -666,22 +692,22 @@ bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
     return ue::CallFunction(social, L"BPF_ServerChangeRelationship", &params);
 }
 
-// USocialComponent::m_Relationships, offset from Unreal's property table for
-// USocialComponent. A TMap is a TSet of pairs, whose first member is the
-// sparse array's TArray {void* Data; int32 Num; int32 Max} -- so the element
-// count sits 8 bytes in. Read-only, and only ever used as evidence about
-// whether a write landed.
+
+
+
+
+
 constexpr std::uintptr_t kSocialRelationshipsMap = 0x0318;
 
-// Whether this offset has ever been seen to hold two different numbers.
-//
-// 0x0318 is a hardcoded guess. A guess that reads back a plausible constant --
-// "5 entries", every time, on both machines -- is indistinguishable from a
-// correct offset on a map that never grows, and the difference between those
-// two decides whether the relationship setter works. Until the number has been
-// observed to MOVE, it is not evidence of anything and must not be quoted as
-// though it were. This is the same rule as counting symbols at an RVA before
-// trusting a function exists.
+
+
+
+
+
+
+
+
+
 int g_map_probe_first = -1;
 bool g_map_probe_moved = false;
 
@@ -693,7 +719,7 @@ int RelationshipMapSize(ue::UObject* social) {
     std::memcpy(&num,
                 reinterpret_cast<const std::uint8_t*>(social) + kSocialRelationshipsMap + 8,
                 sizeof(num));
-    if (num < 0 || num > 4096) return -1;  // implausible: do not report a guess
+    if (num < 0 || num > 4096) return -1;
     if (g_map_probe_first < 0) {
         g_map_probe_first = num;
     } else if (!g_map_probe_moved && num != g_map_probe_first) {
@@ -712,8 +738,8 @@ float GetActorTimeDilation(ue::UObject* actor) {
                 reinterpret_cast<const std::uint8_t*>(actor) +
                     offsets::M_AActor_CustomTimeDilation,
                 sizeof(value));
-    // Never report something that would freeze or launch a body if it were
-    // copied to the other machine.
+
+
     if (!(value > 0.01f) || value > 4.f) return 1.f;
     return value;
 }
@@ -755,21 +781,21 @@ std::uint32_t ActorHash(ue::UObject* actor) {
     return HashName(name);
 }
 
-// UE4 names an actor spawned at runtime `Base_<number>`, where the number comes
-// from a per-process counter that walks *down* from MAX_int32. It therefore
-// differs on every machine and every launch: the same grunt in the same fight
-// was `000_AISpawner_Group015_Grunt_Character_2147475019` on one machine and
-// `..._2147473188` on the other.
-//
-// This is what broke enemy pairing between two real machines. Enemies placed in
-// the level's pool are named `..._C_0` and match perfectly, which is why a
-// pooled roster of 62 enemies tested clean across launches -- but the enemies
-// that actually fight a room are spawned by an AISpawner at runtime, and every
-// one of those hashed differently on each side. The receiving machine found no
-// enemy for any id the host sent (driven=0, unmatched=every active enemy).
-//
-// Anything at or above this floor is a runtime counter value rather than a real
-// instance index; `..._C_0` and `..._Group015` stay untouched.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 constexpr std::uint32_t kRuntimeNameFloor = 2000000000u;
 
 bool SplitRuntimeSuffix(char* name, std::uint32_t* number_out) {
@@ -779,9 +805,9 @@ bool SplitRuntimeSuffix(char* name, std::uint32_t* number_out) {
 
     unsigned long long value = 0;
     for (const char* p = underscore + 1; *p; ++p) {
-        if (*p < '0' || *p > '9') return false;   // not a pure number: leave it alone
+        if (*p < '0' || *p > '9') return false;
         value = value * 10 + static_cast<unsigned long long>(*p - '0');
-        if (value > 0xFFFFFFFFull) return false;  // absurd; treat as part of the name
+        if (value > 0xFFFFFFFFull) return false;
     }
     if (value < kRuntimeNameFloor) return false;
 
@@ -791,13 +817,13 @@ bool SplitRuntimeSuffix(char* name, std::uint32_t* number_out) {
 }
 
 std::uint32_t HashNameWithOrdinal(const char* text, int ordinal) {
-    // Same FNV-1a step as HashName, continued over the ordinal, so two enemies
-    // spawned by one group stay distinct. Only ever applied to names that had a
-    // runtime suffix, so plain pooled names keep the exact hash they always had.
+
+
+
     std::uint32_t hash = HashName(text);
     hash ^= static_cast<std::uint32_t>(ordinal) & 0xFFu;
     hash *= 16777619u;
     return hash;
 }
 
-}  // namespace sifucoop::game
+}

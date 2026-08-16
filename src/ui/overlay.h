@@ -2,69 +2,69 @@
 
 namespace sifucoop::ui {
 
-// A small always-on-top status window drawn beside the game.
-//
-// The obvious route -- UEngine::AddOnScreenDebugMessage -- is unavailable: in
-// this Shipping build it is an empty function folded by ICF onto the same
-// address as several unrelated stubs, so calling it does nothing at all.
-//
-// Note: a layered window sits above borderless/windowed games. Exclusive
-// fullscreen will hide it -- switch Sifu to borderless if you cannot see it.
+
+
+
+
+
+
+
+
 void StartOverlay();
 void StopOverlay();
 
-// Thread-safe; the text is picked up by the overlay's own thread.
+
 void SetOverlayText(const char* text);
 
-// Draws inside the game's frame by hooking the swap chain, so the status is
-// visible in exclusive fullscreen where no window can appear. Returns false if
-// the hook could not be installed, in which case the window overlay remains the
-// only display.
+
+
+
+
 bool StartInGameOverlay();
 void SetInGameOverlayText(const char* text);
 
-// --- Menu (F1) -------------------------------------------------------------
-//
-// The menu is drawn on the RENDER thread, so it must never call into the game.
-// It only records what the user asked for; the game thread picks these up in
-// its own tick and acts there. Calling OpenLevel or spawning from inside
-// Present would be a race against the engine's own use of those systems.
-//
-// Config toggles are the exception and are edited in place: they are plain
-// scalars that the game thread only ever reads, so a checkbox needs no round
-// trip to take effect.
+
+
+
+
+
+
+
+
+
+
 
 struct MenuRequests {
-    bool travel = false;          // travel to `level`, and invite the peer
+    bool travel = false;
     char level[192] = {};
-    bool apply_network = false;   // reconnect using `host_mode` / `address`
+    bool apply_network = false;
     bool host_mode = true;
     char address[64] = {};
     char passphrase[64] = {};
     int port = 7777;
-    bool discover_address = false;  // ask a STUN server what our public address is
+    bool discover_address = false;
     bool spawn_puppet = false;
     bool despawn_puppet = false;
-    bool invite_peer = false;     // pull the peer into the level we are in now
-    bool accept_invite = false;   // joiner: take the host up on their standing invite
-    bool decline_invite = false;  // joiner: say no, and tell the host so
-    bool teleport_to_peer = false;  // stand where the other player is standing
-    bool save_config = false;     // persist the toggles to SifuCoop.ini
-    bool restart_network = false; // restart the configured UDP session
-    bool disconnect_network = false; // leave networking offline
+    bool invite_peer = false;
+    bool accept_invite = false;
+    bool decline_invite = false;
+    bool teleport_to_peer = false;
+    bool save_config = false;
+    bool restart_network = false;
+    bool disconnect_network = false;
     bool log_roster = false;};
 
-// Game thread: takes and clears whatever the menu asked for. Returns false when
-// there is nothing pending.
+
+
 bool TakeMenuRequests(MenuRequests* out);
 
-// Live state, published by the game thread for the menu to show.
+
 struct MenuStatus {
     bool connected = false;
     bool hosting = true;
     bool offline = false;
     bool have_level = false;
-    bool together = false;        // both players report the same level
+    bool together = false;
     char my_level[128] = {};
     char peer_level[128] = {};
     char detail[128] = {};
@@ -73,7 +73,7 @@ struct MenuStatus {
     float my_max_health = 0.f;
     float my_guard = 0.f;
 
-    bool peer_known = false;      // the peer has reported vitals at least once
+    bool peer_known = false;
     bool peer_down = false;
     float peer_health = 0.f;
     float peer_max_health = 0.f;
@@ -83,26 +83,26 @@ struct MenuStatus {
     int faction_mine = -1;
     int faction_puppet = -1;
 
-    // The host has offered a level and the joining player has not taken it yet.
+
     bool invite_pending = false;
     char invite_level[128] = {};
-    // The host's view of the answer, so pressing Invite is a conversation
-    // rather than a guess. Cleared after it has been shown for a few seconds.
+
+
     bool invite_answer_valid = false;
     bool invite_answer_accepted = false;
-    // Sifu confirms the two players are marked friendly to each other, which is
-    // the gate on the remote player's attacks being replayed at all.
+
+
     bool friendly_confirmed = false;
 
-    // What this machine looks like from outside, once discovery has answered.
+
     char public_address[64] = {};
 };
 
 void SetMenuStatus(const MenuStatus& status);
 
-// One row of the live enemy table. Mirrored rather than read straight out of
-// the game's own list: the render thread must never walk a structure the game
-// thread is rebuilding underneath it.
+
+
+
 struct SyncRow {
     unsigned int hash = 0;
     float distance = 0.f;
@@ -119,4 +119,4 @@ void SetSyncRows(const SyncRow* rows, int count);
 
 bool IsMenuOpen();
 
-}  // namespace sifucoop::ui
+}

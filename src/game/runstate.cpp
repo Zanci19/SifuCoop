@@ -24,17 +24,17 @@ namespace offsets = sifucoop::offsets;
 
 ue::UObject* PlayerFightingComponent(ue::UObject* character);
 
-// Never write cosmetics onto the local player.
-//
-// Reported after the first version of this shipped: on the joiner, whose player
-// is 20, BOTH bodies started showing the host's age. The write was landing on
-// the local character. ApplyPeerVitals has carried the guard against exactly
-// this since it was written -- "Sifu's game mode has been observed handing the
-// second player the FIRST player's character, and it does that on respawn and
-// travel as well as at creation" -- and these two writes were added without it.
-//
-// Both directions of the same test, for the same reason it is done twice there:
-// GetPlayerCharacter(0) can lag the possession by a frame.
+
+
+
+
+
+
+
+
+
+
+
 bool IsSafeToDress(ue::UObject* puppet) {
     if (!puppet) return false;
     ue::UObject* world = ue::GetWorld();
@@ -44,9 +44,9 @@ bool IsSafeToDress(ue::UObject* puppet) {
     return true;
 }
 
-// player -> UStatsComponent -> character age. Both are reflection getters, so
-// this reads real data without dereferencing any unknown field. Returns -1 when
-// the chain is unavailable (e.g. before a character exists).
+
+
+
 int ReadLocalAge(ue::UObject* player) {
     struct StatsRet {
         ue::UObject* ReturnValue;
@@ -61,25 +61,25 @@ int ReadLocalAge(ue::UObject* player) {
     return age.ReturnValue;
 }
 
-// The same chain, written instead of read, and only ever aimed at the PUPPET.
-//
-// Sifu's characters are aged by their stats component and their appearance
-// follows from it, so a clone of the local player carries the LOCAL player's
-// age -- which is why the host at 48 saw two old men and the joiner at 20 saw
-// two young ones, each machine showing its partner at its own age. The peer's
-// real age has been on the wire and in the log all along
-// (`run: peer age=...`); nothing consumed it.
-//
-// BPF_SetCharacterAge is Blueprint-exposed (it has an exec thunk), so this is
-// reflection like everything around it -- no offset, no unknown field. Aimed at
-// the puppet and nowhere else: the local player's age is their own run and must
-// never be written from the network.
-bool WritePuppetAge(ue::UObject* puppet, int years) {
-    if (!puppet || years < 0 || !IsSafeToDress(puppet)) return false;
+
+
+
+
+
+
+
+
+
+
+
+
+
+bool WriteCharacterAge(ue::UObject* character, int years) {
+    if (!character || years < 0) return false;
     struct StatsRet {
         ue::UObject* ReturnValue;
     } stats = {};
-    if (!ue::CallFunction(puppet, L"BPF_GetStatsComponent", &stats) || !stats.ReturnValue) {
+    if (!ue::CallFunction(character, L"BPF_GetStatsComponent", &stats) || !stats.ReturnValue) {
         return false;
     }
     struct AgeArg {
@@ -88,15 +88,19 @@ bool WritePuppetAge(ue::UObject* puppet, int years) {
     return ue::CallFunction(stats.ReturnValue, L"BPF_SetCharacterAge", &arg);
 }
 
-// player -> UPlayerFightingComponent -> m_iOutfitIndex.
-//
-// Sifu has no BPF_GetOutfitIndex, so the index is read from the property
-// directly at an offset the build tool resolves from the PDB -- the same way
-// health, guard and faction are read. Writing it DOES have a Blueprint entry
-// point, BPF_SwapOutfit, so the round trip is a raw read and a reflected write.
-// AFightingCharacter has no BPF getter for it -- the whole BPF_ surface was
-// listed and there is none -- so it is reached the way the capsule already is:
-// resolve the class and ask AActor::GetComponentByClass.
+bool WritePuppetAge(ue::UObject* puppet, int years) {
+    return puppet && IsSafeToDress(puppet) && WriteCharacterAge(puppet, years);
+}
+
+
+
+
+
+
+
+
+
+
 ue::UObject* PlayerFightingComponent(ue::UObject* character) {
     if (!character) return nullptr;
     void* klass = ue::FindObjectByPath(L"/Script/Sifu.PlayerFightingComponent");
@@ -125,61 +129,95 @@ int ReadLocalOutfit(ue::UObject* player) {
     return (index < 0 || index > 64) ? -1 : index;
 }
 
-// Aimed at the PUPPET only, exactly like the age write. The second argument is
-// an optional material override; passing null means "just the outfit".
+
+
 bool WritePuppetOutfit(ue::UObject* puppet, int index) {
     if (!puppet || index < 0 || !IsSafeToDress(puppet)) return false;
     ue::UObject* comp = PlayerFightingComponent(puppet);
     if (!comp) return false;
-    // Three parameters, from the decorated name:
-    //   BPF_SwapOutfit(int32, UMaterialInterface*, bool)
-    // The second is an optional material override -- null means "just the
-    // outfit". Disassembly of Sifu's own OnRep_OutfitIndex passes true for the
-    // final flag. Keep that exact path staged independently for its first run.
+
+
+    if (offsets::M_UPlayerFightingComponent_iOutfitIndex != 0) {
+        const std::int32_t exact_index = index;
+        std::memcpy(reinterpret_cast<std::uint8_t*>(comp) +
+                        offsets::M_UPlayerFightingComponent_iOutfitIndex,
+                    &exact_index, sizeof(exact_index));
+        if (ue::CallFunction(comp, L"OnRep_OutfitIndex", nullptr)) return true;
+    }
+
+
+
     struct SwapArgs {
         std::int32_t Index;
         ue::UObject* MaterialOverride;
         bool Flag;
-    } args = {index, nullptr, coop::Get().use_engine_outfit_refresh};
+    } args = {index, nullptr, true};
     return ue::CallFunction(comp, L"BPF_SwapOutfit", &args);
 }
 
-// Sifu's production player Blueprint calls this library after its Age stat
-// changes. Unlike the old OnStatsUpdated call, this function actually updates
-// the face/body morphs and aging textures. The class is a direct dependency of
-// BP_FightingPlayer, but StaticFindObjectSafe does not load packages, so a
-// missing CDO is a retryable "not ready" rather than a reason to call through a
-// guessed pointer.
-bool RefreshPuppetVisualAge(ue::UObject* puppet) {
+
+
+
+
+
+
+bool RefreshPuppetVisualAge(ue::UObject* puppet, int age) {
     if (!puppet || !IsSafeToDress(puppet)) return false;
     ue::UObject* world = ue::GetWorld();
     if (!world) return false;
     ue::UObject* aging = ue::FindObjectByPath(
         L"/Game/Maps/Zoos/Newin/Aging/CharacterAging.Default__CharacterAging_C");
     if (!aging) return false;
+
+
+
+    ue::UObject* local = ue::GetPlayerCharacter(world, 0);
+    const int old_local_age = local ? ReadLocalAge(local) : -1;
+    const bool staged =
+        local && old_local_age >= 0 &&
+        (old_local_age == age || WriteCharacterAge(local, age));
+    if (staged) {
+        struct FullParams {
+            ue::UObject* Character;
+            bool OnlyBodyAging;
+            std::uint8_t Padding[7];
+            ue::UObject* WorldContextObject;
+        } full = {puppet, false, {}, world};
+        static_assert(sizeof(FullParams) == 24,
+                      "UpdateMorphTexAging parameter frame changed");
+        const bool refreshed = ue::CallFunction(aging, L"UpdateMorphTexAging", &full);
+        if (old_local_age != age) WriteCharacterAge(local, old_local_age);
+        if (refreshed) return true;
+    }
+
+
+    ue::UObject* mesh = ue::GetSkeletalMeshComponent(puppet);
+    if (!mesh) return false;
     struct Params {
-        ue::UObject* Character;
-        bool OnlyBodyAging;
-        std::uint8_t Pad[7];
+        float Age;
+        std::uint32_t Pad;
+        ue::UObject* SkeletalMesh;
         ue::UObject* WorldContextObject;
     } params = {};
-    static_assert(sizeof(Params) == 24, "UpdateMorphTexAging parameter frame changed");
-    params.Character = puppet;
-    params.OnlyBodyAging = false;
+    static_assert(sizeof(Params) == 24, "updateMorphTargets parameter frame changed");
+    const float clamped =
+        age < 0 ? 0.f : (age > 50 ? 50.f : static_cast<float>(age));
+    params.Age = clamped / 50.f;
+    params.SkeletalMesh = mesh;
     params.WorldContextObject = world;
-    return ue::CallFunction(aging, L"UpdateMorphTexAging", &params);
+    return ue::CallFunction(aging, L"updateMorphTargets", &params);
 }
 
-// player -> currently held weapon actor -> its UBaseWeaponData asset -> the
-// asset's object path, which is portable across machines exactly like a combo
-// tree or a level package. Empty string when the player is unarmed.
+
+
+
 bool ReadLocalWeaponPath(ue::UObject* player, char* out, int out_size) {
     out[0] = '\0';
     struct WeaponRet {
         ue::UObject* ReturnValue;
     } weapon = {};
     if (!ue::CallFunction(player, L"BPF_GetPickedUpWeapon", &weapon) || !weapon.ReturnValue) {
-        return false;  // unarmed -- not an error
+        return false;
     }
     struct DataRet {
         ue::UObject* ReturnValue;
@@ -190,76 +228,289 @@ bool ReadLocalWeaponPath(ue::UObject* player, char* out, int out_size) {
     return ue::GetObjectPathName(data.ReturnValue, out, out_size) && out[0] != '\0';
 }
 
-// UGameplayStatics::GetGameState is a static Blueprint function; it is reached
-// by calling it on the class's default object, which the reflection layer can
-// resolve by path. No engine-layout guesswork.
-ue::UObject* GetGameState() {
-    ue::UObject* world = ue::GetWorld();
-    if (!world) return nullptr;
-    ue::UObject* statics = ue::FindObjectByPath(L"/Script/Engine.Default__GameplayStatics");
-    if (!statics) return nullptr;
-    struct Params {
-        ue::UObject* WorldContextObject;
-        ue::UObject* ReturnValue;
-    } params = {};
-    params.WorldContextObject = world;
-    if (!ue::CallFunction(statics, L"GetGameState", &params)) return nullptr;
-    return params.ReturnValue;
+
+
+
+bool g_logged_local_probe = false;
+
+
+
+int g_last_peer_age = INT_MIN;
+int g_last_peer_outfit = INT_MIN;
+
+
+
+
+constexpr const char* kCheatTags[] = {
+    "Cheat.AICantDropWeapon",
+    "Cheat.AutoAvoid",
+    "Cheat.AutoDeflect",
+    "Cheat.Autothrow",
+    "Cheat.BulletTime",
+    "Cheat.BulletTime.Action",
+    "Cheat.BulletTime.Focus",
+    "Cheat.BulletTime.Guard",
+    "Cheat.ChooseAge",
+    "Cheat.ChooseAge.20",
+    "Cheat.ChooseAge.30",
+    "Cheat.ChooseAge.40",
+    "Cheat.ChooseAge.50",
+    "Cheat.ChooseAge.60",
+    "Cheat.ChooseAge.70",
+    "Cheat.DamageChangeAge",
+    "Cheat.DamageHealthOnly",
+    "Cheat.DamageStructureOnly",
+    "Cheat.Doppelgangers",
+    "Cheat.EnemyRandomMoveset",
+    "Cheat.EnvironmentDamage",
+    "Cheat.FastEnemies",
+    "Cheat.Firewalk",
+    "Cheat.FirmGrip",
+    "Cheat.FocusDisabled",
+    "Cheat.ForceDifficulty",
+    "Cheat.ForcedLastMan",
+    "Cheat.FreeTakedown",
+    "Cheat.GoldenBambooStick",
+    "Cheat.GoldenBat",
+    "Cheat.GoldenBroom",
+    "Cheat.GoldenKodachi",
+    "Cheat.GoldenMachete",
+    "Cheat.GoldenMop",
+    "Cheat.GoldenPipe",
+    "Cheat.GoldenStaff",
+    "Cheat.GoldenWoodenStick",
+    "Cheat.HealthRecoveryLegacy",
+    "Cheat.HighVoicePitch",
+    "Cheat.InfiniteFocus",
+    "Cheat.InfiniteLives",
+    "Cheat.InfiniteStructure",
+    "Cheat.InvisibleEnemies",
+    "Cheat.LargeHitboxes",
+    "Cheat.LethalWeapons",
+    "Cheat.Lifeline",
+    "Cheat.LifestealFoes",
+    "Cheat.LockAllShrinesEffects",
+    "Cheat.LockAllSkills",
+    "Cheat.LowGravity",
+    "Cheat.LowVoicePitch",
+    "Cheat.MCDamageMultiplier.05",
+    "Cheat.MCDamageMultiplier.075",
+    "Cheat.MCDamageMultiplier.1",
+    "Cheat.MCDamageMultiplier.2",
+    "Cheat.MCDamageMultiplier.3",
+    "Cheat.MCDamageMultiplier.4",
+    "Cheat.MCDoubleDamageReceived",
+    "Cheat.MCDoubleHealth",
+    "Cheat.MCignoreGuard",
+    "Cheat.MCinvicible",
+    "Cheat.MCNoHealthRegen",
+    "Cheat.MCOneHP",
+    "Cheat.MoveSet.540JumpKick",
+    "Cheat.MoveSet.BounceKick",
+    "Cheat.MoveSet.CobraDoubleBite",
+    "Cheat.MoveSet.Combo.Agile",
+    "Cheat.MoveSet.Combo.Brawler",
+    "Cheat.MoveSet.Combo.PakMei",
+    "Cheat.MoveSet.DeadlyWaltz",
+    "Cheat.MoveSet.DoubleHitUppercut",
+    "Cheat.MoveSet.ElbowStrike",
+    "Cheat.MoveSet.FalconPunch",
+    "Cheat.MoveSet.FarGrab",
+    "Cheat.MoveSet.FrontKick",
+    "Cheat.MoveSet.GrabTakedown",
+    "Cheat.MoveSet.GSPKickRunning",
+    "Cheat.MoveSet.HammerKick",
+    "Cheat.MoveSet.JumpKnee",
+    "Cheat.MoveSet.LowKick360",
+    "Cheat.MoveSet.NajaReverseLash",
+    "Cheat.MoveSet.RisingFalcon",
+    "Cheat.MoveSet.RushJumpKicks",
+    "Cheat.MoveSet.ShoulderStrike",
+    "Cheat.MoveSet.SpinTrickKicks",
+    "Cheat.MoveSet.Sweep",
+    "Cheat.MoveSet.ThrustPalm",
+    "Cheat.MoveSet.TornadoKick",
+    "Cheat.MoveSet.TripleHitPunish",
+    "Cheat.MoveSet.YangGroundPunch",
+    "Cheat.NoDeathCounterDecrement",
+    "Cheat.NoEnvironmentalWeapons",
+    "Cheat.NoPendant",
+    "Cheat.OffensiveAvoid",
+    "Cheat.OnePunchBreak",
+    "Cheat.OnePunchMan",
+    "Cheat.Randomizer",
+    "Cheat.ReversedAging",
+    "Cheat.SlapstickFights",
+    "Cheat.SlowEnemies",
+    "Cheat.SqueakyToy",
+    "Cheat.StrongerArchetypes",
+    "Cheat.StructureBreakingDeflect",
+    "Cheat.UnlimitedThreats",
+    "Cheat.UnlockAllShrineEffects",
+    "Cheat.UnlockAllSkills",
+    "Cheat.Vampire",
+    "Cheat.Voices",
+    "Cheat.WalkOnly",
+    "Cheat.WeakerArchetype",
+    "Cheat.WeaponMultiplier",
+};
+static_assert(sizeof(kCheatTags) / sizeof(kCheatTags[0]) == net::kCheatTagCount,
+              "update cheat tag map when BP_CheatSettings changes");
+
+bool CheatBit(const net::CheatSnapshot& snapshot, int index) {
+    return (snapshot.active[index / 8] & (1u << (index % 8))) != 0;
 }
 
-// Reads AThePlainesGameState::m_fRoomClearedLifePercent (offset from the PDB).
-// Guarded twice: the game state's own name must identify it as a ThePlaines
-// state (subclasses inherit the layout, so the offset stays valid), and the
-// value must land in 0..1. Either guard failing means "no reading", never a
-// blind dereference -- on a menu the active game state is a different class.
-bool ReadLocalRoomClear(float* out) {
-    if (offsets::M_AThePlainesGameState_fRoomClearedLifePercent == 0) return false;
-    ue::UObject* game_state = GetGameState();
-    if (!game_state) return false;
+void SetCheatBit(net::CheatSnapshot* snapshot, int index, bool active) {
+    const std::uint8_t mask = static_cast<std::uint8_t>(1u << (index % 8));
+    if (active) snapshot->active[index / 8] |= mask;
+    else snapshot->active[index / 8] &= static_cast<std::uint8_t>(~mask);
+}
 
-    char path[256] = {};
-    if (!ue::GetObjectPathName(game_state, path, sizeof(path))) return false;
-    if (!std::strstr(path, "ThePlaines")) return false;
+ue::UObject* CheatHelper() {
+    return ue::FindObjectByPath(L"/Script/SCCore.Default__CheatManagerBlueprintHelper");
+}
 
-    const float value = *reinterpret_cast<const float*>(
-        reinterpret_cast<std::uintptr_t>(game_state) +
-        offsets::M_AThePlainesGameState_fRoomClearedLifePercent);
-    if (!(value >= 0.f && value <= 1.f)) return false;
-    *out = value;
+bool MakeCheatTag(const char* text, ue::FName* out) {
+    wchar_t wide[96] = {};
+    return text && out && MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, 96) > 0 &&
+           ue::MakeFName(wide, out);
+}
+
+
+
+
+
+bool ReadActivatedCheats(net::CheatSnapshot* out) {
+    if (!out) return false;
+    ue::UObject* helper = CheatHelper();
+    if (!helper) return false;
+    *out = {};
+    for (int i = 0; i < net::kCheatTagCount; ++i) {
+        struct Params {
+            ue::FName cheat_wanted;
+            std::uint8_t return_value;
+            std::uint8_t padding[7];
+        } params = {};
+        if (!MakeCheatTag(kCheatTags[i], &params.cheat_wanted) ||
+            !ue::CallFunction(helper, L"BPF_IsCheatActivated", &params)) {
+            return false;
+        }
+        SetCheatBit(out, i, params.return_value != 0);
+    }
     return true;
 }
 
-// A menu is not the place to talk about age or rooms, so a one-time proof that
-// the local getters resolve is enough when offline.
-bool g_logged_local_probe = false;
+bool SetCheatActivated(int index, bool active) {
+    if (index < 0 || index >= net::kCheatTagCount) return false;
+    ue::UObject* helper = CheatHelper();
+    if (!helper) return false;
+    struct Params {
+        ue::FName cheat;
+    } params = {};
+    if (!MakeCheatTag(kCheatTags[index], &params.cheat)) return false;
+    return ue::CallFunction(helper, active ? L"BPF_ActivateCheat" : L"BPF_DeactivateCheat",
+                            &params);
+}
 
-// Change-triggered peer logging: the numbers move slowly, so a line per change
-// is informative rather than noise.
-int g_last_peer_age = INT_MIN;
-int g_last_peer_room_pct = INT_MIN;  // rounded to whole percent for the compare
+int CountCheats(const net::CheatSnapshot& snapshot) {
+    int count = 0;
+    for (int i = 0; i < net::kCheatTagCount; ++i) if (CheatBit(snapshot, i)) ++count;
+    return count;
+}
 
+void TickCheatAuthority() {
+    if (coop::Get().mode != coop::Mode::Coop) return;
+    static net::CheatSnapshot client_selection_before_session = {};
+    static bool client_selection_saved = false;
+    static DWORD last_poll = 0;
+    const DWORD now = GetTickCount();
+    if (now - last_poll < 1000) return;
+    last_poll = now;
+
+
+
+
+    if (!net::IsConnected()) {
+        if (!client_selection_saved) return;
+        net::CheatSnapshot current = {};
+        if (!ReadActivatedCheats(&current)) return;
+        int restored = 0;
+        for (int i = 0; i < net::kCheatTagCount; ++i) {
+            const bool original = CheatBit(client_selection_before_session, i);
+            if (CheatBit(current, i) == original) continue;
+            if (SetCheatActivated(i, original)) ++restored;
+        }
+        client_selection_saved = false;
+        SC_LOG("cheats: restored joiner's %d pre-session selection change(s)", restored);
+        return;
+    }
+
+    if (net::GetRole() == net::Role::Host) {
+        net::CheatSnapshot local = {};
+        if (!ReadActivatedCheats(&local)) {
+            static DWORD last_error = 0;
+            if (now - last_error >= 10000) {
+                last_error = now;
+                SC_LOG("cheats: helper API unavailable; host settings were not sent");
+            }
+            return;
+        }
+        net::SendCheatState(local);
+        static net::CheatSnapshot last_sent = {};
+        static bool have_last_sent = false;
+        if (!have_last_sent || memcmp(last_sent.active, local.active, sizeof(local.active)) != 0) {
+            last_sent = local;
+            have_last_sent = true;
+            SC_LOG("cheats: host published %d selected modifier(s)/cheat(s)", CountCheats(local));
+        }
+        return;
+    }
+
+    net::CheatSnapshot wanted = {};
+    if (!net::GetHostCheatState(&wanted)) return;
+    net::CheatSnapshot local = {};
+    if (!ReadActivatedCheats(&local)) {
+        static DWORD last_error = 0;
+        if (now - last_error >= 10000) {
+            last_error = now;
+            SC_LOG("cheats: helper API unavailable; host settings were not applied");
+        }
+        return;
+    }
+    if (!client_selection_saved) {
+        client_selection_before_session = local;
+        client_selection_saved = true;
+    }
+    int changed = 0;
+    int failed = 0;
+    for (int i = 0; i < net::kCheatTagCount; ++i) {
+        const bool desired = CheatBit(wanted, i);
+        if (CheatBit(local, i) == desired) continue;
+        if (SetCheatActivated(i, desired)) ++changed;
+        else ++failed;
+    }
+    if (changed || failed) {
+        SC_LOG("cheats: host authority applied %d selection change(s)%s", changed,
+               failed ? "; one or more game calls failed" : "");
+    }
+}
 DWORD g_last_send = 0;
 
-}  // namespace
+}
 
 void TickRunState(ue::UObject* player) {
     if (!coop::Get().sync_run_state) return;
     if (!player) return;
 
     if (!net::IsConnected()) {
-        // Offline: prove once that the read path works (verifiable on one
-        // machine), then stay quiet until a peer is actually present.
+        TickCheatAuthority();
+
+
         if (!g_logged_local_probe) {
             const int age = ReadLocalAge(player);
-            float room = -1.f;
-            const bool have_room = ReadLocalRoomClear(&room);
             if (age >= 0) {
-                if (have_room) {
-                    SC_LOG("run: local read ok -- age=%d room-clear=%.0f%%", age,
-                           room * 100.f);
-                } else {
-                    SC_LOG("run: local read ok -- age=%d room-clear=n/a", age);
-                }
+                SC_LOG("run: local read ok -- age=%d", age);
                 g_logged_local_probe = true;
             }
         }
@@ -285,41 +536,34 @@ void TickRunState(ue::UObject* player) {
             local.age = age;
             local.age_valid = true;
         }
-        float room = -1.f;
-        if (ReadLocalRoomClear(&room)) {
-            local.room_clear_percent = room;
-            local.room_clear_valid = true;
-        }
         if (ReadLocalWeaponPath(player, local.weapon_path, sizeof(local.weapon_path))) {
             local.has_weapon = true;
         }
         net::SendRunState(local);
     }
 
-    // Peer side: surface it in the log when it changes. Applying it back into
-    // the game is intentionally not done -- see below.
+
+
     net::RunSnapshot peer;
     if (net::GetPeerRunState(&peer)) {
-        const int peer_room_pct =
-            peer.room_clear_valid ? static_cast<int>(peer.room_clear_percent * 100.f + 0.5f)
-                                  : INT_MIN;
         const int peer_age = peer.age_valid ? peer.age : INT_MIN;
-        if (peer_age != g_last_peer_age || peer_room_pct != g_last_peer_room_pct) {
+        const int peer_outfit = peer.outfit_valid ? peer.outfit_index : INT_MIN;
+        if (peer_age != g_last_peer_age || peer_outfit != g_last_peer_outfit) {
             g_last_peer_age = peer_age;
-            g_last_peer_room_pct = peer_room_pct;
+            g_last_peer_outfit = peer_outfit;
             char age_buf[16] = "n/a";
-            char room_buf[16] = "n/a";
+            char outfit_buf[16] = "n/a";
             if (peer_age != INT_MIN) wsprintfA(age_buf, "%d", peer_age);
-            if (peer_room_pct != INT_MIN) wsprintfA(room_buf, "%d%%", peer_room_pct);
-            SC_LOG("run: peer age=%s room=%s weapon=%s", age_buf, room_buf,
+            if (peer_outfit != INT_MIN) wsprintfA(outfit_buf, "%d", peer_outfit);
+            SC_LOG("run: peer age=%s outfit=%s weapon=%s", age_buf, outfit_buf,
                    peer.has_weapon ? peer.weapon_path : "none");
         }
     }
 
-    // Age IS applied, to the puppet, because a partner shown at your own age is
-    // a visible defect rather than a missing feature. Whether Sifu refreshes the
-    // model from this on its own is exactly what the next run measures, so the
-    // outcome is logged either way rather than assumed.
+
+
+
+
     if (coop::Get().sync_peer_age && coop::Get().mode == coop::Mode::Coop) {
         net::RunSnapshot ages;
         ue::UObject* puppet = GetPuppet();
@@ -360,10 +604,10 @@ void TickRunState(ue::UObject* player) {
         }
     }
 
-    // Costume, same rule and the same reason as age: the puppet is a CLONE of
-    // the local player, so without this it wears whatever this machine's player
-    // is wearing and both characters look identical on both screens. Written to
-    // the puppet only.
+
+
+
+
     if (coop::Get().sync_peer_age && coop::Get().mode == coop::Mode::Coop) {
         net::RunSnapshot outfit_state;
         ue::UObject* outfit_puppet = GetPuppet();
@@ -382,8 +626,8 @@ void TickRunState(ue::UObject* player) {
                     dressed_puppet = outfit_puppet;
                     dressed_world = ue::GetWorld();
                     dressed_as = outfit_state.outfit_index;
-                    // SwapOutfit can replace the mesh asynchronously. Reapply
-                    // aging after it has settled, never before it.
+
+
                     if (coop::Get().sync_peer_visual_age) {
                         visual_age_puppet = outfit_puppet;
                         visual_age_world = ue::GetWorld();
@@ -399,14 +643,14 @@ void TickRunState(ue::UObject* player) {
 
     if (visual_age_puppet && visual_age_due != 0 &&
         static_cast<LONG>(now - visual_age_due) >= 0) {
-        // Pointer safety is identity-based: never ask Kismet to validate a raw
-        // pointer retained from an old UWorld.
+
+
         if (ue::GetWorld() != visual_age_world || GetPuppet() != visual_age_puppet) {
             visual_age_puppet = nullptr;
             visual_age_world = nullptr;
             visual_age_due = 0;
             visual_age_attempts = 0;
-        } else if (RefreshPuppetVisualAge(visual_age_puppet)) {
+        } else if (RefreshPuppetVisualAge(visual_age_puppet, g_last_peer_age)) {
             SC_LOG("run: partner's visible face/body aging refreshed");
             visual_age_puppet = nullptr;
             visual_age_world = nullptr;
@@ -424,24 +668,13 @@ void TickRunState(ue::UObject* player) {
         }
     }
 
-    // NOT applied on purpose:
-    //  - Room-clear: COOP-PLAN.md 9 argues the joiner's room should clear on its
-    //    own once its local enemies die (which the mod already syncs). Whether
-    //    that holds is a two-machine test; until it is run, writing the host's
-    //    percentage into the local game state -- with unverified semantics and
-    //    direction -- would be a guess. `fix_room_clear` stays dormant.
-    //  - Weapon: making the puppet hold the peer's weapon means spawning and
-    //    attaching a weapon actor, the highest-risk unverifiable change on the
-    //    board. The path is captured and sent so the data is ready the day that
-    //    is built; nothing consumes it yet.
-    if (coop::Get().fix_room_clear) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            SC_LOG("run: fix_room_clear is on, but applying the peer's room-clear "
-                   "is intentionally not implemented yet -- see COOP-PLAN.md 9");
-        }
-    }
+
+
+
+
+
+    TickCheatAuthority();
+
 }
 
-}  // namespace sifucoop::game
+}
