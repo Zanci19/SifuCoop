@@ -439,7 +439,14 @@ void RunInstall(HWND window, bool commandLine) {
         SetStatus(window, result.message);
     }
 }
-LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM) {
+// lparam is NAMED and forwarded. It was discarded, and DefWindowProcW was
+// called with a hardcoded 0 -- which breaks WM_NCCREATE, the message Windows
+// sends BEFORE WM_CREATE carrying the CREATESTRUCT in lparam. DefWindowProc
+// needs that pointer; given 0 it returns FALSE, and a FALSE from WM_NCCREATE
+// makes CreateWindowEx abandon the window and return null. That is the whole of
+// "Could not create the installer window": the window procedure was rejecting
+// its own window before any child control was ever reached.
+LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_CREATE:
         CreateWindowW(L"STATIC", L"SifuCoop installer", WS_CHILD | WS_VISIBLE,
@@ -482,7 +489,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM) {
         break;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     }
-    return DefWindowProcW(window, message, wparam, 0);
+    return DefWindowProcW(window, message, wparam, lparam);
 }
 }
 
