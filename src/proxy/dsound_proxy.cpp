@@ -1,16 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <windows.h>
 
 #include "../core/log.h"
@@ -21,20 +8,12 @@ HMODULE g_real_dsound = nullptr;
 
 }
 
-
-
-
-
-
-
-
 asm(".globl sifucoop_dsound_unavailable\n"
     "sifucoop_dsound_unavailable:\n"
     "\tmov $0x80004005, %eax\n"
     "\tret\n");
 
 extern "C" void sifucoop_dsound_unavailable();
-
 
 #define SC_FORWARD(name)                                              \
     extern "C" {                                                      \
@@ -60,8 +39,6 @@ SC_FORWARD(DirectSoundCaptureCreate8)
 #undef SC_FORWARD
 
 namespace sifucoop::proxy {
-
-
 
 bool Init() {
     char path[MAX_PATH] = {};

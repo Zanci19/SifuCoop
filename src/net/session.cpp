@@ -1,7 +1,5 @@
 #include "session.h"
 
-
-
 #define _CRT_RAND_S
 
 #include <winsock2.h>
@@ -24,9 +22,6 @@ namespace {
 
 namespace coop = sifucoop::coop;
 
-
-
-
 SOCKET g_socket = INVALID_SOCKET;
 Role g_role = Role::Offline;
 bool g_connected = false;
@@ -41,38 +36,17 @@ bool g_have_peer_addr = false;
 std::uint32_t g_send_sequence = 0;
 std::uint32_t g_last_snapshot_sequence = 0;
 DWORD g_last_recv_ms = 0;
-// When either machine last did something level-shaped: sent an invite, received
-// one, or reported a different level. A machine loading a map does not send for
-// several seconds and cannot say so, which is exactly when the ordinary timeout
-// must not fire.
 DWORD g_level_activity_ms = 0;
 DWORD g_last_send_ms = 0;
 DWORD g_last_ping_ms = 0;
 DWORD g_last_hello_ms = 0;
 
-
-
-
 constexpr int kBufferSize = 64;
-
-
-
-
-
-
-
-
 
 constexpr DWORD kTimeoutMs = 12000;
 
-
-
 constexpr DWORD kStallMs = 500;
 constexpr DWORD kPingIntervalMs = 500;
-
-
-
-
 
 DWORD NowMs() {
     static LARGE_INTEGER frequency = {};
@@ -89,35 +63,12 @@ DWORD NowMs() {
 struct PeerState {
     DWORD received_ms = 0;
 
-
     DWORD sample_ms = 0;
     ue::FVector location;
     ue::FRotator rotation;
     ue::FVector velocity;
     bool valid = false;
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 ue::FVector g_last_output_location;
 ue::FRotator g_last_output_rotation;
@@ -126,25 +77,6 @@ bool g_have_last_output = false;
 
 std::int64_t g_clock_offset = 0;
 bool g_clock_offset_valid = false;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 constexpr DWORD kClockWindowMs = 2000;
 std::int64_t g_clock_window_min = 0;
@@ -168,14 +100,9 @@ bool g_disconnected_event = false;
 int g_rtt_ms = -1;
 int g_rtt_jitter_ms = 0;
 
-
-
 std::uint32_t g_bytes_in = 0;
 std::uint32_t g_bytes_out = 0;
 DWORD g_rate_window_start = 0;
-
-
-
 
 constexpr int kOrderQueueSize = 64;
 
@@ -191,18 +118,9 @@ int g_order_write = 0;
 int g_order_read = 0;
 std::uint32_t g_last_order_sequence = 0;
 
-
-
-
-
-
-
 EnemyStateOut g_enemies_live[kMaxTrackedEnemies];
 int g_enemy_live_count = 0;
 bool g_enemy_sweep_seen = false;
-
-
-
 
 DWORD g_enemy_sweep_at = 0;
 
@@ -226,27 +144,6 @@ DamageReport g_damage[kMaxDamagePerPacket];
 int g_damage_count = 0;
 std::uint32_t g_damage_sequence = 0;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 constexpr std::uint32_t kStunCookie = 0x2112A442;
 constexpr std::uint16_t kStunBindingRequest = 0x0001;
 constexpr std::uint16_t kStunBindingResponse = 0x0101;
@@ -257,8 +154,6 @@ std::uint8_t g_stun_transaction[12] = {};
 bool g_stun_pending = false;
 DWORD g_stun_sent_ms = 0;
 char g_public_address[64] = {};
-
-
 
 sockaddr_in g_punch_addr = {};
 bool g_have_punch_addr = false;
@@ -279,8 +174,6 @@ bool ParseEndpoint(const char* text, sockaddr_in* out) {
     out->sin_port = htons(static_cast<u_short>(port));
     return inet_pton(AF_INET, host, &out->sin_addr) == 1;
 }
-
-
 
 bool LooksLikeStunResponse(const std::uint8_t* data, int size) {
     if (size < 20) return false;
@@ -315,7 +208,6 @@ void HandleStunResponse(const std::uint8_t* data, int size) {
                                     data[value + 7];
             if (attr == kStunXorMappedAddress) {
 
-
                 port ^= static_cast<std::uint16_t>(kStunCookie >> 16);
                 address ^= kStunCookie;
             }
@@ -333,10 +225,6 @@ void HandleStunResponse(const std::uint8_t* data, int size) {
     }
 }
 
-
-
-
-
 std::uint8_t g_base_key[kSha256Size] = {};
 
 std::uint8_t g_session_key[kSha256Size] = {};
@@ -350,17 +238,12 @@ DWORD g_last_reject_log = 0;
 
 void DeriveBaseKey(const char* passphrase) {
 
-
-
-
     char material[192] = {};
     _snprintf(material, sizeof(material) - 1, "SifuCoop-v%u-key:%s", kProtocolVersion,
               passphrase ? passphrase : "");
     Sha256(material, strlen(material), g_base_key);
     g_have_session_key = false;
 }
-
-
 
 void DeriveSessionKey(const std::uint8_t* host_nonce, const std::uint8_t* joiner_nonce) {
     std::uint8_t material[kSha256Size + kSessionNonceSize * 2];
@@ -371,25 +254,17 @@ void DeriveSessionKey(const std::uint8_t* host_nonce, const std::uint8_t* joiner
     g_have_session_key = true;
 }
 
-
-
-
 void MakeNonce(std::uint8_t out[kSessionNonceSize]) {
-
 
     for (int i = 0; i < kSessionNonceSize; i += 4) {
         unsigned int value = 0;
         if (rand_s(&value) != 0) {
-
-
 
             value = 0;
         }
         memcpy(out + i, &value, 4);
     }
 }
-
-
 
 void SignPacket(void* packet, int size) {
     auto* header = static_cast<PacketHeader*>(packet);
@@ -401,8 +276,6 @@ void SignPacket(void* packet, int size) {
     memcpy(header->tag, digest, kAuthTagSize);
 }
 
-
-
 bool VerifyPacket(void* buffer, int size, bool handshake) {
     if (size < static_cast<int>(sizeof(PacketHeader))) return false;
 
@@ -410,8 +283,6 @@ bool VerifyPacket(void* buffer, int size, bool handshake) {
     std::uint8_t received[kAuthTagSize];
     memcpy(received, header->tag, kAuthTagSize);
     memset(header->tag, 0, kAuthTagSize);
-
-
 
     const std::uint8_t* key =
         (handshake || !g_have_session_key) ? g_base_key : g_session_key;
@@ -427,7 +298,6 @@ void NoteRejected(const sockaddr_in& from) {
     coop::GetStats().packets_rejected = g_rejected_packets;
     const DWORD now = GetTickCount();
 
-
     if (now - g_last_reject_log < 5000 && g_last_reject_log != 0) return;
     g_last_reject_log = now;
 
@@ -438,12 +308,6 @@ void NoteRejected(const sockaddr_in& from) {
            ip, ntohs(from.sin_port), g_rejected_packets);
     coop::ReportProblem("rejected %u packets that failed authentication", g_rejected_packets);
 }
-
-
-
-
-
-
 
 bool LooksLikeLevelPath(const char* path) {
     if (!path || !path[0]) return false;
@@ -456,13 +320,10 @@ bool LooksLikeLevelPath(const char* path) {
         if (!allowed) return false;
     }
 
-
     return strstr(path, "..") == nullptr;
 }
 
 bool IsFinite(float value) {
-
-
 
     return value == value && value > -1e9f && value < 1e9f;
 }
@@ -533,9 +394,6 @@ void ReadConfig(char* host, int host_size, int* port, bool* is_host) {
            *port, passphrase[0] ? "set" : "EMPTY");
     if (!passphrase[0] && !off) {
 
-
-
-
         SC_LOG("net: no passphrase set -- anyone who can reach this port can join. "
                "Fine over a VPN; set one before forwarding a port.");
         coop::ReportProblem("no passphrase set -- only safe on a private network");
@@ -544,10 +402,6 @@ void ReadConfig(char* host, int host_size, int* port, bool* is_host) {
     if (off) g_role = Role::Offline;
     else g_role = *is_host ? Role::Host : Role::Client;
 }
-
-
-
-
 
 void LogLocalAddresses(int port) {
     char hostname[256] = {};
@@ -570,15 +424,11 @@ void LogLocalAddresses(int port) {
         const unsigned int first = (host_order >> 24) & 0xFF;
         const unsigned int second = (host_order >> 16) & 0xFF;
 
-
-
         const bool likely_vpn = (first == 10) || (first == 172 && second >= 16 && second <= 31);
         SC_LOG("net:   %s:%d%s", ip, port, likely_vpn ? "   <-- likely ZeroTier/VPN" : "");
     }
     freeaddrinfo(results);
 }
-
-
 
 void SendPacket(void* data, int size) {
     if (!g_have_peer_addr || g_socket == INVALID_SOCKET) return;
@@ -589,8 +439,6 @@ void SendPacket(void* data, int size) {
     ++coop::GetStats().packets_sent;
 }
 
-
-
 void SendPacketTo(void* data, int size, const sockaddr_in& to) {
     if (g_socket == INVALID_SOCKET) return;
     SignPacket(data, size);
@@ -599,15 +447,6 @@ void SendPacketTo(void* data, int size, const sockaddr_in& to) {
     g_bytes_out += static_cast<std::uint32_t>(size);
     ++coop::GetStats().packets_sent;
 }
-
-
-
-
-
-
-
-
-
 
 constexpr int kPacketTypeCount = 16;
 std::uint32_t g_send_sequence_by_type[kPacketTypeCount] = {};
@@ -622,10 +461,6 @@ void FillHeader(PacketHeader* header, PacketType type) {
     header->send_time_ms = NowMs();
 }
 
-
-
-
-
 struct PendingAnimation {
     char path[192] = {};
     float position = 0.f;
@@ -639,27 +474,66 @@ int g_animation_read = 0;
 int g_animation_write = 0;
 std::uint32_t g_last_animation_sequence = 0;
 
-
-
-
-
-
-
-OwnedEnemyEntry g_owned_enemies[kMaxOwnedEnemiesPerPacket];
+OwnedEnemyEntry g_owned_enemies[kMaxOwnedEnemiesTotal];
 int g_owned_enemy_count = 0;
 DWORD g_owned_enemies_at = 0;
 
+OwnedEnemyEntry g_owned_staging[kMaxOwnedEnemiesTotal];
+int g_owned_staging_count = 0;
+std::uint32_t g_owned_staging_round = 0;
+bool g_owned_staging_active = false;
+std::uint32_t g_owned_staging_seen = 0;
+
+void ResetOwnedStaging() {
+    g_owned_staging_count = 0;
+    g_owned_staging_seen = 0;
+    g_owned_staging_active = false;
+}
+
+// A publish round is split across up to kMaxOwnedEnemyChunks packets and only
+// swapped in once every chunk of that round has arrived; see CODE-NOTES.md.
 void HandleOwnedEnemies(const OwnedEnemyPacket& packet) {
     const int count = static_cast<int>(packet.count);
     if (count < 0 || count > kMaxOwnedEnemiesPerPacket) return;
+
+    const int chunk_count = packet.chunk_count == 0 ? 1 : packet.chunk_count;
+    const int chunk_index = packet.chunk_index;
+    if (chunk_count > kMaxOwnedEnemyChunks) return;
+    if (chunk_index >= chunk_count) return;
+
     for (int i = 0; i < count; ++i) {
         const OwnedEnemyEntry& in = packet.entries[i];
         if (!IsFiniteVector(in.x, in.y, in.z) || !IsFinite(in.yaw)) return;
         if (!IsFiniteVector(in.velocity_x, in.velocity_y, in.velocity_z)) return;
     }
-    for (int i = 0; i < count; ++i) g_owned_enemies[i] = packet.entries[i];
-    g_owned_enemy_count = count;
+
+    if (!g_owned_staging_active || packet.round != g_owned_staging_round) {
+        ResetOwnedStaging();
+        g_owned_staging_round = packet.round;
+        g_owned_staging_active = true;
+    }
+
+    const std::uint32_t bit = 1u << chunk_index;
+    if (g_owned_staging_seen & bit) return;
+    g_owned_staging_seen |= bit;
+
+    const int base = chunk_index * kMaxOwnedEnemiesPerPacket;
+    for (int i = 0; i < count; ++i) {
+        const int slot = base + i;
+        if (slot >= kMaxOwnedEnemiesTotal) break;
+        g_owned_staging[slot] = packet.entries[i];
+        if (slot + 1 > g_owned_staging_count) g_owned_staging_count = slot + 1;
+    }
+
+    const std::uint32_t complete = chunk_count >= 32
+                                       ? 0xFFFFFFFFu
+                                       : (1u << chunk_count) - 1u;
+    if ((g_owned_staging_seen & complete) != complete) return;
+
+    for (int i = 0; i < g_owned_staging_count; ++i) g_owned_enemies[i] = g_owned_staging[i];
+    g_owned_enemy_count = g_owned_staging_count;
     g_owned_enemies_at = NowMs();
+    ResetOwnedStaging();
 }
 
 void ResetLevelSyncState();
@@ -695,13 +569,12 @@ void ResetPeerState() {
     g_damage_count = 0;
     g_damage_sequence = 0;
     g_owned_enemy_count = 0;
+    ResetOwnedStaging();
     g_rtt_ms = -1;
     g_rtt_jitter_ms = 0;
 }
 
 void HandleSnapshot(const SnapshotPacket& packet) {
-
-
 
     if (!IsFiniteVector(packet.x, packet.y, packet.z)) return;
     if (!IsFiniteVector(packet.pitch, packet.yaw, packet.roll)) return;
@@ -710,9 +583,6 @@ void HandleSnapshot(const SnapshotPacket& packet) {
         return;
     }
 
-
-
-
     if (g_last_snapshot_sequence != 0) {
         if (packet.header.sequence <= g_last_snapshot_sequence) return;
         const std::uint32_t gap = packet.header.sequence - g_last_snapshot_sequence;
@@ -720,16 +590,11 @@ void HandleSnapshot(const SnapshotPacket& packet) {
     }
     g_last_snapshot_sequence = packet.header.sequence;
 
-
-
-
     ++coop::GetStats().snapshots_received;
 
     g_peer_head = (g_peer_head + 1) % kBufferSize;
     PeerState& state = g_peer_buffer[g_peer_head];
     state.received_ms = NowMs();
-
-
 
     const std::int64_t observed =
         static_cast<std::int64_t>(state.received_ms) -
@@ -748,15 +613,10 @@ void HandleSnapshot(const SnapshotPacket& packet) {
 
         if (observed < g_clock_offset) g_clock_offset = observed;
 
-
-
-
         if (state.received_ms - g_clock_window_start >= kClockWindowMs) {
             g_clock_window_start = state.received_ms;
             if (g_clock_window_min > g_clock_offset) {
                 const std::int64_t step = g_clock_window_min - g_clock_offset;
-
-
 
                 g_clock_offset += step;
             }
@@ -780,8 +640,6 @@ void HandleSnapshot(const SnapshotPacket& packet) {
         g_peer_vitals.in_level = (packet.flags & kFlagInLevel) != 0;
     }
 }
-
-
 
 std::uint32_t g_level_request_seen = 0;
 std::uint32_t g_level_request_next = 1;
@@ -815,8 +673,6 @@ void ResetLevelSyncState() {
 
 void HandleInviteReply(const InviteReplyPacket& packet) {
 
-
-
     if (packet.request_id == 0 || packet.request_id != g_active_level_request_id) return;
     g_invite_reply_pending = true;
     g_invite_reply_accepted = packet.accepted != 0;
@@ -825,9 +681,6 @@ void HandleInviteReply(const InviteReplyPacket& packet) {
 }
 
 void HandleLevelSync(const LevelSyncPacket& packet) {
-
-
-
 
     if (!LooksLikeLevelPath(packet.level_path)) {
         static bool warned = false;
@@ -839,10 +692,8 @@ void HandleLevelSync(const LevelSyncPacket& packet) {
         return;
     }
 
-
     const bool level_changed = _stricmp(g_peer_level, packet.level_path) != 0;
     lstrcpynA(g_peer_level, packet.level_path, sizeof(g_peer_level));
-    // Level-shaped traffic: see the timeout grace in TickSession.
     if (level_changed || packet.request_id != 0) g_level_activity_ms = NowMs();
 
     if (packet.request_id == 0 || packet.request_id == g_level_request_seen) return;
@@ -874,9 +725,6 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
     if (count < 0) count = 0;
     if (count > kMaxEnemiesPerPacket) count = kMaxEnemiesPerPacket;
 
-
-
-
     if (packet.generation != g_enemy_staging_generation) {
         g_enemy_staging_generation = packet.generation;
         g_enemy_staging_count = 0;
@@ -886,8 +734,6 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
 
     for (int i = 0; i < count && g_enemy_staging_count < kMaxTrackedEnemies; ++i) {
         const EnemyEntry& in = packet.entries[i];
-
-
 
         if (!IsFiniteVector(in.x, in.y, in.z) || !IsFinite(in.yaw) ||
             !IsFiniteVector(in.velocity_x, in.velocity_y, in.velocity_z)) continue;
@@ -912,8 +758,6 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
         out.damage_applied = in.damage_applied;
         out.guard_damage_applied = in.guard_damage_applied;
 
-
-
         out.time_dilation = in.time_dilation;
         if (!(out.time_dilation > 0.01f) || out.time_dilation > 4.f) {
             out.time_dilation = 1.f;
@@ -928,23 +772,12 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
         packet.chunk_count >= 32 ? 0xFFFFFFFFu : (1u << packet.chunk_count) - 1u;
     if ((g_enemy_chunks_seen & wanted) != wanted) return;
 
-
-
     for (int i = 0; i < g_enemy_staging_count; ++i) g_enemies_live[i] = g_enemies_staging[i];
     g_enemy_live_count = g_enemy_staging_count;
     g_enemy_staging_count = 0;
     g_enemy_sweep_seen = true;
     g_enemy_sweep_at = NowMs();
 }
-
-
-
-
-
-
-
-
-
 
 void HandleEnemyDamage(const EnemyDamagePacket& packet) {
     if (g_damage_sequence != 0 && packet.header.sequence <= g_damage_sequence) return;
@@ -956,9 +789,6 @@ void HandleEnemyDamage(const EnemyDamagePacket& packet) {
 
     int kept = 0;
     for (int i = 0; i < count; ++i) {
-
-
-
 
         const float total = packet.entries[i].total;
         const float guard_total = packet.entries[i].guard_total;
@@ -990,7 +820,6 @@ void HandlePong(const PingPacket& packet) {
     } else {
         const int deviation = sample > g_rtt_ms ? sample - g_rtt_ms : g_rtt_ms - sample;
 
-
         g_rtt_jitter_ms = (g_rtt_jitter_ms * 3 + deviation) / 4;
         g_rtt_ms = (g_rtt_ms * 7 + sample) / 8;
     }
@@ -1005,11 +834,6 @@ void HandleMontage(const MontagePacket& packet) {
         packet.semantic > static_cast<std::uint8_t>(AnimationSemantic::Death)) {
         return;
     }
-
-
-
-
-
 
     if (g_last_animation_sequence != 0 &&
         packet.header.sequence <= g_last_animation_sequence) {
@@ -1044,14 +868,11 @@ void HandleRunState(const RunStatePacket& packet) {
 
 void HandleCheatState(const CheatStatePacket& packet) {
 
-
     if (g_role != Role::Client) return;
     std::memcpy(g_host_cheats.active, packet.active, sizeof(g_host_cheats.active));
     g_host_cheats_valid = true;
 }
 void QueueOrder(const OrderEventPacket& packet) {
-
-
 
     if (g_last_order_sequence != 0 &&
         packet.header.sequence <= g_last_order_sequence) {
@@ -1061,7 +882,6 @@ void QueueOrder(const OrderEventPacket& packet) {
 
     const int next = (g_order_write + 1) % kOrderQueueSize;
     if (next == g_order_read) {
-
 
         g_order_read = (g_order_read + 1) % kOrderQueueSize;
     }
@@ -1074,19 +894,13 @@ void PumpReceive() {
     char buffer[kMaxPacketSize];
     sockaddr_in from = {};
 
-
-
     for (int i = 0; i < 64; ++i) {
-
 
         int from_size = sizeof(from);
         const int received = recvfrom(g_socket, buffer, sizeof(buffer), 0,
                                       reinterpret_cast<sockaddr*>(&from), &from_size);
         if (received <= 0) break;
         if (received < static_cast<int>(sizeof(PacketHeader))) continue;
-
-
-
 
         if (LooksLikeStunResponse(reinterpret_cast<const std::uint8_t*>(buffer), received)) {
             HandleStunResponse(reinterpret_cast<const std::uint8_t*>(buffer), received);
@@ -1111,17 +925,10 @@ void PumpReceive() {
         const auto type = static_cast<PacketType>(header.type);
         const bool handshake = (type == PacketType::Hello || type == PacketType::Welcome);
 
-
-
-
         if (!VerifyPacket(buffer, received, handshake)) {
             NoteRejected(from);
             continue;
         }
-
-
-
-
 
         if (g_connected && !handshake) {
             if (from.sin_addr.s_addr != g_peer_addr.sin_addr.s_addr ||
@@ -1134,8 +941,6 @@ void PumpReceive() {
         g_bytes_in += static_cast<std::uint32_t>(received);
         ++coop::GetStats().packets_received;
 
-
-
         auto fits = [&](std::size_t size) { return received >= static_cast<int>(size); };
 
         switch (type) {
@@ -1147,9 +952,6 @@ void PumpReceive() {
                 const bool same_peer =
                     g_connected && from.sin_addr.s_addr == g_peer_addr.sin_addr.s_addr &&
                     from.sin_port == g_peer_addr.sin_port;
-
-
-
 
                 if (g_connected && !same_peer) {
                     static bool warned = false;
@@ -1168,13 +970,11 @@ void PumpReceive() {
                 g_have_peer_addr = true;
                 memcpy(g_remote_nonce, hello.nonce, kSessionNonceSize);
 
-
                 DeriveSessionKey(g_local_nonce, g_remote_nonce);
 
                 if (!g_connected) {
                     g_connected = true;
                     g_connected_event = true;
-
 
                     ResetPeerState();
                     char ip[64] = {};
@@ -1182,8 +982,6 @@ void PumpReceive() {
                     SC_LOG("net: peer connected from %s:%d (authenticated)", ip,
                            ntohs(from.sin_port));
                 }
-
-
 
                 WelcomePacket welcome = {};
                 FillHeader(&welcome.header, PacketType::Welcome);
@@ -1200,9 +998,6 @@ void PumpReceive() {
                 if (!fits(sizeof(WelcomePacket))) break;
                 WelcomePacket welcome = {};
                 memcpy(&welcome, buffer, sizeof(welcome));
-
-
-
 
                 if (!SecureEqual(welcome.echo_nonce, g_local_nonce, kSessionNonceSize)) {
                     NoteRejected(from);
@@ -1370,10 +1165,6 @@ bool StartSession() {
         ReleaseHostInstanceGuard();
     }
 
-
-
-
-
     MakeNonce(g_local_nonce);
     g_have_session_key = false;
     g_rejected_packets = 0;
@@ -1399,13 +1190,8 @@ bool StartSession() {
         return false;
     }
 
-
-
     u_long non_blocking = 1;
     ioctlsocket(g_socket, FIONBIO, &non_blocking);
-
-
-
 
     int recv_buffer = 256 * 1024;
     setsockopt(g_socket, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&recv_buffer),
@@ -1417,11 +1203,6 @@ bool StartSession() {
     sockaddr_in local = {};
     local.sin_family = AF_INET;
     local.sin_addr.s_addr = INADDR_ANY;
-
-
-
-
-
 
     const int local_port = GetPrivateProfileIntA("net", "local_port", 0, ini_path);
     const int bind_port = is_host ? port : local_port;
@@ -1438,8 +1219,6 @@ bool StartSession() {
         StopSession();
         return false;
     }
-
-
 
     char punch[80] = {};
     GetPrivateProfileStringA("net", "punch", "", punch, sizeof(punch), ini_path);
@@ -1516,11 +1295,9 @@ bool Reconfigure(bool host_mode, const char* address, int port, const char* pass
     char port_text[16] = {};
     _snprintf(port_text, sizeof(port_text), "%d", port);
 
-
     WritePrivateProfileStringA("net", "mode", host_mode ? "host" : "client", ini_path);
     if (!host_mode && address && address[0]) WritePrivateProfileStringA("net", "host", address, ini_path);
     WritePrivateProfileStringA("net", "port", port_text, ini_path);
-
 
     WritePrivateProfileStringA("net", "passphrase", passphrase ? passphrase : "", ini_path);
 
@@ -1531,8 +1308,6 @@ bool Reconfigure(bool host_mode, const char* address, int port, const char* pass
 }
 
 void StopSession() {
-
-
 
     ReleaseHostInstanceGuard();
     if (g_socket == INVALID_SOCKET) {
@@ -1586,7 +1361,6 @@ void SendOrderEvent(std::uint32_t actor_hash, std::uint32_t order_type,
     packet.order_type = order_type;
     packet.attack_index = attack_index;
     packet.attack_depth = attack_depth;
-
 
     SendPacket(&packet, sizeof(packet));
 }
@@ -1678,10 +1452,6 @@ void SendEnemyStates(const EnemyStateOut* entries, int count) {
     static std::uint32_t generation = 0;
     ++generation;
 
-
-
-
-
     const int chunks =
         count == 0 ? 1 : (count + kMaxEnemiesPerPacket - 1) / kMaxEnemiesPerPacket;
     for (int chunk = 0; chunk < chunks; ++chunk) {
@@ -1731,8 +1501,6 @@ bool HasEnemySweep() { return g_enemy_sweep_seen; }
 
 bool EnemySweepIsFresh() {
 
-
-
     constexpr DWORD kSweepStaleMs = 1000;
     if (!g_enemy_sweep_seen) return false;
     return NowMs() - g_enemy_sweep_at <= kSweepStaleMs;
@@ -1749,41 +1517,51 @@ void ResetEnemyReplication() {
     g_damage_count = 0;
     g_damage_sequence = 0;
     g_owned_enemy_count = 0;
+    ResetOwnedStaging();
 }
 
 void SendOwnedEnemies(const OwnedEnemy* entries, int count) {
-    if (!g_connected || !entries || count <= 0) return;
-    if (count > kMaxOwnedEnemiesPerPacket) count = kMaxOwnedEnemiesPerPacket;
+    if (!g_connected) return;
+    if (count < 0 || !entries) count = 0;
+    if (count > kMaxOwnedEnemiesTotal) count = kMaxOwnedEnemiesTotal;
 
-    OwnedEnemyPacket packet = {};
-    FillHeader(&packet.header, PacketType::OwnedEnemy);
-    packet.count = static_cast<std::uint32_t>(count);
-    for (int i = 0; i < count; ++i) {
-        OwnedEnemyEntry& out = packet.entries[i];
-        out.name_hash = entries[i].name_hash;
-        out.x = entries[i].x;
-        out.y = entries[i].y;
-        out.z = entries[i].z;
-        out.yaw = entries[i].yaw;
-        out.velocity_x = entries[i].velocity_x;
-        out.velocity_y = entries[i].velocity_y;
-        out.velocity_z = entries[i].velocity_z;
+    static std::uint32_t round = 0;
+    ++round;
+
+    const int chunk_count =
+        count <= 0 ? 1
+                   : (count + kMaxOwnedEnemiesPerPacket - 1) / kMaxOwnedEnemiesPerPacket;
+
+    for (int chunk = 0; chunk < chunk_count; ++chunk) {
+        const int base = chunk * kMaxOwnedEnemiesPerPacket;
+        int in_chunk = count - base;
+        if (in_chunk < 0) in_chunk = 0;
+        if (in_chunk > kMaxOwnedEnemiesPerPacket) in_chunk = kMaxOwnedEnemiesPerPacket;
+
+        OwnedEnemyPacket packet = {};
+        FillHeader(&packet.header, PacketType::OwnedEnemy);
+        packet.count = static_cast<std::uint32_t>(in_chunk);
+        packet.round = round;
+        packet.chunk_index = static_cast<std::uint8_t>(chunk);
+        packet.chunk_count = static_cast<std::uint8_t>(chunk_count);
+        for (int i = 0; i < in_chunk; ++i) {
+            OwnedEnemyEntry& out = packet.entries[i];
+            const OwnedEnemy& src = entries[base + i];
+            out.name_hash = src.name_hash;
+            out.x = src.x;
+            out.y = src.y;
+            out.z = src.z;
+            out.yaw = src.yaw;
+            out.velocity_x = src.velocity_x;
+            out.velocity_y = src.velocity_y;
+            out.velocity_z = src.velocity_z;
+        }
+        SendPacket(&packet, static_cast<int>(OwnedEnemyPacketSize(packet.count)));
     }
-    SendPacket(&packet, static_cast<int>(OwnedEnemyPacketSize(packet.count)));
 }
-
-
-
 
 bool GetOwnedEnemy(std::uint32_t name_hash, OwnedEnemy* out) {
     if (!out || g_owned_enemy_count <= 0) return false;
-
-
-
-
-
-
-
 
     constexpr DWORD kOwnershipStaleMs = 1500;
     if (NowMs() - g_owned_enemies_at > kOwnershipStaleMs) return false;
@@ -1805,11 +1583,6 @@ bool GetOwnedEnemy(std::uint32_t name_hash, OwnedEnemy* out) {
 
 void SendEnemyDamage(const DamageReport* entries, int count) {
     if (!g_connected || !entries || count <= 0) return;
-
-
-
-
-
 
     if (count > kMaxDamagePerPacket) {
         static bool warned = false;
@@ -1856,8 +1629,6 @@ void SendAnimationSequence(const char* asset_path, std::uint32_t actor_hash,
     FillHeader(&packet.header, PacketType::MontageState);
     packet.kind = static_cast<std::uint8_t>(AnimationAssetKind::Sequence);
     packet.semantic = static_cast<std::uint8_t>(semantic);
-
-
 
     packet.position = position;
     lstrcpynA(packet.montage_path, asset_path, sizeof(packet.montage_path));
@@ -1940,9 +1711,6 @@ void DiscoverPublicAddress() {
                              ini_path);
     const int stun_port = GetPrivateProfileIntA("net", "stun_port", 19302, ini_path);
 
-
-
-
     addrinfo hints = {};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
@@ -1991,14 +1759,7 @@ int GetInterpolationDelayMs() {
     const coop::Config& config = coop::Get();
     if (!config.adaptive_interp || g_rtt_ms < 0) return config.interp_delay_ms;
 
-
-
-
     int delay = g_rtt_ms / 2 + g_rtt_jitter_ms * 2 + 2000 / kSnapshotHz;
-
-
-
-
 
     if (delay < 80) delay = 80;
     if (delay > 250) delay = 250;
@@ -2012,13 +1773,6 @@ void TickSession(const LocalState& local) {
 
     const DWORD now = NowMs();
 
-
-
-
-
-
-
-
     static DWORD last_tick_ms = 0;
     if (last_tick_ms != 0) {
         const DWORD gap = now - last_tick_ms;
@@ -2028,7 +1782,6 @@ void TickSession(const LocalState& local) {
             if (g_last_recv_ms != 0) {
                 g_last_recv_ms += gap;
 
-
                 if (g_last_recv_ms > now) g_last_recv_ms = now;
             }
         }
@@ -2037,20 +1790,7 @@ void TickSession(const LocalState& local) {
 
     UpdateRates(now);
 
-
-
-
-
-
-    // The grace used to apply only when the HOST had an invite outstanding, so a
-    // joiner loading for any other reason -- joining, restarting, travelling on
-    // its own -- got none. Measured 2026-08-16: the joiner dumped its enemy
-    // roster at 16:53:39 mid-load and the host cut it at 16:53:51 with "peer
-    // timed out after 12003ms", killing the session at the moment both sides
-    // were trying to meet.
-    //
-    // Loading is silent by nature and cannot be announced. Grace is granted to
-    // either role whenever anything level-shaped happened recently.
+    // Grace for either role while loading; see CODE-NOTES.md.
     const bool level_traffic_recent =
         g_level_activity_ms != 0 && now - g_level_activity_ms <= kLevelRetryTimeoutMs;
     const bool peer_loading = g_active_level_request[0] != 0 || level_traffic_recent;
@@ -2068,11 +1808,6 @@ void TickSession(const LocalState& local) {
         coop::ReportProblem("STUN server did not answer");
     }
 
-
-
-
-
-
     if (!g_connected && g_have_punch_addr && now - g_last_punch_ms > 500) {
         g_last_punch_ms = now;
         PingPacket punch = {};
@@ -2083,10 +1818,6 @@ void TickSession(const LocalState& local) {
         SendPacketTo(&punch, sizeof(punch), g_punch_addr);
         g_have_session_key = had_session;
     }
-
-
-
-
 
     constexpr DWORD kHelloRenewMs = 2000;
     if (g_role == Role::Client &&
@@ -2165,7 +1896,6 @@ bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation, ue::FVector
     if (!location || !rotation || !velocity) return false;
     const DWORD target = NowMs() - static_cast<DWORD>(GetInterpolationDelayMs());
 
-
     const PeerState* older = nullptr;
     const PeerState* newer = nullptr;
     for (int i = 0; i < kBufferSize; ++i) {
@@ -2180,18 +1910,6 @@ bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation, ue::FVector
     }
 
     if (!older && !newer) return false;
-
-
-
-
-
-
-
-
-
-
-
-
 
     if (!newer) {
         constexpr DWORD kMaxExtrapolationMs = 200;
@@ -2212,10 +1930,6 @@ bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation, ue::FVector
         return true;
     }
 
-
-
-
-
     if (!older) {
         *location = newer->location;
         *rotation = newer->rotation;
@@ -2233,8 +1947,6 @@ bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation, ue::FVector
     location->X = older->location.X + (newer->location.X - older->location.X) * alpha;
     location->Y = older->location.Y + (newer->location.Y - older->location.Y) * alpha;
     location->Z = older->location.Z + (newer->location.Z - older->location.Z) * alpha;
-
-
 
     float delta_yaw = newer->rotation.Yaw - older->rotation.Yaw;
     while (delta_yaw > 180.f) delta_yaw -= 360.f;
@@ -2255,5 +1967,3 @@ bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation, ue::FVector
 }
 
 }
-
-

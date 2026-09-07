@@ -78,8 +78,6 @@ DWORD WINAPI OverlayThread(LPVOID) {
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
 
-
-
     g_window = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         kClassName, L"SifuCoop", WS_POPUP, 24, 24, kWidth, kHeight, nullptr, nullptr,
@@ -137,8 +135,6 @@ void StopOverlay() {
 void SetOverlayText(const char* text) {
     if (!text) return;
 
-
-
     SetInGameOverlayText(text);
     if (!g_lock_ready) return;
     EnterCriticalSection(&g_lock);
@@ -147,4 +143,3 @@ void SetOverlayText(const char* text) {
 }
 
 }
-

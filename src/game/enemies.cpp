@@ -24,10 +24,6 @@ namespace ue = sifucoop::ue;
 namespace net = sifucoop::net;
 namespace coop = sifucoop::coop;
 
-
-
-
-
 struct TArrayRaw {
     ue::UObject** data = nullptr;
     std::int32_t num = 0;
@@ -59,53 +55,31 @@ bool KeyPressed(int vkey, bool* was_down) {
     return pressed;
 }
 
-
-
-
 struct Tracked {
     std::uint32_t hash = 0;
-
 
     std::uint32_t wire_hash = 0;
     std::uint32_t source_hash = 0;
     ue::UObject* actor = nullptr;
     ue::UObject* attack_component = nullptr;
 
-
-
     ue::UObject* ai_fighting = nullptr;
 
-
-
-
-
-
-
     char name[96] = {};
-
-
-
 
     bool runtime_named = false;
     std::uint32_t runtime_number = 0;
     int ordinal = 0;
 
-
     bool ai_stopped = false;
     DWORD last_ai_stop_ms = 0;
-
-
 
     bool was_down = false;
     bool parked = false;
 
-
-
-
     bool present = true;
     bool seen_from_host = false;
     bool ever_seen_from_host = false;
-
 
     DWORD missing_since = 0;
     float last_local_health = -1.f;
@@ -115,33 +89,18 @@ struct Tracked {
     float host_applied = 0.f;
     float host_guard_applied = 0.f;
 
-
     bool revive_refused = false;
 
-
-
     bool died_locally = false;
-
 
     bool death_anim_presented = false;
 
     std::uint8_t death_repair_attempts = 0;
     DWORD next_death_repair = 0;
 
-
     DWORD next_presence_refresh = 0;
 
-
-
-
-
-
-
-
-
-
     DWORD death_announce_until = 0;
-
 
     float distance = 0.f;
     float health = 0.f;
@@ -149,15 +108,9 @@ struct Tracked {
     bool active = false;
     bool driven = false;
 
-
-
     ue::FVector last_host_location = {};
     DWORD last_host_motion_ms = 0;
     bool have_host_motion = false;
-
-
-
-
 
     std::uint8_t host_target_flags = 0;
     ue::UObject* mirrored_target = nullptr;
@@ -165,16 +118,12 @@ struct Tracked {
     DWORD peer_aggro_until = 0;
     DWORD last_peer_target_ms = 0;
 
-
     DWORD next_hostility_ms = 0;
     bool hostile_confirmed = false;
 
     bool local_brain = false;
 
-
     DWORD not_ours_since = 0;
-
-
 
     DWORD ours_wanted_since = 0;
     DWORD owned_since = 0;
@@ -183,15 +132,10 @@ struct Tracked {
 
     DWORD last_esync_ms = 0;
 
-
     DWORD last_replica_reaction_ms = 0;
-
-
-
 
     ue::UObject* pending_death_anim = nullptr;
     DWORD pending_death_anim_ms = 0;
-
 
     DWORD local_reaction_motion_until = 0;
 };
@@ -199,11 +143,6 @@ struct Tracked {
 Tracked g_tracked[net::kMaxTrackedEnemies];
 int g_tracked_count = 0;
 bool g_announce_empty_ownership = false;
-
-
-
-
-
 
 ue::UObject* g_tracked_world = nullptr;
 bool g_had_host_sweep = false;
@@ -214,18 +153,7 @@ bool TrackingIsCurrent() {
            g_tracked_world == ue::GetWorld();
 }
 
-
-
-
-
-
-
-
-
-
 constexpr std::uintptr_t kAttackComponentTarget = 0x06B4;
-
-
 
 constexpr std::uintptr_t kInternalIndexOffset = 0x0C;
 
@@ -237,9 +165,6 @@ std::int32_t InternalIndexOf(const ue::UObject* object) {
     return index;
 }
 
-
-
-
 std::int32_t TargetIndexOf(const ue::UObject* attack_component) {
     if (!attack_component) return -1;
     std::int32_t index = -1;
@@ -250,23 +175,6 @@ std::int32_t TargetIndexOf(const ue::UObject* attack_component) {
     if (index < 0 || serial == 0) return -1;
     return index;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 namespace combat_role {
 constexpr int kNone = 0;
@@ -288,8 +196,6 @@ constexpr std::uint8_t kBehaviorAlerted = 3;
 
 StaticClassFn g_ai_fighting_class = nullptr;
 
-
-
 ue::UObject* GetAIFightingComponent(ue::UObject* actor) {
     if (!actor || !g_ai_fighting_class) return nullptr;
     struct Params {
@@ -301,7 +207,6 @@ ue::UObject* GetAIFightingComponent(ue::UObject* actor) {
     return params.ReturnValue;
 }
 
-
 int ReadCombatRole(ue::UObject* ai_fighting) {
     if (!ai_fighting) return -1;
     struct Params {
@@ -311,7 +216,6 @@ int ReadCombatRole(ue::UObject* ai_fighting) {
     return params.ReturnValue;
 }
 
-
 ue::UObject* ReadAIEnemy(ue::UObject* ai_fighting) {
     if (!ai_fighting) return nullptr;
     struct Params {
@@ -320,34 +224,6 @@ ue::UObject* ReadAIEnemy(ue::UObject* ai_fighting) {
     if (!ue::CallFunction(ai_fighting, L"BPF_GetEnemy", &params)) return nullptr;
     return params.ReturnValue;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 void WakeEnemyPerception(ue::UObject* ai_fighting, bool force_behaviour = false) {
     if (!ai_fighting) return;
@@ -373,22 +249,6 @@ bool ForceEnemy(ue::UObject* ai_fighting, ue::UObject* target, std::uint8_t beha
     return ue::CallFunction(ai_fighting, L"BPF_ForceEnemy", &params);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 int g_hostile_value = relationship::kUnknown;
 int g_hostility_attempts = 0;
 bool g_hostility_hopeless = false;
@@ -404,12 +264,6 @@ bool AssertHostileToward(Tracked& entry, ue::UObject* peer) {
 
     const int candidates[] = {relationship::kFight, relationship::kEnemy};
     for (const int value : candidates) {
-
-
-
-
-
-
 
         const int was_actor = ReadRelationship(entry.actor, peer);
         const int was_comp = ReadRelationshipViaComponent(entry.actor, peer);
@@ -437,13 +291,9 @@ bool AssertHostileToward(Tracked& entry, ue::UObject* peer) {
     return false;
 }
 
-
-
 void MaintainPeerHostility(ue::UObject* peer) {
     if (!peer || g_hostility_hopeless) return;
     if (coop::Get().mode != coop::Mode::Coop) return;
-
-
 
     if (!TrackingIsCurrent()) return;
 
@@ -458,20 +308,11 @@ void MaintainPeerHostility(ue::UObject* peer) {
         --budget;
         const bool held = AssertHostileToward(entry, peer);
 
-
-
-
-
-
         if (held) WakeEnemyPerception(entry.ai_fighting);
         entry.next_hostility_ms = now + (held ? 5000 : 1000);
         if (held == entry.hostile_confirmed) continue;
         entry.hostile_confirmed = held;
     }
-
-
-
-
 
     if (g_hostile_value == relationship::kUnknown && ++g_hostility_attempts > 200) {
         g_hostility_hopeless = true;
@@ -480,7 +321,6 @@ void MaintainPeerHostility(ue::UObject* peer) {
                "enemies will keep ignoring your partner until they are hit");
         coop::ReportProblem("enemies cannot be told your partner is an enemy");
     }
-
 
     static DWORD last_summary = 0;
     if (g_hostile_value != relationship::kUnknown && now - last_summary >= 10000) {
@@ -505,17 +345,6 @@ constexpr std::uint8_t kEnemyTargetMask =
 std::uint8_t HostTargetFlags(ue::UObject* attack_component, ue::UObject* host_player,
                              ue::UObject* peer_player) {
 
-
-
-
-
-
-
-
-
-
-
-
     const std::int32_t target = TargetIndexOf(attack_component);
     if (target < 0) return 0;
     if (target == InternalIndexOf(host_player)) return net::kEnemyTargetsHost;
@@ -525,15 +354,11 @@ std::uint8_t HostTargetFlags(ue::UObject* attack_component, ue::UObject* host_pl
 
 void KeepClientBrainStopped(Tracked& entry, DWORD now) {
 
-
-
     constexpr DWORD kRetryMs = 750;
-    if (entry.ai_stopped && now - entry.last_ai_stop_ms < kRetryMs) return;
+    if (entry.last_ai_stop_ms != 0 && now - entry.last_ai_stop_ms < kRetryMs) return;
     entry.last_ai_stop_ms = now;
     if (StopBrain(entry.actor)) entry.ai_stopped = true;
 }
-
-
 
 void FreezeDeadEnemy(Tracked& entry, DWORD now) {
     entry.peer_aggro_until = 0;
@@ -548,11 +373,6 @@ void RegisterEnemyTargetable(ue::UObject* actor) {
     ue::UObject* targetable = g_get_targetable_actor_component(actor);
     if (targetable) g_register_targetable_actor(targetable);
 }
-
-
-
-
-
 
 bool ApplyMirroredTarget(Tracked& entry, std::uint8_t flags, bool force = false) {
     flags &= kEnemyTargetMask;
@@ -574,9 +394,6 @@ bool ApplyMirroredTarget(Tracked& entry, std::uint8_t flags, bool force = false)
     if (!force && entry.mirrored_target == desired &&
         TargetIndexOf(entry.attack_component) == InternalIndexOf(desired))
         return true;
-
-
-
 
     bool applied = false;
     if (g_set_attack_target) {
@@ -605,58 +422,10 @@ bool ApplyMirroredTarget(Tracked& entry, std::uint8_t flags, bool force = false)
 bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
     if (!entry.attack_component || !desired || !g_set_attack_target) return false;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (coop::Get().force_enemy_engage && entry.ai_fighting &&
         ReadAIEnemy(entry.ai_fighting) != desired) {
         ForceEnemy(entry.ai_fighting, desired, kBehaviorAlerted);
     }
-
-
-
 
     WakeEnemyPerception(entry.ai_fighting);
 
@@ -667,42 +436,8 @@ bool ForceAttackTarget(Tracked& entry, ue::UObject* desired) {
     params.current_attacked = desired;
     ue::CallFunction(entry.attack_component, L"BPF_UpdateLockMoveTarget", &params);
 
-
-
     return TargetIndexOf(entry.attack_component) == InternalIndexOf(desired);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 using DirectorRegisterFn = void(__fastcall*)(ue::UObject* director, ue::UObject* target,
                                              std::uint8_t behavior,
@@ -717,9 +452,6 @@ DirectorRegisterFn g_director_register = nullptr;
 DirectorRemoveForTargetFn g_director_remove_for_target = nullptr;
 DirectorRedistributeFn g_director_redistribute = nullptr;
 StaticClassFn g_director_class = nullptr;
-
-
-
 
 constexpr std::uint8_t kGlobalBehaviorAlerted = 3;
 
@@ -744,25 +476,21 @@ ue::UObject* FindDirector() {
     return g_actors.data[0];
 }
 
-
 void ReleasePartnerFromDirector() {
     if (!g_registered_partner || !g_registered_with_director) {
         ClearDirectorRegistration();
         return;
     }
 
-
-
-
-
     const bool current_registration =
         g_registered_world && g_registered_world == ue::GetWorld() && TrackingIsCurrent();
-    if (current_registration && g_director_remove_for_target) {
+    if (current_registration && g_director_remove_for_target &&
+        ue::IsValidObject(g_registered_partner) &&
+        ue::IsValidObject(g_registered_with_director)) {
         int removed = 0;
         for (int i = 0; i < g_tracked_count; ++i) {
             ue::UObject* candidate = g_tracked[i].actor;
-            if (!candidate) continue;
-
+            if (!candidate || !ue::IsValidObject(candidate)) continue;
 
             g_director_remove_for_target(g_registered_with_director, g_registered_partner,
                                          candidate);
@@ -778,16 +506,16 @@ void MaintainPartnerAsDirectorTarget(ue::UObject* partner) {
     if (coop::Get().mode != coop::Mode::Coop) return;
     if (!g_director_register) return;
 
-
-
     static ue::UObject* seen_world = nullptr;
     static DWORD world_settled_at = 0;
+    static bool warned_no_director = false;
     ue::UObject* world = ue::GetWorld();
     if (!world) return;
     const DWORD now = GetTickCount();
     if (world != seen_world) {
         seen_world = world;
         world_settled_at = now;
+        warned_no_director = false;
         ClearDirectorRegistration();
         return;
     }
@@ -805,9 +533,8 @@ void MaintainPartnerAsDirectorTarget(ue::UObject* partner) {
 
     ue::UObject* director = FindDirector();
     if (!director) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
+        if (!warned_no_director) {
+            warned_no_director = true;
             SC_LOG("director: no AAIDirectorActor in this level -- roles cannot be allocated "
                    "to your partner here");
         }
@@ -818,7 +545,6 @@ void MaintainPartnerAsDirectorTarget(ue::UObject* partner) {
     for (int i = 0; i < g_tracked_count; ++i) {
         Tracked& entry = g_tracked[i];
         if (!entry.active || !entry.actor || !ue::IsValidObject(entry.actor)) continue;
-
 
         g_director_register(director, partner, kGlobalBehaviorAlerted, entry.actor);
         ++candidates;
@@ -835,7 +561,6 @@ void MaintainPartnerAsDirectorTarget(ue::UObject* partner) {
                candidates);
     }
 }
-
 
 int EnumerateFighters(ue::UObject** out, int max_out) {
     if (!g_get_all_actors || !g_fighting_character_class) return 0;
@@ -865,10 +590,6 @@ int FindTrackedBySource(std::uint32_t source_hash) {
     return -1;
 }
 
-
-
-
-
 struct SourceLink {
     ue::UObject* actor = nullptr;
     std::uint32_t source_hash = 0;
@@ -880,8 +601,6 @@ int EnumerateSpawnerSources(SourceLink* out, int max_out) {
     if (!world) return 0;
     if (!g_ai_spawner_class_attempted) {
         g_ai_spawner_class_attempted = true;
-
-
 
         g_ai_spawner_class = ue::FindObjectByPath(L"/Script/Sifu.AISpawner");
         SC_LOG("enemies: AISpawner class %s", g_ai_spawner_class ? "resolved" : "MISSING");
@@ -895,8 +614,6 @@ int EnumerateSpawnerSources(SourceLink* out, int max_out) {
     for (int i = 0; i < g_spawners.num && count < max_out; ++i) {
         ue::UObject* spawner = g_spawners.data[i];
         if (!spawner) continue;
-
-
 
         struct SpawnedAIParams {
             ue::UObject* ReturnValue;
@@ -918,27 +635,6 @@ std::uint32_t SourceHashForActor(ue::UObject* actor, const SourceLink* links, in
     return 0;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 struct AppliedTotals {
     std::uint32_t hash = 0;
     float health = 0.f;
@@ -951,8 +647,6 @@ int g_applied_count = 0;
 void ResetAppliedTotals() {
     g_applied_count = 0;
 }
-
-
 
 AppliedTotals* AppliedTotalsFor(std::uint32_t hash) {
     for (int i = 0; i < g_applied_count; ++i) {
@@ -967,7 +661,6 @@ AppliedTotals* AppliedTotalsFor(std::uint32_t hash) {
     return &slot;
 }
 
-
 AppliedTotals AppliedTotalsValue(std::uint32_t hash) {
     for (int i = 0; i < g_applied_count; ++i) {
         if (g_applied[i].hash == hash) return g_applied[i];
@@ -976,7 +669,6 @@ AppliedTotals AppliedTotalsValue(std::uint32_t hash) {
 }
 
 void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
-
 
     const bool same_world = ue::GetWorld() == g_tracked_world;
     if (!same_world) ResetAppliedTotals();
@@ -990,10 +682,6 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
     Tracked previous[net::kMaxTrackedEnemies];
     const int previous_count = g_tracked_count;
     for (int i = 0; i < previous_count; ++i) previous[i] = g_tracked[i];
-
-
-
-
 
     g_tracked_count = 0;
     for (int i = 0; i < count && g_tracked_count < net::kMaxTrackedEnemies; ++i) {
@@ -1010,16 +698,10 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
         entry.ai_fighting = GetAIFightingComponent(actor);
         entry.source_hash = SourceHashForActor(actor, source_links, source_count);
 
-
         entry.runtime_named = SplitRuntimeSuffix(name, &entry.runtime_number);
         lstrcpynA(entry.name, name, sizeof(entry.name));
         ++g_tracked_count;
     }
-
-
-
-
-
 
     for (int i = 0; i < g_tracked_count; ++i) {
         Tracked& entry = g_tracked[i];
@@ -1039,8 +721,6 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
         entry.wire_hash = entry.hash;
     }
 
-
-
     for (int i = 0; same_world && i < g_tracked_count; ++i) {
         Tracked& entry = g_tracked[i];
         for (int k = 0; k < previous_count; ++k) {
@@ -1049,8 +729,6 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
             entry.ai_stopped = previous[k].ai_stopped;
             entry.last_ai_stop_ms = previous[k].last_ai_stop_ms;
             entry.was_down = previous[k].was_down;
-
-
 
             entry.died_locally = previous[k].died_locally;
             entry.death_anim_presented = previous[k].death_anim_presented;
@@ -1073,18 +751,10 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
             entry.have_host_motion = previous[k].have_host_motion;
             entry.ever_seen_from_host = previous[k].ever_seen_from_host;
 
-
-
-
-
-
-
             entry.peer_aggro_until = previous[k].peer_aggro_until;
             entry.last_peer_target_ms = previous[k].last_peer_target_ms;
             entry.next_hostility_ms = previous[k].next_hostility_ms;
             entry.hostile_confirmed = previous[k].hostile_confirmed;
-
-
 
             entry.local_brain = previous[k].local_brain;
             entry.not_ours_since = previous[k].not_ours_since;
@@ -1112,11 +782,6 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
         SC_LOG("enemies: %d spawner identities bound to pool bodies", source_count);
     }
 
-
-
-
-
-
     int collisions = 0;
     for (int i = 0; i < g_tracked_count; ++i) {
         for (int k = i + 1; k < g_tracked_count; ++k) {
@@ -1133,21 +798,6 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 bool PresentClientReplicaDeath(ue::UObject* actor) {
     if (!actor) return false;
 
@@ -1159,9 +809,6 @@ bool PresentClientReplicaDeath(ue::UObject* actor) {
 
 bool LaunchReplicatedImpact(Tracked& entry, float replicated_delta) {
     if (!coop::Get().mirror_hit_reactions || !entry.actor || entry.local_brain) return false;
-
-
-
 
     const DWORD now = GetTickCount();
     if (entry.last_replica_reaction_ms != 0 && now - entry.last_replica_reaction_ms < 80) {
@@ -1189,10 +836,8 @@ void ApplyPeerDamage() {
         if (index < 0) continue;
         Tracked& entry = g_tracked[index];
 
-
         AppliedTotals* applied = AppliedTotalsFor(reports[i].name_hash);
         if (!applied) continue;
-
 
         if (reports[i].total + 0.01f < applied->health) applied->health = 0.f;
         if (reports[i].guard_total + 0.01f < applied->guard) applied->guard = 0.f;
@@ -1204,7 +849,6 @@ void ApplyPeerDamage() {
         Fighter fighter = ResolveFighter(entry.actor);
         if (!fighter.health) continue;
 
-
         const bool already_dead = GetHealth(fighter) <= 0.5f || IsDead(fighter);
         if (already_dead) {
             applied->health = reports[i].total;
@@ -1215,9 +859,6 @@ void ApplyPeerDamage() {
             entry.mirrored_target = nullptr;
             continue;
         }
-
-
-
 
         if (guard_delta > 0.01f && fighter.defense) {
             const float current_guard = GetGuard(fighter);
@@ -1236,27 +877,6 @@ void ApplyPeerDamage() {
             continue;
         }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         const bool lethal = !already_dead && GetHealth(fighter) - delta <= 0.5f;
 
         ue::UObject* peer = GetPuppet();
@@ -1271,15 +891,6 @@ void ApplyPeerDamage() {
 
         if (GetHealth(fighter) > 0.5f) LaunchReplicatedImpact(entry, delta);
 
-
-
-
-
-
-
-
-
-
         if (GetHealth(fighter) <= 0.5f) {
 
             entry.was_down = true;
@@ -1287,17 +898,6 @@ void ApplyPeerDamage() {
             SetDeathState(fighter);
             const bool presented = PresentClientReplicaDeath(entry.actor);
             entry.death_repair_attempts = presented ? 1 : 0;
-
-
-
-
-
-
-
-
-
-
-
 
             NotifyDownStateChanged(fighter, true);
             if (!presented || coop::Get().verbose_enemies) {
@@ -1311,17 +911,12 @@ void ApplyPeerDamage() {
             FreezeDeadEnemy(entry, GetTickCount());
         }
 
-
-
-
         if (GetHealth(fighter) > 0.5f && !IsDead(fighter) && peer &&
             ForceAttackTarget(entry, peer)) {
             entry.peer_aggro_until = GetTickCount() + 8000;
             entry.last_peer_target_ms = GetTickCount();
             static bool first_aggro = true;
             if (first_aggro) {
-
-
 
                 SC_LOG("targets: FIRST peer hit handed %s aggro to puppet -- role is now %s",
                        entry.name, combat_role::Name(ReadCombatRole(entry.ai_fighting)));
@@ -1330,8 +925,6 @@ void ApplyPeerDamage() {
         }
 
         stats.damage_applied_total += delta;
-
-
 
         static bool first = true;
         if (first) {
@@ -1355,26 +948,8 @@ void PublishEnemies() {
     bool host_player_is_out = false;
     bool peer_player_is_out = false;
 
-
-
-
     MaintainPeerHostility(peer_player);
     MaintainPartnerAsDirectorTarget(peer_player);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     if (peer_player && host_player) {
         Fighter host_fighter = ResolveFighter(host_player);
@@ -1415,7 +990,6 @@ void PublishEnemies() {
                 if (enemy.health &&
                     (GetHealth(enemy) <= 0.5f || IsDead(enemy))) continue;
 
-
                 entry.peer_aggro_until = 0;
                 entry.last_peer_target_ms = 0;
                 if (ForceAttackTarget(entry, host_player)) {
@@ -1449,7 +1023,6 @@ void PublishEnemies() {
         entry.active = !IsPooled(location);
         if (was_active && !entry.active) {
 
-
             entry.death_announce_until = now + 2000;
         }
         const bool announcing_death = !entry.active && entry.death_announce_until != 0 &&
@@ -1474,13 +1047,6 @@ void PublishEnemies() {
         }
         if (!entry.active) {
 
-
-
-
-
-
-
-
             continue;
         }
 
@@ -1503,28 +1069,11 @@ void PublishEnemies() {
             entry.host_target_flags = 0;
         }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         if (fighter.health && !IsDown(fighter) && GetHealth(fighter) > 0.5f) {
             const DWORD presence_now = GetTickCount();
             if (entry.next_presence_refresh == 0 ||
                 static_cast<LONG>(presence_now - entry.next_presence_refresh) >= 0) {
                 entry.next_presence_refresh = presence_now + 500;
-
-
 
                 SetActorCollisionEnabled(entry.actor, true);
                 RegisterEnemyTargetable(entry.actor);
@@ -1538,11 +1087,6 @@ void PublishEnemies() {
         state.y = location.Y;
         state.z = location.Z;
         state.yaw = rotation.Yaw;
-
-
-
-
-
 
         ue::FVector measured = {};
         if (GetActorVelocity(entry.actor, &measured)) {
@@ -1564,18 +1108,9 @@ void PublishEnemies() {
                                           state.velocity_y * state.velocity_y +
                                           state.velocity_z * state.velocity_z);
 
-
                 if (speed > 3000.f) state.velocity_x = state.velocity_y = state.velocity_z = 0.f;
             }
         }
-
-
-
-
-
-
-
-
 
         net::OwnedEnemy owned = {};
 
@@ -1586,11 +1121,6 @@ void PublishEnemies() {
             entry.health > 0.5f && !IsDead(fighter) &&
             net::GetOwnedEnemy(entry.wire_hash ? entry.wire_hash : entry.hash, &owned);
         if (peer_owned) {
-
-
-
-
-
 
             const bool was_stopped = entry.ai_stopped;
             KeepClientBrainStopped(entry, now);
@@ -1611,10 +1141,6 @@ void PublishEnemies() {
             }
         } else if (entry.ai_stopped) {
 
-
-
-
-
             const bool may_resume = entry.active && entry.health > 0.5f && !IsDead(fighter);
             if (may_resume && StartBrain(entry.actor)) {
                 entry.ai_stopped = false;
@@ -1633,14 +1159,9 @@ void PublishEnemies() {
         state.damage_applied = applied.health;
         state.guard_damage_applied = applied.guard;
 
-
-
-
         state.time_dilation = GetActorTimeDilation(entry.actor);
         state.flags = net::kEnemyActive;
         if (reaction_motion_here) state.flags |= net::kEnemyReactionMotion;
-
-
 
         const bool peer_aggro_active =
             alive && peer_player && !peer_player_is_out && entry.peer_aggro_until &&
@@ -1658,24 +1179,14 @@ void PublishEnemies() {
         }
         state.flags |= entry.host_target_flags;
 
-
-
-
-
         if (IsDown(fighter)) state.flags |= net::kEnemyDown;
         if (entry.max_health > 0.f && entry.health <= 0.5f) state.flags |= net::kEnemyDead;
     }
 
     coop::GetStats().enemies_active = active;
 
-
     net::SendEnemyStates(out, count);
 }
-
-
-
-
-
 
 void AccumulateLocalDamage(Tracked& entry, const Fighter& fighter) {
     if (!fighter.health) return;
@@ -1702,7 +1213,6 @@ void AccumulateLocalDamage(Tracked& entry, const Fighter& fighter) {
     }
     if (!useful) return;
 
-
     static bool first = true;
     if (first) {
         first = false;
@@ -1717,17 +1227,11 @@ void AccumulateLocalDamage(Tracked& entry, const Fighter& fighter) {
 
 }
 
-
-
-
-
-
-
 void SendOwnedEnemies() {
-    net::OwnedEnemy owned[net::kMaxOwnedEnemiesPerPacket];
+    net::OwnedEnemy owned[net::kMaxOwnedEnemiesTotal];
     int count = 0;
     bool dropped_dead_owner = false;
-    for (int i = 0; i < g_tracked_count && count < net::kMaxOwnedEnemiesPerPacket; ++i) {
+    for (int i = 0; i < g_tracked_count && count < net::kMaxOwnedEnemiesTotal; ++i) {
         const Tracked& entry = g_tracked[i];
         if (!entry.local_brain || !entry.active || !entry.actor)
             continue;
@@ -1755,8 +1259,6 @@ void SendOwnedEnemies() {
         out.velocity_z = velocity.Z;
     }
 
-
-
     if (count > 0 || g_announce_empty_ownership || dropped_dead_owner) {
         net::SendOwnedEnemies(count > 0 ? owned : nullptr, count);
     }
@@ -1768,10 +1270,6 @@ void SendDamageReports() {
     for (int i = 0; i < g_tracked_count && count < net::kMaxDamagePerPacket; ++i) {
         if (g_tracked[i].reported_total <= 0.f && g_tracked[i].reported_guard_total <= 0.f) continue;
         if (!g_tracked[i].seen_from_host) continue;
-
-
-
-
 
         reports[count].name_hash =
             g_tracked[i].wire_hash ? g_tracked[i].wire_hash : g_tracked[i].hash;
@@ -1787,18 +1285,7 @@ void SendDamageReports() {
 void ApplyRemoteEnemies() {
     if (!net::HasEnemySweep()) return;
 
-
-
-
-
-
-
     if (!TrackingIsCurrent()) return;
-
-
-
-
-
 
     char local_level[192] = {};
     const char* peer_level = net::GetPeerLevel();
@@ -1837,7 +1324,6 @@ void ApplyRemoteEnemies() {
         if (index < 0) index = FindTrackedBySource(state.source_hash);
         if (index < 0) {
 
-
             ++unmatched;
             static DWORD last_unmatched_log = 0;
             const DWORD now = GetTickCount();
@@ -1859,45 +1345,6 @@ void ApplyRemoteEnemies() {
         entry.seen_from_host = true;
         entry.ever_seen_from_host = true;
         entry.active = (state.flags & net::kEnemyActive) != 0;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
         bool near_us = false;
         if (config.peer_fights_locally && entry.active) {
@@ -1932,7 +1379,6 @@ void ApplyRemoteEnemies() {
             config.peer_fights_locally &&
             (((state.flags & net::kEnemyTargetsPeer) != 0) || near_us);
 
-
         const bool host_says_dead = (state.flags & net::kEnemyDead) != 0 ||
                                     (state.max_health > 0.f && state.health <= 0.5f);
         const bool must_release = host_says_dead || !entry.active;
@@ -1948,29 +1394,6 @@ void ApplyRemoteEnemies() {
             }
         }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         constexpr DWORD kClaimDebounceMs = 600;
 
         bool fights_us = entry.local_brain;
@@ -1980,9 +1403,6 @@ void ApplyRemoteEnemies() {
         } else if (entry.local_brain && must_release) {
             fights_us = false;
         }
-
-
-
 
         if (fights_us && local_player_is_out && !entry.down_owner_retargeted) {
             ue::UObject* surviving_partner = GetPuppet();
@@ -2000,9 +1420,6 @@ void ApplyRemoteEnemies() {
                 if (StartBrain(entry.actor)) {
                     entry.ai_stopped = false;
 
-
-
-
                     WakeEnemyPerception(entry.ai_fighting, true);
                     SC_LOG("enemies: %s handed to local AI -- it is fighting you", entry.name);
                 }
@@ -2013,14 +1430,7 @@ void ApplyRemoteEnemies() {
             }
         }
 
-
-
-
-
-
         if (!fights_us && !host_says_dead && entry.active) {
-
-
 
             ApplyMirroredTarget(entry, state.flags);
         } else if (host_says_dead || !entry.active) {
@@ -2028,21 +1438,10 @@ void ApplyRemoteEnemies() {
             entry.mirrored_target = nullptr;
         }
 
-
-
-
-
-
-
-
-
-
         const bool reaction_motion_here =
             entry.local_reaction_motion_until != 0 &&
             static_cast<LONG>(entry.local_reaction_motion_until - own_now) > 0;
         const bool local_ai = config.client_simulates_enemies || fights_us;
-
-
 
         if (host_says_dead) {
             FreezeDeadEnemy(entry, own_now);
@@ -2057,22 +1456,10 @@ void ApplyRemoteEnemies() {
             }
         }
 
-
-
         const bool dead = (state.flags & net::kEnemyDead) != 0 ||
                           (state.max_health > 0.f && state.health <= 0.5f);
         const bool knocked_down = (state.flags & net::kEnemyDown) != 0;
         if (entry.active && !dead) ++alive_count;
-
-
-
-
-
-
-
-
-
-
 
         const bool should_be_present = entry.active && !dead;
         if (should_be_present && (!entry.present || entry.parked || first_host_state)) {
@@ -2084,33 +1471,11 @@ void ApplyRemoteEnemies() {
 
         Fighter fighter = ResolveFighter(entry.actor);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         if (should_be_present && fighter.health && !IsDown(fighter)) {
             const DWORD presence_now = GetTickCount();
             if (entry.next_presence_refresh == 0 ||
                 static_cast<LONG>(presence_now - entry.next_presence_refresh) >= 0) {
                 entry.next_presence_refresh = presence_now + 500;
-
-
 
                 SetActorCollisionEnabled(entry.actor, true);
                 RegisterEnemyTargetable(entry.actor);
@@ -2118,45 +1483,6 @@ void ApplyRemoteEnemies() {
         }
         const bool locally_dead_before_sync =
             fighter.health && (GetHealth(fighter) <= 0.5f || IsDead(fighter));
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
         if (locally_dead_before_sync && !entry.died_locally) {
             entry.died_locally = true;
@@ -2166,33 +1492,13 @@ void ApplyRemoteEnemies() {
             }
         }
 
-
-
-
-
         if (config.report_damage) AccumulateLocalDamage(entry, fighter);
 
         const bool host_caught_up = state.damage_applied + 0.05f >= entry.reported_total;
         if (config.sync_enemy_vitals && fighter.health) {
 
-
-
-
-
-
-
-
-
-
-
             if (host_caught_up) {
                 const float local_health = GetHealth(fighter);
-
-
-
-
-
-
 
                 if (state.health + 0.05f < local_health) {
                     const float replicated = local_health - state.health;
@@ -2203,23 +1509,8 @@ void ApplyRemoteEnemies() {
                         ClearReplicatedKillInstigator();
                     } else {
 
-
-
-
                         SetHealth(fighter, state.health);
                     }
-
-
-
-
-
-
-
-
-
-
-
-
 
                     if (!replicated_lethal && config.mirror_hit_reactions) {
                         WakeEnemyPerception(entry.ai_fighting);
@@ -2232,23 +1523,6 @@ void ApplyRemoteEnemies() {
                     }
                 } else if (state.health > local_health + 0.05f) {
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
                     const float max_health = GetMaxHealth(fighter);
                     const float reset_gap = max_health > 0.f ? max_health * 0.5f : 60.f;
                     if (state.health - local_health >= reset_gap || first_host_state) {
@@ -2256,35 +1530,9 @@ void ApplyRemoteEnemies() {
                     }
                 }
 
-
-
-
-
-
-
-
-
-
-
                 if (state.guard + 0.05f < GetGuard(fighter)) SetGuard(fighter, state.guard);
                 entry.last_local_guard = GetGuard(fighter);
                 entry.host_guard_applied = state.guard_damage_applied;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
                 entry.last_local_health = GetHealth(fighter);
                 entry.host_applied = state.damage_applied;
@@ -2294,59 +1542,9 @@ void ApplyRemoteEnemies() {
         entry.health = GetHealth(fighter);
         entry.max_health = GetMaxHealth(fighter);
 
-
-
-
-
         if (!entry.local_brain) {
             SetActorTimeDilation(entry.actor, state.time_dilation);
         }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
         const bool stale_save_corpse = first_host_state && !dead;
         if (entry.died_locally && !dead &&
@@ -2362,18 +1560,6 @@ void ApplyRemoteEnemies() {
             }
         }
 
-
-
-
-
-
-
-
-
-
-
-
-
         if (!dead && locally_dead_before_sync && !entry.died_locally &&
             net::EnemySweepIsFresh()) {
             entry.was_down = false;
@@ -2386,16 +1572,6 @@ void ApplyRemoteEnemies() {
             }
             SetDown(fighter, false);
 
-
-
-
-
-
-
-
-
-
-
             NotifyDownStateChanged(fighter, false);
             SetActorPresent(entry.actor, true);
             RegisterEnemyTargetable(entry.actor);
@@ -2405,8 +1581,6 @@ void ApplyRemoteEnemies() {
             SC_LOG("enemies: revived and re-registered %s from client-only death", entry.name);
         } else if (!dead && locally_dead_before_sync) {
 
-
-
             if (!entry.revive_refused) {
                 entry.revive_refused = true;
                 SC_LOG("enemies: %s stays down -- %s", entry.name,
@@ -2414,21 +1588,6 @@ void ApplyRemoteEnemies() {
                            ? "we killed it, the host has not caught up yet"
                            : "the host's sweep is stale and its 'alive' cannot be trusted");
             }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
             if (!entry.was_down) {
                 entry.was_down = true;
@@ -2443,47 +1602,14 @@ void ApplyRemoteEnemies() {
         } else if (entry.was_down != dead) {
             entry.was_down = dead;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
             const DWORD death_now = GetTickCount();
             const bool have_death_anim =
                 entry.pending_death_anim && death_now - entry.pending_death_anim_ms <= 2000;
-
-
-
-
-
-
-
 
             if (dead && fighter.health) {
                 ue::UObject* death_world = ue::GetWorld();
                 ue::UObject* killer =
                     death_world ? ue::GetPlayerCharacter(death_world, 0) : nullptr;
-
-
-
-
-
-
-
-
-
-
-
-
-
 
                 const float local_now = GetHealth(fighter);
                 if (local_now > 0.5f) {
@@ -2498,27 +1624,12 @@ void ApplyRemoteEnemies() {
                         fighter, killer, have_death_anim ? entry.pending_death_anim : nullptr);
                 }
 
-
-
-
-
-
-
-
-
-
-
                 SetDeathState(fighter);
                 const bool replica_presented = PresentClientReplicaDeath(entry.actor);
                 entry.death_repair_attempts = replica_presented ? 1 : 0;
                 entry.next_death_repair = death_now + 750;
 
-
-
-
-
                 NotifyDownStateChanged(fighter, true);
-
 
                 if (have_death_anim) entry.death_anim_presented = true;
                 SC_LOG("death: %s kill=%d anim=%d replica=%d health_comp=%d -> down=%d",
@@ -2528,20 +1639,9 @@ void ApplyRemoteEnemies() {
             }
             entry.pending_death_anim = nullptr;
 
-
-
-
             if (!dead) {
                 SetDown(fighter, false);
                 NotifyDownStateChanged(fighter, false);
-
-
-
-
-
-
-
-
 
                 SetActorPresent(entry.actor, true);
                 entry.present = true;
@@ -2551,8 +1651,6 @@ void ApplyRemoteEnemies() {
                 SC_LOG("enemies: %s %s", entry.name, dead ? "DIED" : "recycled alive");
             }
         }
-
-
 
         if (dead && fighter.health && !IsDown(fighter) &&
             entry.death_repair_attempts < 3 &&
@@ -2570,26 +1668,6 @@ void ApplyRemoteEnemies() {
             entry.death_repair_attempts = 0;
             entry.next_death_repair = 0;
         }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
         const bool host_reaction_motion =
             (state.flags & net::kEnemyReactionMotion) != 0;
@@ -2621,33 +1699,14 @@ void ApplyRemoteEnemies() {
             }
         }
 
-
-
-
-
-
-
-
-
-
         if (config.verbose_enemies && entry.active) {
             const DWORD esync_now = GetTickCount();
             if (esync_now - entry.last_esync_ms >= 1000) {
                 entry.last_esync_ms = esync_now;
 
-
-
-
-
                 const char* tgt = (state.flags & net::kEnemyTargetsPeer) ? "peer"
                                  : (state.flags & net::kEnemyTargetsHost) ? "host"
                                                                           : "none";
-
-
-
-
-
-
 
                 SC_LOG("esync: %s fac=%d hp=%.0f/%.0f applied=%.0f/%.0f caught_up=%d down=%d "
                        "hostdown=%d dead=%d owned=%d tgt=%s",
@@ -2659,14 +1718,6 @@ void ApplyRemoteEnemies() {
             }
         }
 
-
-
-
-
-
-
-
-
         if (!dead && config.sync_enemies && !local_ai && !host_reaction_motion) {
             const ue::FVector target = {state.x, state.y, state.z};
             const ue::FRotator facing = {0.f, state.yaw, 0.f};
@@ -2676,12 +1727,6 @@ void ApplyRemoteEnemies() {
             ++driven;
         }
     }
-
-
-
-
-
-
 
     constexpr DWORD kMissingGraceMs = 1500;
     const DWORD retire_now = GetTickCount();
@@ -2718,11 +1763,6 @@ void ApplyRemoteEnemies() {
         }
     }
 
-
-
-
-
-
     if (config.park_extra_enemies && g_had_host_sweep) {
         for (int i = 0; i < g_tracked_count; ++i) {
             Tracked& entry = g_tracked[i];
@@ -2754,16 +1794,6 @@ void ApplyRemoteEnemies() {
 }
 
 }
-
-
-
-
-
-
-
-
-
-
 
 void DumpEnemyTargets() {
     ue::UObject* world = ue::GetWorld();
@@ -2800,11 +1830,6 @@ void DumpEnemyTargets() {
     SC_LOG("targets: %d enemies on YOU, %d on the second player, %d elsewhere, %d idle%s",
            targeting_player, targeting_second, targeting_other, no_target,
            second ? "" : "  (no second player present)");
-
-
-
-
-
 
     int roles_on_player[combat_role::kCount] = {};
     int roles_on_second[combat_role::kCount] = {};
@@ -2847,9 +1872,6 @@ void DumpRoster() {
         ue::FVector location = {};
         ue::GetActorLocation(entry.actor, &location);
         Fighter fighter = ResolveFighter(entry.actor);
-
-
-
 
         char origin[48] = {};
         if (entry.runtime_named) {
@@ -2913,8 +1935,6 @@ void InitEnemies(std::uintptr_t base) {
 
 void ForgetEnemyWorldObjects() {
 
-
-
     ClearDirectorRegistration();
     g_tracked_count = 0;
     g_tracked_world = nullptr;
@@ -2925,8 +1945,6 @@ void ForgetEnemyWorldObjects() {
 
 void NotifyPuppetWillBeDestroyed(ue::UObject* puppet) {
 
-
-
     if (puppet && puppet == g_registered_partner &&
         g_registered_world == ue::GetWorld() && TrackingIsCurrent()) {
         ReleasePartnerFromDirector();
@@ -2936,9 +1954,6 @@ void NotifyPuppetWillBeDestroyed(ue::UObject* puppet) {
 }
 
 ue::UObject* FindEnemyByHash(std::uint32_t hash) {
-
-
-
 
     if (!TrackingIsCurrent()) return nullptr;
     const int index = FindTracked(hash);
@@ -2972,13 +1987,6 @@ std::uint32_t EnemyHashForHealthComponent(const void* health_component) {
     return 0;
 }
 
-
-
-
-
-
-
-
 bool EnemyRunsLocalBrain(std::uint32_t hash) {
     const int index = FindTracked(hash);
     return index >= 0 && g_tracked[index].local_brain;
@@ -2999,7 +2007,6 @@ bool EnemyActionsAreLocallyAuthoritative(std::uint32_t hash, bool include_dead) 
     const std::uint32_t wire_hash = entry.wire_hash ? entry.wire_hash : entry.hash;
     return !net::GetOwnedEnemy(wire_hash, &owned);
 }
-
 
 void NoteEnemyReactionOrder(const void* actor, unsigned int order_type) {
     if (!actor || !TrackingIsCurrent()) return;
@@ -3039,21 +2046,6 @@ void NoteEnemyDeathAnimation(std::uint32_t hash, ue::UObject* animation) {
     entry.pending_death_anim = animation;
     entry.pending_death_anim_ms = GetTickCount();
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
 
 bool ApplyMirroredEnemyTargetForAttack(std::uint32_t hash) {
@@ -3078,9 +2070,6 @@ bool PrepareMirroredEnemyAttack(std::uint32_t hash, EnemyAttackContext* out) {
     Fighter fighter = ResolveFighter(entry.actor);
     if (!entry.active || entry.was_down ||
         (fighter.health && (GetHealth(fighter) <= 0.5f || IsDead(fighter)))) return false;
-
-
-
 
     if (net::GetRole() == net::Role::Host) {
         entry.host_target_flags = net::kEnemyTargetsPeer;
@@ -3115,7 +2104,6 @@ int GetEnemyRows(EnemyRow* out, int max_out) {
 void TickEnemies() {
     static bool list_key = false;
 
-
     const bool wants_roster = KeyPressed(VK_INSERT, &list_key);
 
     ue::UObject* world = ue::GetWorld();
@@ -3124,28 +2112,17 @@ void TickEnemies() {
 
     const DWORD now = GetTickCount();
 
-
-
-
     const bool world_changed = (world != g_tracked_world);
     if (world_changed) {
         g_tracked_count = 0;
         g_had_host_sweep = false;
         g_announce_empty_ownership = false;
 
-
         net::ResetEnemyReplication();
     }
 
-
-
-
-
     static ue::UObject* last_puppet = nullptr;
     ue::UObject* puppet = GetPuppet();
-
-
-
 
     static DWORD last_refresh = 0;
     if (world_changed || puppet != last_puppet || now - last_refresh > 2000 ||
@@ -3154,11 +2131,6 @@ void TickEnemies() {
         last_puppet = puppet;
         RefreshTracked(player, puppet);
         g_refresh_requested = false;
-
-
-
-
-
 
         static ue::UObject* dumped_world = nullptr;
         if (coop::Get().verbose_enemies && g_tracked_count > 0 && dumped_world != world) {
@@ -3172,8 +2144,6 @@ void TickEnemies() {
         DumpEnemyTargets();
     }
 
-
-
     if (GetPuppet()) {
         static DWORD last_targets = 0;
         if (now - last_targets > 5000) {
@@ -3181,10 +2151,6 @@ void TickEnemies() {
             DumpEnemyTargets();
         }
     }
-
-
-
-
 
     static DWORD last_distance = 0;
     if (now - last_distance > 250) {
@@ -3198,14 +2164,10 @@ void TickEnemies() {
                 const float dy = location.Y - mine.Y;
                 g_tracked[i].distance = sqrtf(dx * dx + dy * dy);
 
-
                 g_tracked[i].active = !IsPooled(location) && !g_tracked[i].parked;
             }
         }
     }
-
-
-
 
     if (!net::IsConnected() || !ActorsReady() || !CoopGameplayActive()) return;
 
@@ -3221,11 +2183,6 @@ void TickEnemies() {
         }
     } else {
         ApplyRemoteEnemies();
-
-
-
-
-
 
         static DWORD last_report = 0;
         static DWORD last_owned_publish = 0;

@@ -12,8 +12,6 @@ namespace {
 
 namespace offsets = sifucoop::offsets;
 
-
-
 constexpr int kFNameAdd = 1;
 
 using FNameCtorFn = FName*(__fastcall*)(FName*, const wchar_t*, int);
@@ -27,7 +25,6 @@ using GetPathNameFn = void(__fastcall*)(const UObject* self, const UObject* stop
                                         void* out_string);
 using StaticFindObjectSafeFn = UObject*(__fastcall*)(void* uclass, UObject* outer,
                                                      const wchar_t* name, bool exact_class);
-
 
 using OpenLevelFn = void(__fastcall*)(const UObject* world_context, FName level,
                                       bool absolute, void* options);
@@ -46,7 +43,6 @@ UObject** g_gworld = nullptr;
 
 bool g_ready = false;
 
-// Committed and readable, without faulting to find out.
 bool RangeReadable(const void* address, std::size_t size) {
     MEMORY_BASIC_INFORMATION info = {};
     if (VirtualQuery(address, &info, sizeof(info)) == 0) return false;
@@ -143,13 +139,11 @@ UObject* GetWorld() {
 bool GetObjectPathName(UObject* object, char* out, int out_size) {
     if (!g_get_path_name || !object || out_size <= 0) return false;
 
-
     struct FString {
         wchar_t* data;
         std::int32_t num;
         std::int32_t max;
     } result = {};
-
 
     g_get_path_name(object, nullptr, &result);
 
@@ -174,8 +168,6 @@ bool GetCurrentLevelPath(char* out, int out_size) {
     char full[512] = {};
     if (!GetObjectPathName(world, full, sizeof(full))) return false;
 
-
-
     char* dot = strrchr(full, '.');
     if (dot) *dot = '\0';
 
@@ -194,13 +186,6 @@ bool OpenLevel(const char* level_path) {
 
     const FName name = MakeName(wide);
 
-
-
-
-
-
-
-
     struct FString {
         wchar_t* data;
         std::int32_t num;
@@ -217,8 +202,6 @@ bool ExecuteConsoleCommand(const char* command, UObject* specific_player) {
     UObject* world = GetWorld();
     UObject* kismet = FindObjectByPath(L"/Script/Engine.Default__KismetSystemLibrary");
     if (!world || !kismet) return false;
-
-
 
     wchar_t wide[512] = {};
     const int chars = MultiByteToWideChar(CP_UTF8, 0, command, -1, wide, 512);
@@ -238,7 +221,6 @@ bool ExecuteConsoleCommand(const char* command, UObject* specific_player) {
 
 UObject* GetSkeletalMeshComponent(UObject* actor) {
     if (!g_ready || !actor || !g_skeletal_mesh_class) return nullptr;
-
 
     struct ComponentParams {
         void* ComponentClass;
@@ -282,7 +264,6 @@ bool ApplyAnimState(UObject* actor, const AnimState& state) {
     UObject* anim_instance = GetAnimInstance(actor);
     if (!anim_instance) return false;
 
-
     g_montage_play(anim_instance, state.montage, 1.f, 0, state.position, true);
     return true;
 }
@@ -291,10 +272,6 @@ bool PlayAnimationAsset(UObject* actor, UObject* animation_asset, float start_at
     if (!animation_asset) return false;
     UObject* anim_instance = GetAnimInstance(actor);
     if (!anim_instance) return false;
-
-
-
-
 
     struct Params {
         UObject* Asset;
@@ -315,33 +292,12 @@ bool PlayAnimationAsset(UObject* actor, UObject* animation_asset, float start_at
     params.LoopCount = 1;
     params.BlendOutTriggerTime = -1.f;
 
-
-
     params.InTimeToStartMontageAt = start_at > 0.f ? start_at : 0.f;
     if (!CallFunction(anim_instance, L"PlaySlotAnimationAsDynamicMontage", &params)) {
         return false;
     }
     return params.ReturnValue != nullptr;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 bool GetObjectClassPathName(UObject* object, char* out, int out_size) {
     if (!object || !out || out_size <= 0) return false;
@@ -363,18 +319,8 @@ void* GetAnimInstanceClass(UObject* actor) {
     UObject* instance = GetAnimInstance(actor);
     if (!instance) return nullptr;
 
-
     return *reinterpret_cast<void**>(reinterpret_cast<std::uintptr_t>(instance) + 0x10);
 }
-
-
-
-
-
-
-
-
-
 
 bool RestoreAnimationBlueprint(UObject* actor, void* anim_class) {
     UObject* mesh = GetSkeletalMeshComponent(actor);
@@ -388,9 +334,6 @@ bool RestoreAnimationBlueprint(UObject* actor, void* anim_class) {
 
     if (GetAnimInstance(actor)) return true;
 
-
-
-
     if (!anim_class) return false;
     struct ClassParams {
         void* NewClass;
@@ -399,29 +342,7 @@ bool RestoreAnimationBlueprint(UObject* actor, void* anim_class) {
     return GetAnimInstance(actor) != nullptr;
 }
 
-// Whether this pointer can be TOUCHED. Deliberately not "is this UObject alive".
-//
-// This used to ask Kismet's IsValid through ProcessEvent, which is a
-// contradiction: dispatching a UFunction on the object dereferences the very
-// pointer the call is meant to vet. Every caller was a stale-pointer guard, so
-// the guard was the fault. It crashed the host on 2026-08-16 at 16:05 --
-//
-//   EXCEPTION_ACCESS_VIOLATION reading 0x8
-//   UKismetSystemLibrary::execIsValidClass -> UFunction::Invoke
-//   -> UObject::ProcessEvent -> dsound
-//
-// -- reached from WriteRelationship, which validates a social component and a
-// target on every relationship assert.
-//
-// Structural instead, and no call at all: committed readable memory, a vtable
-// inside the game module, and a ClassPrivate that is itself a readable object
-// with a module vtable. That is the same bar orders.cpp already applies before
-// touching an order, and it is the strongest test available without walking
-// GUObjectArray.
-//
-// It proves the memory is safe to read. It does NOT prove the object is live,
-// so it must not be used to decide gameplay -- only to avoid faulting. Callers
-// that need liveness track it themselves (world identity, sweep freshness).
+// Safe to READ; not proof of liveness. See CODE-NOTES.md.
 bool IsValidObject(UObject* object) {
     if (!object || g_module_base == 0) return false;
 
@@ -433,8 +354,7 @@ bool IsValidObject(UObject* object) {
     const auto vtable = *reinterpret_cast<const std::uintptr_t*>(object);
     if (vtable < g_module_base || vtable - g_module_base > kModuleSpan) return false;
 
-    // UObjectBase::ClassPrivate, the one fixed offset this codebase takes on
-    // faith everywhere else too.
+    // UObjectBase::ClassPrivate.
     const auto class_private = *reinterpret_cast<const std::uintptr_t*>(
         reinterpret_cast<const std::uint8_t*>(object) + 0x10);
     if (class_private < 0x10000 || (class_private & 7) != 0) return false;
@@ -454,5 +374,3 @@ float GetAnimationAssetLength(UObject* animation_asset) {
 }
 
 }
-
-

@@ -25,9 +25,6 @@ namespace offsets = sifucoop::offsets;
 
 namespace {
 
-
-
-
 HANDLE g_game_process_mutex = nullptr;
 
 bool AcquireGameProcessGuard() {
@@ -77,9 +74,6 @@ bool ReadPeIdentity(HMODULE module, PeIdentity* out) {
     return true;
 }
 
-
-
-
 bool VerifyGameBuild(HMODULE game, uintptr_t base) {
     PeIdentity id = {};
     if (!ReadPeIdentity(game, &id)) {
@@ -89,9 +83,6 @@ bool VerifyGameBuild(HMODULE game, uintptr_t base) {
 
     SC_LOG("guard: exe TimeDateStamp=0x%08lX SizeOfImage=0x%08lX", id.time_date_stamp,
            id.size_of_image);
-
-
-
 
     const char* build = offsets::SelectBuild(id.time_date_stamp, id.size_of_image);
     if (!build) {
@@ -116,16 +107,6 @@ bool VerifyGameBuild(HMODULE game, uintptr_t base) {
 
     SC_LOG("guard: build '%s' matched. image base = 0x%llX", build,
            static_cast<unsigned long long>(base));
-
-
-
-
-
-
-
-
-
-
 
     for (const auto& entry : offsets::kBuilds) {
         if (_stricmp(entry.name, build) != 0) continue;
@@ -175,9 +156,6 @@ DWORD WINAPI Bootstrap(LPVOID) {
     LogResolved(base, "GEngine", offsets::GEngine);
     LogResolved(base, "GWorld", offsets::GWorld);
 
-
-
-
     auto** gengine = reinterpret_cast<void**>(base + offsets::GEngine);
     void* engine = nullptr;
     for (int i = 0; i < 600; ++i) {
@@ -194,7 +172,6 @@ DWORD WINAPI Bootstrap(LPVOID) {
         SC_LOG("bootstrap: GEngine still null after 5 minutes -- offset is suspect");
         return 0;
     }
-
 
     SC_LOG("bootstrap: engine present; waiting for startup asset loading to settle");
     Sleep(8000);
@@ -215,20 +192,12 @@ DWORD WINAPI Bootstrap(LPVOID) {
         return 0;
     }
 
-
-
-
     sifucoop::game::InitActors(base);
     sifucoop::game::InitPuppet(base);
     sifucoop::game::InitPlayer2(base);
     sifucoop::game::InitEnemies(base);
     sifucoop::game::InstallPlayOrderHook(base);
     sifucoop::game::InitSelfTest();
-
-
-
-
-
 
     bool in_game = false;
     if (sifucoop::coop::Get().in_game_overlay) {
@@ -254,11 +223,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         DisableThreadLibraryCalls(instance);
         sifucoop::log::Open();
 
-
         if (!sifucoop::proxy::Init()) {
             SC_LOG("proxy: init incomplete -- audio may misbehave");
         }
-
 
         HANDLE thread = CreateThread(nullptr, 0, Bootstrap, nullptr, 0, nullptr);
         if (thread) CloseHandle(thread);
@@ -267,6 +234,3 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     }
     return TRUE;
 }
-
-
-

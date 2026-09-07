@@ -85,9 +85,6 @@ void Sha256(const void* data, std::size_t size, std::uint8_t out[kSha256Size]) {
         remaining -= 64;
     }
 
-
-
-
     std::uint8_t tail[128] = {};
     memcpy(tail, bytes, remaining);
     tail[remaining] = 0x80;
@@ -126,9 +123,6 @@ void HmacSha256(const std::uint8_t* key, std::size_t key_size, const void* data,
         inner_pad[i] = static_cast<std::uint8_t>(padded_key[i] ^ 0x36);
         outer_pad[i] = static_cast<std::uint8_t>(padded_key[i] ^ 0x5C);
     }
-
-
-
 
     constexpr std::size_t kMaxMessage = 2048;
     if (size > kMaxMessage) size = kMaxMessage;

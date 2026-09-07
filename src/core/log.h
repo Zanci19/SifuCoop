@@ -1,9 +1,5 @@
 #pragma once
 
-
-
-
-
 namespace sifucoop::log {
 
 void Open();

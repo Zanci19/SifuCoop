@@ -85,8 +85,6 @@ void Load() {
     g_config.puppet_ignores_pawn_collision = ReadBool(
         "puppet_ignores_pawn_collision", g_config.puppet_ignores_pawn_collision, ini);
 
-
-
     g_config.sync_montages = ReadBool("sync_montages", g_config.sync_montages, ini);
     g_config.report_damage = ReadBool("report_damage", g_config.report_damage, ini);
     g_config.mirror_peer_vitals = ReadBool("mirror_peer_vitals",
@@ -113,16 +111,10 @@ void Load() {
     g_config.director_targets_partner =
         ReadBool("director_targets_partner", g_config.director_targets_partner, ini);
 
-
-
-
     if (g_config.real_second_player) {
         SC_LOG("coop: disabling unsafe real_second_player experiment");
         g_config.real_second_player = false;
     }
-
-
-
 
     if (g_config.force_enemy_engage || g_config.director_targets_partner) {
         SC_LOG("coop: disabling unsafe director experiment "
@@ -147,8 +139,6 @@ void Load() {
                                                      g_config.interp_delay_ms, ini);
     g_config.snapshot_hz = GetPrivateProfileIntA(kSection, "snapshot_hz",
                                                  g_config.snapshot_hz, ini);
-
-
 
     if (g_config.interp_delay_ms < 0) g_config.interp_delay_ms = 0;
     if (g_config.interp_delay_ms > 500) g_config.interp_delay_ms = 500;
@@ -220,8 +210,6 @@ void ReportProblem(const char* format, ...) {
     va_start(args, format);
     _vsnprintf(text, sizeof(text) - 1, format, args);
     va_end(args);
-
-
 
     if (strcmp(text, g_stats.last_problem) != 0) SC_LOG("coop: %s", text);
     lstrcpynA(g_stats.last_problem, text, sizeof(g_stats.last_problem));

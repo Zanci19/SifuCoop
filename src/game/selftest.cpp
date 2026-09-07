@@ -20,13 +20,6 @@ namespace ue = sifucoop::ue;
 namespace coop = sifucoop::coop;
 namespace net = sifucoop::net;
 
-
-
-
-
-
-
-
 enum class Round {
     AiDriven,
     ModDriven,
@@ -55,8 +48,6 @@ int g_swings_sent = 0;
 bool g_enabled = false;
 bool g_announced = false;
 
-
-
 constexpr float kStageDistance = 130.f;
 constexpr DWORD kSettleMs = 1200;
 constexpr DWORD kWatchMs = 6000;
@@ -75,9 +66,6 @@ void Enter(Step step) {
     g_step_started = GetTickCount();
 }
 
-
-
-
 bool StageEnemy(ue::UObject* player, ue::UObject* enemy) {
     ue::FVector player_location = {};
     ue::FRotator player_rotation = {};
@@ -85,10 +73,6 @@ bool StageEnemy(ue::UObject* player, ue::UObject* enemy) {
     if (!ue::GetActorRotation(player, &player_rotation)) return false;
 
     SetActorPresent(enemy, true);
-
-
-
-
 
     const ue::FRotator facing = {0.f, player_rotation.Yaw + 180.f, 0.f};
     for (int step = 0; step < 8; ++step) {
@@ -104,8 +88,6 @@ bool StageEnemy(ue::UObject* player, ue::UObject* enemy) {
     }
     return false;
 }
-
-
 
 std::uint32_t PickTarget() {
     EnemyRow rows[net::kMaxTrackedEnemies];
@@ -176,9 +158,6 @@ void TickSelfTest() {
     switch (g_step) {
         case Step::WaitForTarget: {
 
-
-
-
             if (g_round == Round::ModDriven && !HaveAttackTemplate()) {
                 if (!g_announced) {
                     g_announced = true;
@@ -187,12 +166,6 @@ void TickSelfTest() {
                 }
                 return;
             }
-
-
-
-
-
-
 
             static bool instructed = false;
             const std::uint32_t target = PickTarget();
@@ -223,7 +196,6 @@ void TickSelfTest() {
 
             if (g_round == Round::ModDriven) {
 
-
                 StopBrain(enemy);
             }
 
@@ -251,9 +223,6 @@ void TickSelfTest() {
             if (health < g_health_low) g_health_low = health;
 
             ue::UObject* enemy = FindEnemyByHash(g_target_hash);
-
-
-
 
             if (enemy && now - g_last_swing > kSwingIntervalMs / 2) {
                 ue::FVector player_location = {};

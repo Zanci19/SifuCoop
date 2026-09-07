@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #include <d3d11.h>
 #include <dxgi.h>
 #include <windows.h>
@@ -25,9 +16,6 @@
 #include "../game/levels.g.h"
 #include "../net/session.h"
 #include "overlay.h"
-
-
-
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT message,
                                                              WPARAM wparam, LPARAM lparam);
@@ -50,16 +38,6 @@ ID3D11Device* g_device = nullptr;
 ID3D11DeviceContext* g_context = nullptr;
 ID3D11RenderTargetView* g_render_target = nullptr;
 HWND g_window = nullptr;
-
-
-
-
-
-
-
-
-
-
 
 IDXGISwapChain* g_swap_chain = nullptr;
 
@@ -110,8 +88,6 @@ bool InitialiseFrom(IDXGISwapChain* swap_chain) {
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
 
-
-
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.MouseDrawCursor = true;
     ImGui::StyleColorsDark();
@@ -129,8 +105,6 @@ bool InitialiseFrom(IDXGISwapChain* swap_chain) {
     return true;
 }
 
-
-
 CRITICAL_SECTION g_menu_lock;
 bool g_menu_lock_ready = false;
 std::atomic<bool> g_menu_open{false};
@@ -138,13 +112,11 @@ std::atomic<bool> g_menu_open{false};
 MenuRequests g_requests;
 bool g_requests_pending = false;
 
-
 MenuStatus g_status;
 
 constexpr int kMaxSyncRows = 96;
 SyncRow g_sync_rows[kMaxSyncRows];
 int g_sync_row_count = 0;
-
 
 char g_field_address[64] = "127.0.0.1";
 char g_field_passphrase[64] = {};
@@ -167,14 +139,6 @@ MenuStatus CopyStatus() {
     LeaveCriticalSection(&g_menu_lock);
     return copy;
 }
-
-
-
-
-
-
-
-
 
 void DrawPlayTab(const MenuStatus& status) {
     const coop::Stats& stats = coop::GetStats();
@@ -200,7 +164,6 @@ void DrawPlayTab(const MenuStatus& status) {
                 status.together ? "here with you"
                                 : (status.peer_known ? status.peer_level : "loading..."));
 
-
     if (status.together) {
         ImGui::Spacing();
         if (ImGui::Button("Teleport to partner", ImVec2(200, 0))) {
@@ -209,7 +172,6 @@ void DrawPlayTab(const MenuStatus& status) {
             PostRequests(r);
         }
     }
-
 
     if (status.invite_pending) {
         ImGui::SeparatorText("Invitation");
@@ -227,14 +189,6 @@ void DrawPlayTab(const MenuStatus& status) {
         }
         ImGui::Checkbox("Always join automatically", &coop::Get().auto_join_level);
     } else if (status.hosting) {
-
-
-
-
-
-
-
-
 
         ImGui::Spacing();
         if (ImGui::Button("Start co-op here", ImVec2(200, 0))) {
@@ -388,10 +342,6 @@ void DrawDiagnosticsTab() {
     ImGui::TextColored(dim, "Log: %%LOCALAPPDATA%%\\Sifu\\Saved\\Logs\\SifuCoop.log");
 }
 
-
-
-
-
 void DrawInviteBanner(const MenuStatus& status) {
     if (!status.invite_pending) return;
 
@@ -409,8 +359,6 @@ void DrawInviteBanner(const MenuStatus& status) {
         ImGui::TextColored(ImVec4(1.f, 0.85f, 0.35f, 1.f), "Your partner invited you");
         ImGui::TextDisabled("%s", status.invite_level);
         ImGui::Spacing();
-
-
 
         if (g_menu_open.load()) {
             if (ImGui::Button("Accept", ImVec2(120, 0))) {
@@ -465,9 +413,6 @@ void DrawMenu() {
     ImGui::End();
 }
 
-
-
-
 LRESULT CALLBACK WndProcHook(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (g_menu_open.load()) {
         ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
@@ -518,9 +463,6 @@ LRESULT CALLBACK WndProcHook(HWND window, UINT message, WPARAM wparam, LPARAM lp
     return CallWindowProcW(g_original_wndproc, window, message, wparam, lparam);
 }
 
-
-
-
 using SetCursorPosFn = BOOL(WINAPI*)(int, int);
 using ClipCursorFn = BOOL(WINAPI*)(const RECT*);
 
@@ -537,11 +479,6 @@ BOOL WINAPI ClipCursorHook(const RECT* rect) {
     return g_original_clip_cursor(rect);
 }
 
-
-
-
-
-
 void FeedMenuInput() {
     ImGuiIO& io = ImGui::GetIO();
 
@@ -553,8 +490,6 @@ void FeedMenuInput() {
     io.AddMouseButtonEvent(0, (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
     io.AddMouseButtonEvent(1, (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0);
 
-
-
 }
 
 void ReleaseRenderTarget() {
@@ -564,16 +499,8 @@ void ReleaseRenderTarget() {
     }
 }
 
-
-
-
-
-
 HRESULT __stdcall ResizeBuffersHook(IDXGISwapChain* swap_chain, UINT buffer_count, UINT width,
                                     UINT height, DXGI_FORMAT format, UINT flags) {
-
-
-
 
     if (swap_chain == g_swap_chain) ReleaseRenderTarget();
     return g_original_resize_buffers(swap_chain, buffer_count, width, height, format, flags);
@@ -586,23 +513,15 @@ HRESULT __stdcall PresentHook(IDXGISwapChain* swap_chain, UINT sync_interval, UI
         if (g_initialised) g_swap_chain = swap_chain;
     }
 
-
-
-
     if (swap_chain != g_swap_chain) {
         return g_original_present(swap_chain, sync_interval, flags);
     }
-
 
     if (g_initialised && !g_render_target && g_device) {
         if (!CreateRenderTarget(swap_chain)) {
             return g_original_present(swap_chain, sync_interval, flags);
         }
     }
-
-
-
-
 
     if (g_initialised) {
         static bool f1_was_down = false;
@@ -621,14 +540,9 @@ HRESULT __stdcall PresentHook(IDXGISwapChain* swap_chain, UINT sync_interval, UI
         if (g_menu_open) FeedMenuInput();
         ImGui::NewFrame();
 
-
-
-
         DrawInviteBanner(CopyStatus());
         if (g_menu_open) DrawMenu();
         ImGui::Render();
-
-
 
         g_context->OMSetRenderTargets(1, &g_render_target, nullptr);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -636,9 +550,6 @@ HRESULT __stdcall PresentHook(IDXGISwapChain* swap_chain, UINT sync_interval, UI
 
     return g_original_present(swap_chain, sync_interval, flags);
 }
-
-
-
 
 void* FindPresent(void** out_resize_buffers) {
     WNDCLASSEXW wc = {};
@@ -707,7 +618,6 @@ bool StartInGameOverlay() {
         return false;
     }
 
-
     MH_Initialize();
     if (MH_CreateHook(present, reinterpret_cast<void*>(&PresentHook),
                       reinterpret_cast<void**>(&g_original_present)) != MH_OK ||
@@ -716,14 +626,11 @@ bool StartInGameOverlay() {
         return false;
     }
 
-
     if (resize_buffers &&
         MH_CreateHook(resize_buffers, reinterpret_cast<void*>(&ResizeBuffersHook),
                       reinterpret_cast<void**>(&g_original_resize_buffers)) == MH_OK &&
         MH_EnableHook(resize_buffers) == MH_OK) {
         SC_LOG("d3d: Present + ResizeBuffers hooked");
-
-
 
         if (MH_CreateHook(reinterpret_cast<void*>(&SetCursorPos),
                           reinterpret_cast<void*>(&SetCursorPosHook),
@@ -763,8 +670,6 @@ void SetMenuStatus(const MenuStatus& status) {
     if (!g_menu_lock_ready) return;
     EnterCriticalSection(&g_menu_lock);
     g_status = status;
-
-
 
     if (!g_fields_loaded) {
         g_fields_loaded = true;
@@ -806,8 +711,3 @@ void SetInGameOverlayText(const char* text) {
 }
 
 }
-
-
-
-
-

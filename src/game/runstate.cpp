@@ -24,17 +24,6 @@ namespace offsets = sifucoop::offsets;
 
 ue::UObject* PlayerFightingComponent(ue::UObject* character);
 
-
-
-
-
-
-
-
-
-
-
-
 bool IsSafeToDress(ue::UObject* puppet) {
     if (!puppet) return false;
     ue::UObject* world = ue::GetWorld();
@@ -43,9 +32,6 @@ bool IsSafeToDress(ue::UObject* puppet) {
     if (puppet == PrimaryPlayerPawn()) return false;
     return true;
 }
-
-
-
 
 int ReadLocalAge(ue::UObject* player) {
     struct StatsRet {
@@ -60,19 +46,6 @@ int ReadLocalAge(ue::UObject* player) {
     if (!ue::CallFunction(stats.ReturnValue, L"BPF_GetCharacterAge", &age)) return -1;
     return age.ReturnValue;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 bool WriteCharacterAge(ue::UObject* character, int years) {
     if (!character || years < 0) return false;
@@ -91,15 +64,6 @@ bool WriteCharacterAge(ue::UObject* character, int years) {
 bool WritePuppetAge(ue::UObject* puppet, int years) {
     return puppet && IsSafeToDress(puppet) && WriteCharacterAge(puppet, years);
 }
-
-
-
-
-
-
-
-
-
 
 ue::UObject* PlayerFightingComponent(ue::UObject* character) {
     if (!character) return nullptr;
@@ -129,13 +93,10 @@ int ReadLocalOutfit(ue::UObject* player) {
     return (index < 0 || index > 64) ? -1 : index;
 }
 
-
-
 bool WritePuppetOutfit(ue::UObject* puppet, int index) {
     if (!puppet || index < 0 || !IsSafeToDress(puppet)) return false;
     ue::UObject* comp = PlayerFightingComponent(puppet);
     if (!comp) return false;
-
 
     if (offsets::M_UPlayerFightingComponent_iOutfitIndex != 0) {
         const std::int32_t exact_index = index;
@@ -145,8 +106,6 @@ bool WritePuppetOutfit(ue::UObject* puppet, int index) {
         if (ue::CallFunction(comp, L"OnRep_OutfitIndex", nullptr)) return true;
     }
 
-
-
     struct SwapArgs {
         std::int32_t Index;
         ue::UObject* MaterialOverride;
@@ -155,12 +114,6 @@ bool WritePuppetOutfit(ue::UObject* puppet, int index) {
     return ue::CallFunction(comp, L"BPF_SwapOutfit", &args);
 }
 
-
-
-
-
-
-
 bool RefreshPuppetVisualAge(ue::UObject* puppet, int age) {
     if (!puppet || !IsSafeToDress(puppet)) return false;
     ue::UObject* world = ue::GetWorld();
@@ -168,8 +121,6 @@ bool RefreshPuppetVisualAge(ue::UObject* puppet, int age) {
     ue::UObject* aging = ue::FindObjectByPath(
         L"/Game/Maps/Zoos/Newin/Aging/CharacterAging.Default__CharacterAging_C");
     if (!aging) return false;
-
-
 
     ue::UObject* local = ue::GetPlayerCharacter(world, 0);
     const int old_local_age = local ? ReadLocalAge(local) : -1;
@@ -190,7 +141,6 @@ bool RefreshPuppetVisualAge(ue::UObject* puppet, int age) {
         if (refreshed) return true;
     }
 
-
     ue::UObject* mesh = ue::GetSkeletalMeshComponent(puppet);
     if (!mesh) return false;
     struct Params {
@@ -207,9 +157,6 @@ bool RefreshPuppetVisualAge(ue::UObject* puppet, int age) {
     params.WorldContextObject = world;
     return ue::CallFunction(aging, L"updateMorphTargets", &params);
 }
-
-
-
 
 bool ReadLocalWeaponPath(ue::UObject* player, char* out, int out_size) {
     out[0] = '\0';
@@ -228,18 +175,10 @@ bool ReadLocalWeaponPath(ue::UObject* player, char* out, int out_size) {
     return ue::GetObjectPathName(data.ReturnValue, out, out_size) && out[0] != '\0';
 }
 
-
-
-
 bool g_logged_local_probe = false;
-
-
 
 int g_last_peer_age = INT_MIN;
 int g_last_peer_outfit = INT_MIN;
-
-
-
 
 constexpr const char* kCheatTags[] = {
     "Cheat.AICantDropWeapon",
@@ -377,10 +316,6 @@ bool MakeCheatTag(const char* text, ue::FName* out) {
            ue::MakeFName(wide, out);
 }
 
-
-
-
-
 bool ReadActivatedCheats(net::CheatSnapshot* out) {
     if (!out) return false;
     ue::UObject* helper = CheatHelper();
@@ -427,9 +362,6 @@ void TickCheatAuthority() {
     const DWORD now = GetTickCount();
     if (now - last_poll < 1000) return;
     last_poll = now;
-
-
-
 
     if (!net::IsConnected()) {
         if (!client_selection_saved) return;
@@ -506,7 +438,6 @@ void TickRunState(ue::UObject* player) {
     if (!net::IsConnected()) {
         TickCheatAuthority();
 
-
         if (!g_logged_local_probe) {
             const int age = ReadLocalAge(player);
             if (age >= 0) {
@@ -542,8 +473,6 @@ void TickRunState(ue::UObject* player) {
         net::SendRunState(local);
     }
 
-
-
     net::RunSnapshot peer;
     if (net::GetPeerRunState(&peer)) {
         const int peer_age = peer.age_valid ? peer.age : INT_MIN;
@@ -559,10 +488,6 @@ void TickRunState(ue::UObject* player) {
                    peer.has_weapon ? peer.weapon_path : "none");
         }
     }
-
-
-
-
 
     if (coop::Get().sync_peer_age && coop::Get().mode == coop::Mode::Coop) {
         net::RunSnapshot ages;
@@ -604,10 +529,6 @@ void TickRunState(ue::UObject* player) {
         }
     }
 
-
-
-
-
     if (coop::Get().sync_peer_age && coop::Get().mode == coop::Mode::Coop) {
         net::RunSnapshot outfit_state;
         ue::UObject* outfit_puppet = GetPuppet();
@@ -627,7 +548,6 @@ void TickRunState(ue::UObject* player) {
                     dressed_world = ue::GetWorld();
                     dressed_as = outfit_state.outfit_index;
 
-
                     if (coop::Get().sync_peer_visual_age) {
                         visual_age_puppet = outfit_puppet;
                         visual_age_world = ue::GetWorld();
@@ -643,7 +563,6 @@ void TickRunState(ue::UObject* player) {
 
     if (visual_age_puppet && visual_age_due != 0 &&
         static_cast<LONG>(now - visual_age_due) >= 0) {
-
 
         if (ue::GetWorld() != visual_age_world || GetPuppet() != visual_age_puppet) {
             visual_age_puppet = nullptr;
@@ -667,11 +586,6 @@ void TickRunState(ue::UObject* player) {
             visual_age_attempts = 0;
         }
     }
-
-
-
-
-
 
     TickCheatAuthority();
 

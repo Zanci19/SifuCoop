@@ -12,8 +12,6 @@ HANDLE g_file = INVALID_HANDLE_VALUE;
 CRITICAL_SECTION g_lock;
 bool g_lock_ready = false;
 
-
-
 void BuildLogPath(char* out, DWORD size) {
     char local[MAX_PATH] = {};
     DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", local, MAX_PATH);
@@ -55,8 +53,6 @@ void Write(const char* fmt, ...) {
     if (g_file == INVALID_HANDLE_VALUE) return;
 
     char line[2048];
-
-
 
     SYSTEMTIME st = {};
     GetLocalTime(&st);

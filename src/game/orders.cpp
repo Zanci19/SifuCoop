@@ -23,20 +23,9 @@ namespace ue = sifucoop::ue;
 namespace net = sifucoop::net;
 namespace coop = sifucoop::coop;
 
-
-
-
 using OnLocalPlayOrderFn = void(__fastcall*)(void* self, void* shared_ptr);
 
 using SaveToFn = void(__fastcall*)(void* self, void* buffer);
-
-
-
-
-
-
-
-
 
 extern "C" {
 void* g_playorder_trampoline = nullptr;
@@ -63,16 +52,6 @@ asm(".globl sifucoop_playorder_detour\n"
 
 extern "C" void sifucoop_playorder_detour();
 
-
-
-
-
-
-
-
-
-
-
 extern "C" {
 void* g_multicast_trampoline = nullptr;
 }
@@ -97,14 +76,6 @@ asm(".globl sifucoop_multicast_detour\n"
 
 extern "C" void sifucoop_multicast_detour();
 
-
-
-
-
-
-
-
-
 extern "C" {
 void* g_prepare_attack_trampoline = nullptr;
 }
@@ -127,16 +98,6 @@ asm(".globl sifucoop_prepare_attack_detour\n"
     "  jmp  *g_prepare_attack_trampoline(%rip)\n");
 
 extern "C" void sifucoop_prepare_attack_detour();
-
-
-
-
-
-
-
-
-
-
 
 extern "C" {
 void* g_launch_attack_trampoline = nullptr;
@@ -162,27 +123,11 @@ asm(".globl sifucoop_launch_attack_detour\n"
 
 extern "C" void sifucoop_launch_attack_detour();
 
-
-
-
-
-
-
-
-
-
-
-
-
 using GeNextAttackIDFn = int(__fastcall*)(const void* self, const void* character,
                                           const void* combo, unsigned int transition,
                                           void* trace);
 
 GeNextAttackIDFn g_original_next_attack_id = nullptr;
-
-
-
-
 
 using LaunchAIAttackFn = unsigned char(__fastcall*)(void* character, void* attack_component,
                                                     void* blackboard,
@@ -202,15 +147,11 @@ void* g_replay_attack_target = nullptr;
 
 void __fastcall SetNextAttackTargetHook(void* attack_component, void* target) {
 
-
-
-
     if (attack_component == g_replay_attack_component && g_replay_attack_target) {
         target = g_replay_attack_target;
     }
     g_original_set_next_attack_target(attack_component, target);
 }
-
 
 void __fastcall SetIsDownHook(void* health_component, bool down) {
 
@@ -224,11 +165,6 @@ void __fastcall SetIsDownHook(void* health_component, bool down) {
     }
     g_original_set_is_down(health_component, down);
 }
-
-
-
-
-
 
 using HealthKillFn = void(__fastcall*)(void* health_component, std::int32_t behavior,
                                       ue::UObject* instigator, ue::UObject* death_animation,
@@ -272,9 +208,6 @@ void __fastcall HealthKillHook(void* health_component, std::int32_t behavior,
     }
 }
 
-
-
-
 const void* g_forced_character = nullptr;
 int g_forced_attack_id = -1;
 
@@ -292,14 +225,6 @@ int __fastcall GeNextAttackIDHook(const void* self, const void* character, const
     return g_original_next_attack_id(self, character, combo, transition, trace);
 }
 
-
-
-
-
-
-
-
-
 using PlayOrderFn = unsigned char(__fastcall*)(void* self, unsigned int order_type,
                                                const void* net_order_struct,
                                                const void* play_order_infos);
@@ -307,19 +232,6 @@ using PlayOrderFn = unsigned char(__fastcall*)(void* self, unsigned int order_ty
 bool g_mirror_enabled = true;
 bool g_mirroring = false;
 std::uintptr_t g_module_base = 0;
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 constexpr std::size_t kOrderPayloadSize = 256;
 constexpr std::size_t kOrderScratchSize = 1024;
@@ -329,8 +241,6 @@ struct OrderWire {
     std::uint32_t vtable_rva = 0;
     std::uint8_t payload[kOrderPayloadSize] = {};
 };
-
-
 
 bool RangeReadable(const void* address, std::size_t size) {
     MEMORY_BASIC_INFORMATION info = {};
@@ -342,19 +252,6 @@ bool RangeReadable(const void* address, std::size_t size) {
     const auto end = start + info.RegionSize;
     return reinterpret_cast<std::uintptr_t>(address) + size <= end;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 const char* OrderTypeName(unsigned int type) {
     static const char* kNames[] = {
@@ -376,9 +273,6 @@ const char* OrderTypeName(unsigned int type) {
     return type < kCount ? kNames[type] : "?";
 }
 
-
-
-
 bool IsReactionOrder(unsigned int type) {
     switch (type) {
         case 3:
@@ -398,25 +292,6 @@ bool IsReactionOrder(unsigned int type) {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 struct OrderTypeStat {
     unsigned int type = 0;
     unsigned long long total = 0;
@@ -427,17 +302,11 @@ struct OrderTypeStat {
 constexpr int kOrderTypeSlots = 64;
 OrderTypeStat g_order_census[kOrderTypeSlots];
 
-
-
 DWORD g_hit_window_until = 0;
-
-
-
 
 const void* g_reaction_actor = nullptr;
 DWORD g_reaction_armed_ms = 0;
 unsigned int g_reaction_order_type = 0;
-
 
 void NoteOrderType(unsigned int type, bool from_player, bool in_hit_window) {
     for (int i = 0; i < kOrderTypeSlots; ++i) {
@@ -467,7 +336,6 @@ void DumpOrderCensus() {
     }
     if (shown == 0) return;
 
-
     SC_LOG("orders: census type:total/player/hit -- %s", line);
 }
 
@@ -475,8 +343,6 @@ extern "C" void sifucoop_on_playorder(void* self, unsigned int order_type,
                                       const void* net_order_struct,
                                       const void* play_order_infos) {
     static unsigned long long count = 0;
-
-
 
     if (g_mirroring) return;
 
@@ -487,9 +353,6 @@ extern "C" void sifucoop_on_playorder(void* self, unsigned int order_type,
     const DWORD order_now = GetTickCount();
     const bool in_hit_window = static_cast<LONG>(g_hit_window_until - order_now) > 0;
     NoteOrderType(order_type & 0xFF, from_player, in_hit_window);
-
-
-
 
     if (IsReactionOrder(order_type & 0xFF)) {
         g_reaction_actor = self;
@@ -508,15 +371,10 @@ extern "C" void sifucoop_on_playorder(void* self, unsigned int order_type,
 
     if (!from_player || !g_mirror_enabled) return;
 
-
-
-
     if (net::IsConnected()) return;
 
     ue::UObject* puppet = GetPuppet();
     if (!puppet || puppet == player) return;
-
-
 
     static unsigned long long dumped = 0;
     if (net_order_struct && ++dumped <= 10) {
@@ -528,23 +386,6 @@ extern "C" void sifucoop_on_playorder(void* self, unsigned int order_type,
         }
         SC_LOG("netstruct type=%u: %s", order_type & 0xFF, hex);
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     const void* payload = net_order_struct;
 
@@ -558,8 +399,6 @@ extern "C" void sifucoop_on_playorder(void* self, unsigned int order_type,
         SC_LOG("mirror: -> puppet type=%u result=%u", order_type & 0xFF, result);
     }
 }
-
-
 
 extern "C" void sifucoop_on_multicast(void* self, unsigned int order_type, unsigned int flag,
                                       const void* buffer) {
@@ -580,10 +419,6 @@ extern "C" void sifucoop_on_multicast(void* self, unsigned int order_type, unsig
            self, order_type & 0xFF, array_num(0), array_num(1), array_num(2), array_num(3));
 }
 
-
-
-
-
 bool LooksLikeUObject(const void* candidate) {
     const auto address = reinterpret_cast<std::uintptr_t>(candidate);
     if (address < 0x10000 || (address & 7) != 0) return false;
@@ -602,17 +437,12 @@ bool LooksLikeUObject(const void* candidate) {
     return class_vtable >= g_module_base && class_vtable - g_module_base <= 0x10000000u;
 }
 
-
-
-
-
 struct AttackIntent {
     char tree_path[256] = {};
     std::int32_t index = 0;
     std::int32_t depth = 0;
     bool valid = false;
 };
-
 
 constexpr int kOffsetDepth = 0x40;
 constexpr int kOffsetTree = 0x48;
@@ -621,20 +451,10 @@ constexpr std::size_t kDelayedActionSize = 192;
 
 AttackIntent g_last_intent;
 
-
-
-
-
 std::uint8_t g_attack_template[kDelayedActionSize] = {};
 bool g_have_template = false;
 
-
-
 bool g_template_from_player = false;
-
-
-
-
 
 struct DeferredPlayerOrder {
     std::uint32_t type = 0;
@@ -647,20 +467,7 @@ int g_deferred_player_order_count = 0;
 
 using PrepareAttackFn = unsigned char(__fastcall*)(void* self, const void* delayed_action);
 
-
-
-
-
-
-
-
-
-
-
 ue::UObject* LocalPlayerAttackComponent();
-
-
-
 
 using OrderAttackOnStartFn = void(__fastcall*)(void* order);
 OrderAttackOnStartFn g_original_order_attack_on_start = nullptr;
@@ -686,73 +493,14 @@ void ArmCosmeticSequence(const void* order, std::uint32_t actor_hash) {
     g_pending_cosmetic_sequences[0] = {order, now, actor_hash};
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 using OrderHittedOnStartFn = void(__fastcall*)(void* order);
 OrderHittedOnStartFn g_original_order_hitted_on_start = nullptr;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 struct PendingReaction {
     std::uint32_t actor_hash = 0;
     unsigned int order_type = 0;
     DWORD until_ms = 0;
     ue::UObject* last_sent = nullptr;
-    // Why the last capture attempt gave up, for the expiry message.
     const char* reason = nullptr;
 };
 constexpr int kPendingReactionCount = 8;
@@ -762,7 +510,6 @@ struct UObjectArray {
     std::int32_t num = 0;
     std::int32_t max = 0;
 };
-
 
 UObjectArray g_hit_anim_histories[kPendingReactionCount] = {};
 
@@ -777,10 +524,6 @@ void __fastcall OrderHittedOnStartHook(void* order) {
 
     if (!actor || now - g_reaction_armed_ms > 100) return;
     g_reaction_actor = nullptr;
-
-
-
-
 
     const std::uint32_t actor_hash = EnemyHashForActor(actor);
     if (actor_hash == 0) return;
@@ -797,23 +540,6 @@ void __fastcall OrderHittedOnStartHook(void* order) {
     g_pending_reactions[0] = {actor_hash, type, now + 400, nullptr};
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 void PumpReactionCaptures() {
     if (!coop::Get().mirror_hit_reactions || !net::IsConnected()) return;
     const DWORD now = GetTickCount();
@@ -823,12 +549,6 @@ void PumpReactionCaptures() {
         if (!pending.actor_hash || pending.until_ms == 0) continue;
         if (static_cast<LONG>(pending.until_ms - now) <= 0) {
 
-
-            // Only complain for orders that are supposed to HAVE a hit
-            // animation. StructureBroken and Dizzy are consequences of a hit
-            // rather than hit reactions, and Sifu appends nothing to the
-            // history for them -- counting those as failures buried the real
-            // ones in noise.
             const unsigned int t = pending.order_type;
             const bool expects_sequence = t == 3 || t == 58 || t == 12 || t == 10;
             if (!pending.last_sent && expects_sequence) {
@@ -843,12 +563,6 @@ void PumpReactionCaptures() {
             continue;
         }
 
-
-
-        // Every failure below used to be a bare `continue`, so the expiry
-        // message could not say which step failed -- call, array, type or
-        // duplicate. Four different faults shared one line. Record the last
-        // reason so the expiry message names it.
         ue::UObject* actor = FindEnemyByHash(pending.actor_hash);
         if (!actor) { pending.reason = "enemy not tracked here"; continue; }
         if (!ue::CallFunction(actor, L"GetHitAnimHistory", &history)) {
@@ -871,7 +585,6 @@ void PumpReactionCaptures() {
 
         char path[192] = {};
         if (!ue::GetObjectPathName(sequence, path, sizeof(path))) continue;
-
 
         net::SendAnimationSequence(path, pending.actor_hash,
                                    net::AnimationSemantic::Reaction);
@@ -917,14 +630,11 @@ void __fastcall OrderAttackOnStartHook(void* order) {
     SC_LOG("attack: cosmetic sequence sent after OnStart actor=%08X", actor_hash);
 }
 
-
-
 extern "C" void sifucoop_on_launch_attack(void* self, const void* order_ref,
                                           unsigned int quadrant, unsigned int flag) {
     static unsigned long long count = 0;
     if (!order_ref) return;
     const bool log_this = ++count <= 30;
-
 
     const void* order = *reinterpret_cast<const void* const*>(order_ref);
     if (!order || !RangeReadable(order, 64)) {
@@ -937,8 +647,6 @@ extern "C" void sifucoop_on_launch_attack(void* self, const void* order_ref,
 
     const auto vtable = *reinterpret_cast<const std::uintptr_t*>(order);
     const auto* words = reinterpret_cast<const std::uint32_t*>(order);
-
-
 
     const bool exact_local_component = self == LocalPlayerAttackComponent();
     if (exact_local_component && net::IsConnected() &&
@@ -960,11 +668,6 @@ extern "C" void sifucoop_on_launch_attack(void* self, const void* order_ref,
     }
 }
 
-
-
-
-
-
 ue::UObject* LocalPlayerAttackComponent() {
     ue::UObject* world = ue::GetWorld();
     ue::UObject* local = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
@@ -972,10 +675,6 @@ ue::UObject* LocalPlayerAttackComponent() {
     static ue::UObject* cached_world = nullptr;
     static ue::UObject* cached_pawn = nullptr;
     static ue::UObject* cached_component = nullptr;
-
-
-
-
 
     if (local != cached_pawn || world != cached_world) {
         cached_world = world;
@@ -997,23 +696,7 @@ extern "C" void sifucoop_on_prepare_attack(void* self, const void* delayed_actio
 
     const bool from_local_player = (self == LocalPlayerAttackComponent());
 
-
-
-
     if (!g_mirroring && LooksLikeUObject(tree)) {
-
-
-
-
-
-
-
-
-
-
-
-
-
 
         if (from_local_player || !g_have_template) {
             std::memcpy(g_attack_template, bytes, kDelayedActionSize);
@@ -1022,7 +705,6 @@ extern "C" void sifucoop_on_prepare_attack(void* self, const void* delayed_actio
         }
         if (from_local_player) {
             if (net::IsConnected() && coop::Get().remote_player_attacks) {
-
 
                 NotifyLocalAttackForCosmetic();
             }
@@ -1034,12 +716,7 @@ extern "C" void sifucoop_on_prepare_attack(void* self, const void* delayed_actio
             }
             net::SendOrderEvent(0, 0, index, depth);
 
-
         } else if (net::IsConnected() && coop::Get().echo_enemy_attacks) {
-
-
-
-
 
             const std::uint32_t hash = EnemyHashForAttackComponent(self);
             if (hash != 0 && EnemyActionsAreLocallyAuthoritative(hash)) {
@@ -1052,11 +729,6 @@ extern "C" void sifucoop_on_prepare_attack(void* self, const void* delayed_actio
             }
         }
     }
-
-
-
-
-
 
     if (++count > 8) return;
     SC_LOG("attack: #%llu comp=%p %s index=0x%X depth=%d tree=%p", count, self,
@@ -1075,31 +747,12 @@ unsigned long long g_order_count = 0;
 void __fastcall OnLocalPlayOrderHook(void* self, void* shared_ptr) {
     g_original(self, shared_ptr);
 
-
-
     ue::UObject* world = ue::GetWorld();
     ue::UObject* player = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
     if (!player || player != static_cast<ue::UObject*>(self)) return;
 
-
     void* order = shared_ptr ? *reinterpret_cast<void**>(shared_ptr) : nullptr;
     ++g_order_count;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     alignas(16) unsigned char buffer[128] = {};
     if (order && g_save_to && g_order_count <= 20) {
@@ -1111,15 +764,8 @@ void __fastcall OnLocalPlayOrderHook(void* self, void* shared_ptr) {
         SC_LOG("order: #%llu order=%p bytes=%d fnames=%d actors=%d uobjects=%d",
                g_order_count, order, array_num(0), array_num(1), array_num(2), array_num(3));
 
-
         return;
     }
-
-
-
-
-
-
 
     if (coop::Get().verbose_orders) {
         SC_LOG("order: #%llu order=%p", g_order_count, order);
@@ -1132,19 +778,11 @@ bool InstallOrderHook(std::uintptr_t base, ue::UObject* any_character) {
     if (g_installed) return true;
     if (!any_character) return false;
 
-
-
     static bool attempted = false;
     if (attempted) return false;
     attempted = true;
 
     g_save_to = reinterpret_cast<SaveToFn>(base + offsets::OrderBase_SaveTo);
-
-
-
-
-
-
 
     const void* candidates[] = {
         reinterpret_cast<void*>(base + offsets::ABaseCharacter_OnLocalPlayOrder),
@@ -1202,10 +840,6 @@ void ClearReplicatedKillInstigator() {
     g_replicated_kill_instigator = nullptr;
 }
 
-
-
-
-
 void InvalidateAttackTemplate() {
     const bool had_template = g_have_template;
     g_have_template = false;
@@ -1217,28 +851,11 @@ void InvalidateAttackTemplate() {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 bool ApplyAttackTo(ue::UObject* actor, std::int32_t attack_index, std::int32_t attack_depth) {
     if (!actor || !g_have_template || !g_prepare_attack_trampoline) return false;
 
     Fighter fighter = ResolveFighter(actor);
     if (!fighter.attack) return false;
-
-
 
     ue::UObject* tree = GetDefaultCombo(fighter);
     if (!tree) {
@@ -1254,9 +871,6 @@ bool ApplyAttackTo(ue::UObject* actor, std::int32_t attack_index, std::int32_t a
     *reinterpret_cast<std::int32_t*>(rebuilt + kOffsetIndex) = attack_index;
     *reinterpret_cast<std::int32_t*>(rebuilt + kOffsetDepth) = attack_depth;
 
-
-
-
     g_forced_character = actor;
     g_forced_attack_id = attack_index;
 
@@ -1265,16 +879,10 @@ bool ApplyAttackTo(ue::UObject* actor, std::int32_t attack_index, std::int32_t a
     prepare(fighter.attack, rebuilt);
     g_mirroring = false;
 
-
-
     g_forced_character = nullptr;
     g_forced_attack_id = -1;
     return true;
 }
-
-
-
-
 
 bool ApplyEnemyAttack(std::uint32_t actor_hash, std::int32_t attack_index,
                       std::int32_t attack_depth) {
@@ -1290,13 +898,6 @@ bool ApplyEnemyAttack(std::uint32_t actor_hash, std::int32_t attack_index,
     g_forced_attack_id = attack_index;
     g_replay_attack_component = context.attack_component;
     g_replay_attack_target = context.target;
-
-
-
-
-
-
-
 
     g_mirroring = true;
     const unsigned char prepared = g_prepare_next_ai_attack(attack_handler);
@@ -1329,8 +930,6 @@ bool ApplyEnemyAttack(std::uint32_t actor_hash, std::int32_t attack_index,
 }
 
 void WarnNoTemplate() {
-
-
 
     static bool warned = false;
     if (warned) return;
@@ -1368,9 +967,6 @@ void ApplyRemoteOrder(std::uint32_t order_type, std::int32_t attack_index,
     }
 }
 
-
-
-
 void WatchLocalPlayerForHits() {
     if (!coop::Get().verbose_orders) return;
 
@@ -1394,7 +990,6 @@ void WatchLocalPlayerForHits() {
     last_health = health;
     if (drop > 0.05f) {
 
-
         g_hit_window_until = now + 1000;
         SC_LOG("orders: YOU took %.1f (health %.0f) -- logging every order for 1s", drop,
                health);
@@ -1416,18 +1011,7 @@ void PumpRemoteOrders() {
     std::int32_t attack_index = 0;
     std::int32_t attack_depth = 0;
 
-
-
-
-
     const bool versus = coop::Get().mode == coop::Mode::Versus;
-
-
-
-
-
-
-
 
     const bool replay_player = versus || coop::Get().echo_player_attacks;
 
@@ -1456,28 +1040,12 @@ void PumpRemoteOrders() {
             continue;
         }
 
-
-
         if (!coop::Get().echo_enemy_attacks) continue;
-
-
-
-
-
-
-
-
-
 
         if (coop::Get().observer_cosmetic_enemy_attacks_only &&
             coop::Get().mode == coop::Mode::Coop) {
             continue;
         }
-
-
-
-
-
 
         if (EnemyActionsAreLocallyAuthoritative(actor_hash)) continue;
         if (ApplyEnemyAttack(actor_hash, attack_index, attack_depth)) {
@@ -1485,9 +1053,6 @@ void PumpRemoteOrders() {
         }
     }
 }
-
-
-
 
 void ReplayAttackOnPuppet() {
     if (!g_last_intent.valid || !g_have_template) {
@@ -1503,8 +1068,6 @@ void ReplayAttackOnPuppet() {
     SC_LOG("replay: index=0x%X depth=%d -> %s", g_last_intent.index, g_last_intent.depth,
            ok ? "sent" : "FAILED");
 }
-
-
 
 void ReplayAttackOnNearestEnemy() {
     if (!g_last_intent.valid) {
@@ -1552,12 +1115,7 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
         return false;
     }
 
-
-
-
     auto* target = reinterpret_cast<void*>(base + offsets::AFightingCharacter_PlayOrder);
-
-
 
     MH_STATUS status = MH_CreateHook(target, reinterpret_cast<void*>(&sifucoop_playorder_detour),
                                      &g_playorder_trampoline);
@@ -1573,9 +1131,6 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
     }
 
     SC_LOG("order: PlayOrder hook ACTIVE at %p (trampoline %p)", target, g_playorder_trampoline);
-
-
-
 
     auto* multicast =
         reinterpret_cast<void*>(base + offsets::UOrderComponent_MultiCastPlayOrder_Impl);
@@ -1621,7 +1176,6 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
             SC_LOG("death: replicated-corpse stand-up guard FAILED");
         }
     }
-
 
     g_launch_ai_attack = reinterpret_cast<LaunchAIAttackFn>(
         base + offsets::UAttackBTTask_LaunchAttack);
@@ -1697,8 +1251,3 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
 }
 
 }
-
-
-
-
-

@@ -26,21 +26,10 @@ int g_tick_slot = -1;
 std::uintptr_t g_base = 0;
 unsigned long long g_frames = 0;
 
-
 void OnFrame() {
     ++g_frames;
 
-
-
-
-
     sifucoop::game::PreparePuppetLifecycle();
-
-
-
-
-
-
 
     sifucoop::game::TickEnemies();
     sifucoop::game::TickPuppet();
@@ -54,23 +43,10 @@ void OnFrame() {
     ue::UObject* player = ue::GetPlayerCharacter(world, 0);
     if (!player) return;
 
-
-
     sifucoop::game::TickRunState(player);
-
-
-
-
-
-
-
-
 
     if (!sifucoop::game::IsOrderHookInstalled()) {
         sifucoop::game::InstallOrderHook(g_base, player);
-
-
-
 
         char path[512] = {};
         if (ue::GetObjectPathName(player, path, sizeof(path))) {
@@ -85,8 +61,6 @@ void OnFrame() {
     }
 }
 
-
-
 float g_frame_delta = 1.f / 60.f;
 
 void __fastcall TickHook(void* self, float delta_seconds, bool idle_mode) {
@@ -96,11 +70,7 @@ void __fastcall TickHook(void* self, float delta_seconds, bool idle_mode) {
         g_frame_delta = 1.f / 60.f;
     }
 
-
-
     g_original_tick(self, delta_seconds, idle_mode);
-
-
 
     OnFrame();
 }
@@ -112,8 +82,6 @@ bool InstallTickHook(std::uintptr_t base, void* gengine) {
 
     const auto target = reinterpret_cast<void*>(base + offsets::UGameEngine_Tick);
     auto** vtable = *reinterpret_cast<void***>(gengine);
-
-
 
     for (int i = 0; i < 512; ++i) {
         if (IsBadReadPtr(&vtable[i], sizeof(void*))) break;
@@ -158,4 +126,3 @@ void RemoveTickHook() {
 float FrameDeltaSeconds() { return g_frame_delta; }
 
 }
-

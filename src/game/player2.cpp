@@ -21,29 +21,15 @@ namespace ue = sifucoop::ue;
 namespace offsets = sifucoop::offsets;
 namespace coop = sifucoop::coop;
 
-
-
-
-
 ue::UObject* GameplayStatics() {
     return ue::FindObjectByPath(L"/Script/Engine.Default__GameplayStatics");
 }
 
-
-
-
 ue::UObject* g_controller = nullptr;
-
-
-
-
 
 ue::UObject* g_controller_world = nullptr;
 int g_travel_settle_frames = 0;
 std::uintptr_t g_base = 0;
-
-
-
 
 struct FKey {
     std::uint32_t comparison_index;
@@ -59,9 +45,6 @@ bool g_input_hook_installed = false;
 
 bool __fastcall PlayerControllerInputKeyHook(void* self, FKey key, std::uint32_t input_event,
                                              float amount, bool gamepad) {
-
-
-
 
     if (self && self == g_controller) return false;
     return g_input_key ? g_input_key(self, key, input_event, amount, gamepad) : false;
@@ -87,29 +70,10 @@ bool EnsureInputHook() {
     return true;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 using SetHudFn = void(__fastcall*)(void* self, void* widget);
 
 void* g_set_hud_trampoline = nullptr;
 bool g_hud_hook_installed = false;
-
-
-
-
-
 
 ue::UObject* g_primary_controller = nullptr;
 bool g_creating_second_player = false;
@@ -119,7 +83,6 @@ void __fastcall SetHudHook(void* self, void* widget) {
         self && (self == g_controller ||
                  (g_creating_second_player && self != g_primary_controller));
     if (is_second && coop::Get().hide_second_player_hud) {
-
 
         if (widget) {
             struct Empty {
@@ -156,13 +119,6 @@ bool EnsureHudHook() {
     return true;
 }
 
-
-
-
-
-
-
-
 bool InPlayableWorld(ue::UObject* world) {
     if (!coop::Get().second_player_in_gameplay_only) return true;
     if (!world) return false;
@@ -178,20 +134,9 @@ bool InPlayableWorld(ue::UObject* world) {
     return true;
 }
 
-
 bool g_retired = false;
 
-
-
-
-
 int g_view_reassert_frames = 0;
-
-
-
-
-
-
 
 void ForceDisableSplitscreen(ue::UObject* world, bool disable) {
     ue::UObject* statics = GameplayStatics();
@@ -213,8 +158,6 @@ void ForceDisableSplitscreen(ue::UObject* world, bool disable) {
     }
 }
 
-
-
 ue::UObject* PlayerControllerAt(ue::UObject* world, std::int32_t index) {
     if (!world) return nullptr;
     ue::UObject* statics = GameplayStatics();
@@ -230,9 +173,6 @@ ue::UObject* PlayerControllerAt(ue::UObject* world, std::int32_t index) {
     if (!ue::CallFunction(statics, L"GetPlayerController", &params)) return nullptr;
     return params.ReturnValue;
 }
-
-
-
 
 bool SecondPlayerWorldReady(ue::UObject* world) {
     if (!world) return false;
@@ -253,7 +193,6 @@ bool SecondPlayerWorldReady(ue::UObject* world) {
     return true;
 }
 
-
 ue::UObject* PawnOf(ue::UObject* controller) {
     if (!controller) return nullptr;
     struct Params {
@@ -262,7 +201,6 @@ ue::UObject* PawnOf(ue::UObject* controller) {
     if (!ue::CallFunction(controller, L"K2_GetPawn", &params)) return nullptr;
     return params.ReturnValue;
 }
-
 
 bool Possess(ue::UObject* controller, ue::UObject* pawn) {
     if (!controller || !pawn) return false;
@@ -280,19 +218,6 @@ bool UnPossess(ue::UObject* controller) {
     return ue::CallFunction(controller, L"UnPossess", &none);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 bool ReturnStolenPawnAndRehouse(ue::UObject* second_controller,
                                 ue::UObject* first_controller,
                                 ue::UObject* stolen_pawn) {
@@ -306,7 +231,6 @@ bool ReturnStolenPawnAndRehouse(ue::UObject* second_controller,
         return false;
     }
     SC_LOG("player2: returned player one's character (%p)", static_cast<void*>(stolen_pawn));
-
 
     ue::FVector location = {};
     ue::FRotator rotation = {};
@@ -333,11 +257,6 @@ bool ReturnStolenPawnAndRehouse(ue::UObject* second_controller,
            static_cast<void*>(fresh), location.X, location.Y, location.Z);
     return true;
 }
-
-
-
-
-
 
 ue::UObject* RehouseSecondPlayerAfterTravel(ue::UObject* second_controller) {
     ue::UObject* world = ue::GetWorld();
@@ -373,11 +292,6 @@ ue::UObject* RehouseSecondPlayerAfterTravel(ue::UObject* second_controller) {
     return fresh;
 }
 
-
-
-
-
-
 void LogPlayerTable(const char* when) {
     ue::UObject* world = ue::GetWorld();
     ue::UObject* statics = GameplayStatics();
@@ -404,13 +318,6 @@ void LogPlayerTable(const char* when) {
                pawn ? path : "(none)");
     }
 }
-
-
-
-
-
-
-
 
 void RestorePrimaryView() {
     ue::UObject* world = ue::GetWorld();
@@ -443,8 +350,6 @@ void RestorePrimaryView() {
     } unused = {};
     (void)unused;
 
-
-
     struct alignas(8) Params {
         ue::UObject* NewViewTarget;
         float BlendTime;
@@ -464,28 +369,6 @@ void RestorePrimaryView() {
                static_cast<void*>(first_pawn));
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 struct SuppressedComponent {
     std::uint32_t rva;
@@ -542,11 +425,6 @@ bool EnsureUiHooks() {
     return true;
 }
 
-
-
-
-
-
 void SilenceLocalInput(ue::UObject* controller, ue::UObject* pawn) {
     (void)pawn;
     if (!controller) {
@@ -557,10 +435,6 @@ void SilenceLocalInput(ue::UObject* controller, ue::UObject* pawn) {
     if (g_input_hook_installed) {
         SC_LOG("player2: input isolated at APlayerController::InputKey (network movement retained)");
     } else {
-
-
-
-
 
         struct BoolParam {
             std::uint8_t value[8];
@@ -587,8 +461,6 @@ void SilenceLocalInput(ue::UObject* controller, ue::UObject* pawn) {
     }
 }
 
-
-
 void SuppressMenus(ue::UObject* controller) {
     if (!controller) return;
     struct Empty {
@@ -597,12 +469,6 @@ void SuppressMenus(ue::UObject* controller) {
         SC_LOG("player2: in-game menu disabled for the second controller");
     }
 }
-
-
-
-
-
-
 
 bool IgnorePawnCollision(ue::UObject* pawn) {
     if (!pawn) return false;
@@ -630,17 +496,6 @@ void ConfigurePawn(ue::UObject* pawn) {
     ue::UObject* primary = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
     const int primary_faction = primary ? GetFaction(primary) : -1;
     if (primary_faction >= 0) SetFaction(pawn, primary_faction);
-
-
-
-
-
-
-
-
-
-
-
 
     struct CollisionParams {
         std::uint8_t bNewActorEnableCollision[8];
@@ -706,8 +561,6 @@ ue::UObject* CreateSecondPlayer() {
         ue::UObject* existing = PawnOf(current);        if (existing) {
             if (g_retired) {
 
-
-
                 struct HideParams {
                     std::uint8_t bNewHidden[8];
                 } show = {};
@@ -716,8 +569,6 @@ ue::UObject* CreateSecondPlayer() {
                     std::uint8_t bNewActorEnableCollision[8];
                 } collision = {};
                 collision.bNewActorEnableCollision[0] = 1;
-
-
 
                 ue::CallFunction(existing, L"SetActorEnableCollision", &collision);
                 g_retired = false;
@@ -734,7 +585,6 @@ ue::UObject* CreateSecondPlayer() {
         SC_LOG("player2: GameplayStatics default object not found");
         return nullptr;
     }
-
 
     ue::UObject* first_controller = nullptr;
     ue::UObject* first_pawn_before = nullptr;
@@ -755,14 +605,7 @@ ue::UObject* CreateSecondPlayer() {
 
     LogPlayerTable("before");
 
-
-
     if (coop::Get().second_player_disable_splitscreen) ForceDisableSplitscreen(world, true);
-
-
-
-
-
 
     struct alignas(8) Params {
         ue::UObject* WorldContextObject;
@@ -784,9 +627,7 @@ ue::UObject* CreateSecondPlayer() {
         SC_LOG("player2: InputKey hook unavailable; using controlled input-ignore fallback");
     }
 
-
     if (coop::Get().hide_second_player_hud) EnsureHudHook();
-
 
     g_primary_controller = first_controller;
     g_suppress_ui = true;
@@ -803,8 +644,6 @@ ue::UObject* CreateSecondPlayer() {
     }
 
     if (!params.ReturnValue) {
-
-
 
         SC_LOG("player2: CreatePlayer returned NULL -- the game mode refused a second player");
         coop::ReportProblem("the game refused to create a second player");
@@ -829,8 +668,6 @@ ue::UObject* CreateSecondPlayer() {
     ue::UObject* pawn = PawnOf(g_controller);
     if (!pawn) {
 
-
-
         SC_LOG("player2: controller has NO pawn yet (game mode may spawn it late)");
         return nullptr;
     }
@@ -841,9 +678,6 @@ ue::UObject* CreateSecondPlayer() {
     ue::GetActorLocation(pawn, &where);
     SC_LOG("player2: REAL SECOND PLAYER pawn %p at (%.0f, %.0f, %.0f) -- %s",
            static_cast<void*>(pawn), where.X, where.Y, where.Z, path);
-
-
-
 
     if (first_pawn_before && pawn == first_pawn_before && first_controller &&
         first_controller != g_controller) {
@@ -884,8 +718,6 @@ ue::UObject* MaintainSecondPlayer() {
 
     if (!g_controller) {
 
-
-
         static DWORD last_attempt = 0;
         const DWORD now = GetTickCount();
         if (now - last_attempt < 2000) return nullptr;
@@ -898,22 +730,7 @@ ue::UObject* MaintainSecondPlayer() {
         RestorePrimaryView();
     }
 
-
-
     ue::UObject* pawn = PawnOf(g_controller);
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     ue::UObject* first_controller = PlayerControllerAt(world, 0);
     ue::UObject* first_pawn = PawnOf(first_controller);
@@ -936,14 +753,11 @@ ue::UObject* MaintainSecondPlayer() {
             }
         } else {
 
-
             return nullptr;
         }
     } else {
         primary_pawnless_since = 0;
     }
-
-
 
     if (pawn && pawn == ue::GetPlayerCharacter(world, 0)) {
         static bool warned = false;
@@ -953,10 +767,6 @@ ue::UObject* MaintainSecondPlayer() {
         }
         return nullptr;
     }
-
-
-
-
 
     static DWORD pawn_missing_since = 0;
     static DWORD last_rehouse_attempt = 0;
@@ -1004,29 +814,13 @@ void RemoveSecondPlayer() {
     ue::UObject* current = PlayerControllerAt(world, 1);
     if (!current) {
 
-
         g_controller = nullptr;
         g_retired = false;
         return;
     }
     g_controller = current;
 
-
-
     if (g_retired) return;
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     ue::UObject* pawn = PawnOf(g_controller);
     if (pawn) {

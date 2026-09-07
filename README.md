@@ -15,6 +15,8 @@ Sifu\Binaries\Win64\
 **[SETUP.md](SETUP.md)** is the install and first-connection guide, and has a step-by-step
 test list that isolates a failure to one layer. **[COOP-PLAN.md](COOP-PLAN.md)** is the
 engineering account: what works, what is approximate, what is untried, and why.
+**[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)** explains the codebase, networking model,
+Unreal integration, debugging workflow, and safe contribution process.
 
 ## Install
 

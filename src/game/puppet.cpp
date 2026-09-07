@@ -30,18 +30,12 @@ namespace net = sifucoop::net;
 namespace ui = sifucoop::ui;
 namespace coop = sifucoop::coop;
 
-
-
-
-
-
 constexpr std::uintptr_t kClassPrivateOffset = 0x10;
 
 using SpawnActorFn = ue::UObject*(__fastcall*)(void* world, void* uclass, const ue::FVector*,
                                                const ue::FRotator*, const void* params);
 
 SpawnActorFn g_spawn_actor = nullptr;
-
 
 using PlayerAnimUpdateFn = void(__fastcall*)(ue::UObject*, float);
 using PlayerAnimSetSpeedStateFn = void(__fastcall*)(ue::UObject*, std::uint8_t);
@@ -64,35 +58,7 @@ int g_puppet_last_commanded_speed_band = -1;
 DWORD g_puppet_band_candidate_since = 0;
 DWORD g_puppet_band_held_since = 0;
 
-
-
 PresentationTargets g_puppet_presentation_targets;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 struct EnemyPresentation {
     ue::UObject* anim_instance = nullptr;
@@ -104,23 +70,16 @@ struct EnemyPresentation {
     DWORD candidate_since = 0;
     DWORD until = 0;
 };
-constexpr int kEnemyPresentationSlots = 24;
+constexpr int kEnemyPresentationSlots = 96;
 EnemyPresentation g_enemy_presentation[kEnemyPresentationSlots];
 
-
-
-
-int EnemyBandForSpeed(float speed) {
-    if (speed <= 20.f) return 0;
-    if (speed < 240.f) return 1;
-    if (speed < 475.f) return 2;
-    return 3;
-}
+// Enemies share UPlayerAnim with the player, so their own V0/V1/V2 thresholds
+// are readable; see CODE-NOTES.md.
+int BandForSpeedFromAnim(const std::uint8_t* bytes, float speed);
 
 void ForgetEnemyPresentation() {
     for (EnemyPresentation& slot : g_enemy_presentation) slot = {};
 }
-
 
 void NoteEnemyPresentation(ue::UObject* actor, const ue::FVector& velocity) {
     ue::UObject* anim_instance = ue::GetAnimInstance(actor);
@@ -144,7 +103,8 @@ void NoteEnemyPresentation(ue::UObject* actor, const ue::FVector& velocity) {
 
     const float speed =
         sqrtf(velocity.X * velocity.X + velocity.Y * velocity.Y);
-    const int wanted = EnemyBandForSpeed(speed);
+    const int wanted =
+        BandForSpeedFromAnim(reinterpret_cast<const std::uint8_t*>(anim_instance), speed);
 
     if (slot->anim_instance != anim_instance || slot->world != ue::GetWorld()) {
         *slot = {};
@@ -157,9 +117,6 @@ void NoteEnemyPresentation(ue::UObject* actor, const ue::FVector& velocity) {
     }
     slot->velocity = velocity;
 
-
-
-
     constexpr DWORD kBandSettleMs = 120;
     if (wanted != slot->candidate_band) {
         slot->candidate_band = wanted;
@@ -170,26 +127,13 @@ void NoteEnemyPresentation(ue::UObject* actor, const ue::FVector& velocity) {
     slot->until = now + 400;
 }
 
-
-
-
-
-
-
-
-
 ue::UObject* g_puppet_targets_world = nullptr;
-
-
 
 ue::UObject* g_puppet = nullptr;
 ue::UObject* g_puppet_world = nullptr;
 bool g_coop_started = false;
 char g_announced_level[192] = {};
 bool g_lobby_was_connected = false;
-
-
-
 
 DWORD g_cosmetic_attack_montage_until = 0;
 DWORD g_puppet_cinematic_until = 0;
@@ -205,12 +149,6 @@ CosmeticCinematic g_enemy_cinematics[kCosmeticCinematicCount] = {};
 
 bool g_arrival_teleport_pending = false;
 
-
-
-
-
-
-
 constexpr int kSampleCount = 256;
 constexpr int kFollowDelayFrames = 120;
 
@@ -225,16 +163,10 @@ int g_sample_head = 0;
 int g_samples_since_reset = 0;
 bool g_follow_enabled = false;
 
-
-
-
 ue::UObject* g_last_player = nullptr;
 
 ue::FVector g_last_local_location;
 bool g_have_local_velocity = false;
-
-
-
 
 constexpr std::uintptr_t kAnimOwnerVelocity = 0x0FB4;
 constexpr std::uintptr_t kAnimOwnerVelocityLength = 0x0FC0;
@@ -249,9 +181,6 @@ constexpr std::uintptr_t kAnimMoveStatus = 0x1C29;
 constexpr std::uintptr_t kAnimSpeedState = 0x1C2D;
 constexpr std::uintptr_t kAnimSpeedStateAlphaV0 = 0x1C44;
 
-
-
-
 constexpr std::uintptr_t kAnimCinematicOverallWeight = 0x0378;
 constexpr std::uintptr_t kAnimCinematicLayerCursor = 0x037C;
 
@@ -259,6 +188,37 @@ float ReadFloatAt(const std::uint8_t* bytes, std::uintptr_t offset) {
     float value = 0.f;
     std::memcpy(&value, bytes + offset, sizeof(value));
     return value;
+}
+
+// Returns true when the character's own thresholds were readable. The bounds
+// are deliberately wide but finite: three ascending positive floats can occur in
+// unrelated memory, and a false positive here silently picks wrong animations.
+bool ReadLocomotionThresholds(const std::uint8_t* bytes, float* v0, float* v1, float* v2) {
+    *v0 = 20.f;
+    *v1 = 240.f;
+    *v2 = 475.f;
+    if (!bytes) return false;
+
+    const float a = ReadFloatAt(bytes, kAnimVelocityMaxV0);
+    const float b = ReadFloatAt(bytes, kAnimVelocityMaxV1);
+    const float c = ReadFloatAt(bytes, kAnimVelocityMaxV2);
+    if (!(a > 0.f && a <= 200.f)) return false;
+    if (!(b > a && b <= 800.f)) return false;
+    if (!(c > b && c <= 2000.f)) return false;
+
+    *v0 = a;
+    *v1 = b;
+    *v2 = c;
+    return true;
+}
+
+int BandForSpeedFromAnim(const std::uint8_t* bytes, float speed) {
+    float v0 = 0.f, v1 = 0.f, v2 = 0.f;
+    ReadLocomotionThresholds(bytes, &v0, &v1, &v2);
+    if (speed <= v0) return 0;
+    if (speed < v1) return 1;
+    if (speed < v2) return 2;
+    return 3;
 }
 
 void WriteCinematicWeight(std::uint8_t* bytes, float weight) {
@@ -307,57 +267,30 @@ void TickEnemyCinematics() {
     }
 }
 
-
-
-
-
-
-
-
 int RawSpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
 
-
-
-
-    static bool announced = false;
-    float v0 = ReadFloatAt(bytes, kAnimVelocityMaxV0);
-    float v1 = ReadFloatAt(bytes, kAnimVelocityMaxV1);
-    float v2 = ReadFloatAt(bytes, kAnimVelocityMaxV2);
-    if (!(v0 > 0.f && v1 > v0 && v2 > v1)) {
-
-
-
-
-        v0 = 20.f;
-        v1 = 240.f;
-        v2 = 475.f;
-        if (!announced) {
-            announced = true;
+    static const std::uint8_t* announced_for = nullptr;
+    static bool announced_fallback = false;
+    float v0 = 0.f, v1 = 0.f, v2 = 0.f;
+    const bool usable = ReadLocomotionThresholds(bytes, &v0, &v1, &v2);
+    if (announced_for != bytes || announced_fallback != !usable) {
+        announced_for = bytes;
+        announced_fallback = !usable;
+        if (usable) {
+            SC_LOG("puppet: locomotion thresholds read from the character: %.0f/%.0f/%.0f",
+                   v0, v1, v2);
+        } else {
             SC_LOG("puppet: locomotion thresholds UNAVAILABLE on this anim instance -- "
                    "using the fallback %.0f/%.0f/%.0f, so any band disagreement with Sifu "
                    "is probably ours",
                    v0, v1, v2);
         }
-    } else if (!announced) {
-        announced = true;
-        SC_LOG("puppet: locomotion thresholds read from the character: %.0f/%.0f/%.0f",
-               v0, v1, v2);
     }
     if (speed <= v0) return 0;
     if (speed < v1) return 1;
     if (speed < v2) return 2;
     return 3;
 }
-
-
-
-
-
-
-
-
-
-
 
 int SpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
     const int raw = RawSpeedStateForSpeed(bytes, speed);
@@ -375,8 +308,6 @@ int SpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
         return g_puppet_held_speed_band;
     }
 
-
-
     const DWORD confirm_ms = raw > g_puppet_held_speed_band ? 60u : 180u;
     const DWORD minimum_hold_ms = 150u;
     if (now - g_puppet_band_candidate_since < confirm_ms) return g_puppet_held_speed_band;
@@ -389,24 +320,10 @@ int SpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
 }
 
 void __fastcall SCAnimUpdateHook(ue::UObject* anim_instance, float delta_seconds) {
-    if (g_original_sc_anim_update) g_original_sc_anim_update(anim_instance, delta_seconds);
-
-
-
-
-
-
     const DWORD now = GetTickCount();
-    for (CosmeticCinematic& active : g_enemy_cinematics) {
-        if (active.anim_instance != anim_instance || now >= active.until) continue;
-        WriteCinematicWeight(reinterpret_cast<std::uint8_t*>(anim_instance), 1.f);
-        break;
-    }
 
-
-
-
-
+    // Velocity and band are graph inputs, so they must land before the original
+    // samples them; see CODE-NOTES.md.
     for (EnemyPresentation& driven : g_enemy_presentation) {
         if (driven.anim_instance != anim_instance) continue;
         if (static_cast<LONG>(now - driven.until) >= 0) break;
@@ -415,11 +332,17 @@ void __fastcall SCAnimUpdateHook(ue::UObject* anim_instance, float delta_seconds
         SetMovementSpeedState(driven.targets.movement, driven.band);
         break;
     }
+
+    if (g_original_sc_anim_update) g_original_sc_anim_update(anim_instance, delta_seconds);
+
+    for (CosmeticCinematic& active : g_enemy_cinematics) {
+        if (active.anim_instance != anim_instance || now >= active.until) continue;
+        WriteCinematicWeight(reinterpret_cast<std::uint8_t*>(anim_instance), 1.f);
+        break;
+    }
 }
 
 void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_seconds) {
-
-
 
     const bool is_puppet_anim = anim_instance && anim_instance == g_puppet_anim_instance;
     const bool inject = is_puppet_anim && g_have_puppet_presentation_velocity;
@@ -431,27 +354,6 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
                       g_puppet_presentation_velocity.Y *
                           g_puppet_presentation_velocity.Y);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         const bool targets_live = g_puppet_targets_world == ue::GetWorld();
 
         if (targets_live) {
@@ -459,48 +361,11 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
                                       g_puppet_presentation_velocity);
         }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         if (targets_live) {
             const int wanted_band = SpeedStateForSpeed(bytes, speed);
             const int graph_band_now = bytes[kAnimSpeedState + 4];
 
-            // Command on a change, and ALSO when the graph simply did not take
-            // it. Latching on our own wanted value alone is why the band stayed
-            // wrong: we issue V0 once, the movement component does not adopt it,
-            // and the latch then says "already V0" forever. The 07:09 log is
-            // full of that -- `ours 0/V0, Sifu's 0/V3`, a standing body playing
-            // a sprint, and `ours 850/V3, Sifu's 850/V1`, a sprinting body
-            // playing a walk. 25 disagreements against 7 agreements.
-            //
-            // Re-asserting cannot go back to being per-frame: BaseMovementDB
-            // gives these transitions 0.3-1.0 s and a command restarts the blend
-            // it interrupts. So a disagreement is re-commanded at most every
-            // 400 ms, which is slower than any blend can be restarted by it and
-            // still fast enough that a wrong band cannot persist.
+            // Re-command at most every 400 ms; see CODE-NOTES.md.
             const DWORD band_now = GetTickCount();
             static DWORD last_band_command = 0;
             const bool wanted_changed = wanted_band != g_puppet_last_commanded_speed_band;
@@ -534,17 +399,11 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
 
     if (!inject) return;
 
-
-
-
-
-
     const float native_speed = ReadFloatAt(bytes, kAnimOwnerVelocityLength);
     const float tolerance = speed * 0.25f > 8.f ? speed * 0.25f : 8.f;
     const bool native_agrees = fabsf(native_speed - speed) <= tolerance;
 
     const int wanted = SpeedStateForSpeed(bytes, speed);
-
 
     const int graph_band = bytes[kAnimSpeedState + 4];
     const bool band_accepted = graph_band == wanted;
@@ -553,11 +412,6 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
     const int mode = (native_agrees ? 1 : 0) | (band_accepted ? 2 : 0);
     if (mode != last_mode) {
         last_mode = mode;
-
-
-
-
-
 
         SC_LOG("puppet: locomotion speed %s, band %s (ours %.0f/V%d, Sifu's %.0f/V%d)",
                native_agrees ? "agreed" : "RECOMPUTED IDLE",
@@ -568,10 +422,6 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
                            : "transition commanded; graph blending"),
                speed, wanted, native_speed, graph_band);
     }
-
-
-
-
 
     static DWORD last_dump = 0;
     const DWORD now = GetTickCount();
@@ -591,10 +441,6 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
                bytes[kAnimMoveStatus + 3]);
     }
 
-
-
-
-
     if (band_accepted || graph_band != 0 || speed <= 25.f) return;
 
     const int state = wanted;
@@ -611,9 +457,6 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
     float speed_alphas[4] = {};
     speed_alphas[state] = 1.f;
     std::memcpy(bytes + kAnimSpeedStateAlphaV0, speed_alphas, sizeof(speed_alphas));
-
-
-
 
 }
 
@@ -664,32 +507,12 @@ void RecordSample(const ue::FVector& location, const ue::FRotator& rotation) {
     if (g_samples_since_reset < kSampleCount) ++g_samples_since_reset;
 }
 
-
-
 constexpr float kSnapDistance = 600.f;
 constexpr float kVerticalSnap = 250.f;
 
-
-
-
-
 constexpr float kYawSmoothing = 0.25f;
 
-
-
-
-
 constexpr float kPositionCorrection = 0.30f;
-
-
-
-
-
-
-
-
-
-
 
 float FrameRateAdjusted(float fraction_at_60) {
     const float dt = sifucoop::hooks::FrameDeltaSeconds();
@@ -700,13 +523,8 @@ float FrameRateAdjusted(float fraction_at_60) {
     return alpha;
 }
 
-
-
-
-
 void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
              const ue::FRotator& rotation, const ue::FVector& reported_velocity, bool is_puppet) {
-
 
     ue::FVector current = {};
     if (!ue::GetActorLocation(target_actor, &current)) {
@@ -718,14 +536,6 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
     const float dy = target.Y - current.Y;
     const float dz = target.Z - current.Z;
     const float distance = sqrtf(dx * dx + dy * dy);
-
-
-
-
-
-
-
-
 
     static DWORD stats_since = 0;
     static double distance_sum = 0.0;
@@ -740,7 +550,6 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
     if (distance > distance_peak) distance_peak = distance;
     ++distance_samples;
     if (stats_now - stats_since >= 5000) {
-
 
         std::uint32_t fallbacks = 0;
         std::uint32_t hard = 0;
@@ -763,10 +572,6 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
     }
     }
 
-
-
-
-
     ue::FRotator new_rotation = rotation;
     ue::FRotator current_rotation = {};
     if (ue::GetActorRotation(target_actor, &current_rotation)) {
@@ -776,29 +581,16 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
         new_rotation.Yaw = current_rotation.Yaw + delta * FrameRateAdjusted(kYawSmoothing);
     }
 
-
     if (distance > kSnapDistance || fabsf(dz) > kVerticalSnap) {
         if (is_puppet) ++snap_count;
         TeleportActor(target_actor, target, new_rotation);
         return;
     }
 
-
-
-
-
-
-
-
-
-
     if (is_puppet) {
         const float alpha = FrameRateAdjusted(kPositionCorrection);
         ue::FVector corrected = {current.X + dx * alpha, current.Y + dy * alpha,
                                  current.Z + dz * alpha};
-
-
-
 
         ue::FVector presentation_velocity = {reported_velocity.X, reported_velocity.Y, 0.f};
         float presentation_speed = sqrtf(presentation_velocity.X * presentation_velocity.X +
@@ -809,7 +601,6 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
             presentation_velocity.X *= scale;
             presentation_velocity.Y *= scale;
         } else if (presentation_speed <= 18.f && distance > 35.f) {
-
 
             const float frame_seconds = sifucoop::hooks::FrameDeltaSeconds();
             if (frame_seconds > 0.001f) {
@@ -828,20 +619,17 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
         g_have_puppet_presentation_velocity = true;
         g_puppet_anim_instance = ue::GetAnimInstance(target_actor);
 
-
         static ue::UObject* resolved_for = nullptr;
-        if (resolved_for != target_actor) {
+        ue::UObject* resolve_world = ue::GetWorld();
+        if (resolved_for != target_actor || g_puppet_targets_world != resolve_world) {
             resolved_for = target_actor;
             g_puppet_presentation_targets = ResolvePresentationTargets(target_actor);
-            g_puppet_targets_world = ue::GetWorld();
+            g_puppet_targets_world = resolve_world;
         }
         if (!TeleportActor(target_actor, corrected, new_rotation)) ++correction_failed;
         WritePresentationVelocity(g_puppet_presentation_targets, presentation_velocity);
         return;
     }
-
-
-
 
     {
         const float alpha = FrameRateAdjusted(kPositionCorrection);
@@ -859,19 +647,7 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
         TeleportActor(target_actor, corrected, new_rotation);
         SetPresentationVelocity(target_actor, presentation_velocity);
 
-
-
         NoteEnemyPresentation(target_actor, presentation_velocity);
-
-
-
-
-
-
-
-
-
-
 
         int band = 0;
         if (speed > 18.f) band = speed < 280.f ? 1 : (speed < 600.f ? 2 : 3);
@@ -881,9 +657,7 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
 
 }
 
-
 void DrivePuppetFromSamples(ue::UObject* puppet) {
-
 
     if (g_samples_since_reset <= kFollowDelayFrames) return;
 
@@ -901,25 +675,6 @@ void* GetObjectClass(ue::UObject* object) {
                                      kClassPrivateOffset);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 bool EnsureRemoteVisible(ue::UObject* puppet, bool log_result) {
     if (!puppet) return false;
     struct HiddenParams {
@@ -930,30 +685,11 @@ bool EnsureRemoteVisible(ue::UObject* puppet, bool log_result) {
     return ok;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
     const int player_faction = GetFaction(player);
     const bool coop_mode = coop::Get().mode == coop::Mode::Coop;
 
     if (player_faction >= 0) {
-
-
-
-
 
         const int target = coop_mode ? player_faction : (player_faction == 1 ? 0 : 1);
         SetFaction(puppet, target);
@@ -963,11 +699,6 @@ void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
         SC_LOG("puppet: could not read your faction -- leaving the puppet's alone");
     }
 
-
-
-
-
-
     struct CollisionParams {
         std::uint8_t bNewActorEnableCollision[8];
     } collision = {};
@@ -975,14 +706,6 @@ void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
     const bool collision_on =
         ue::CallFunction(puppet, L"SetActorEnableCollision", &collision);
     SC_LOG("puppet: world collision %s", collision_on ? "enabled" : "FAILED");
-
-
-
-
-
-
-
-
 
     struct ComponentParams {
         void* ComponentClass;
@@ -1009,8 +732,6 @@ void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
                              : (pawn_ignore ? "ignored" : "FAILED"),
            capsule_class || !want_pawn_ignore ? "" : " (CapsuleComponent class unavailable)");
 
-
-
     const bool invincible = coop::Get().puppet_invincible;
     SetInvincible(puppet, invincible);
     if (!invincible) {
@@ -1018,11 +739,6 @@ void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
                "decides their health; this is only to see whether enemies will commit");
     }
     EnsureRemoteVisible(puppet, true);
-
-
-
-
-
 
     struct Empty {
     } none = {};
@@ -1032,15 +748,6 @@ void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
         SC_LOG("puppet: SpawnDefaultController unavailable -- expect sliding");
     }
 
-
-
-
-
-
-
-
-
-
     if (StopBrain(puppet)) {
         SC_LOG("puppet: AI brain STOPPED -- it had one, and it was fighting the drive");
     } else {
@@ -1048,29 +755,7 @@ void ConfigureAsRemote(ue::UObject* puppet, ue::UObject* player) {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 namespace rel = sifucoop::game::relationship;
-
-
-
 
 int DiscoverFriendlyRelationValue() {
     EnemyRow rows[64];
@@ -1096,21 +781,10 @@ int g_relationship_that_stuck = rel::kUnknown;
 DWORD g_next_relationship_attempt = 0;
 bool g_relationship_writes_land = false;
 
-
 bool TrySetRelationshipBothWays(ue::UObject* player, ue::UObject* puppet, int value,
                                 int* out_player, int* out_puppet) {
     ue::UObject* player_social = GetSocialComponent(player);
     ue::UObject* puppet_social = GetSocialComponent(puppet);
-
-
-
-
-
-
-
-
-
-
 
     const int was_actor = ReadRelationship(player, puppet);
     const int was_comp = ReadRelationshipViaComponent(player, puppet);
@@ -1123,7 +797,6 @@ bool TrySetRelationshipBothWays(ue::UObject* player, ue::UObject* puppet, int va
     const int back_player = ReadRelationship(player, puppet);
     const int back_puppet = ReadRelationship(puppet, player);
 
-
     const int back_comp = ReadRelationshipViaComponent(player, puppet);
     if (out_player) *out_player = back_player;
     if (out_puppet) *out_puppet = back_puppet;
@@ -1132,8 +805,6 @@ bool TrySetRelationshipBothWays(ue::UObject* player, ue::UObject* puppet, int va
     const bool held_component = back_comp == value;
     const bool map_grew = RelationshipMapProbeTrusted() && before >= 0 && after > before;
     if (held || held_component || map_grew) g_relationship_writes_land = true;
-
-
 
     static int last_shape = -1;
     const int shape = (was_actor + 1) * 100000 + (was_comp + 1) * 10000 +
@@ -1151,28 +822,12 @@ bool TrySetRelationshipBothWays(ue::UObject* player, ue::UObject* puppet, int va
     return held || held_component;
 }
 
-
-
-
-
-
-
-
-
-
-
-
 void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
     const coop::Config& config = coop::Get();
-
 
     if (!config.friendly_relationship && !config.remote_player_attacks) return;
     if (config.mode != coop::Mode::Coop) return;
     if (!player || !puppet) return;
-
-
-
-
 
     static ue::UObject* applied_world = nullptr;
     ue::UObject* world = ue::GetWorld();
@@ -1195,12 +850,10 @@ void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
     const DWORD now = GetTickCount();
     if (g_next_relationship_attempt != 0 && now < g_next_relationship_attempt) return;
 
-
     g_next_relationship_attempt = now + (g_friendly_verified ? 3000 : 1000);
 
     int back_player = rel::kUnknown;
     int back_puppet = rel::kUnknown;
-
 
     if (g_relationship_that_stuck != rel::kUnknown) {
         const bool still = TrySetRelationshipBothWays(player, puppet, g_relationship_that_stuck,
@@ -1229,17 +882,6 @@ void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
         return;
     }
 
-
-
-
-
-
-
-
-
-
-
-
     static int last_reported = -2;
     if (last_reported != back_player) {
         last_reported = back_player;
@@ -1251,8 +893,6 @@ void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
 }
 
 bool g_peer_was_down = false;
-
-
 
 bool g_puppet_auto_spawned = false;
 
@@ -1267,12 +907,6 @@ void ApplyPeerVitals(ue::UObject* puppet, const net::PeerVitals& vitals) {
         return;
     }
 
-
-
-
-
-
-
     if (puppet == PrimaryPlayerPawn()) {
         static bool warned_primary = false;
         if (!warned_primary) {
@@ -1286,17 +920,6 @@ void ApplyPeerVitals(ue::UObject* puppet, const net::PeerVitals& vitals) {
     if (coop::Get().mirror_peer_vitals && vitals.max_health > 0.f) {
         SetHealth(fighter, vitals.health);
         SetGuard(fighter, vitals.guard);
-
-
-
-
-
-
-
-
-
-
-
 
         const float puppet_max = GetMaxHealth(fighter);
         static float last_reported_gap = -1.f;
@@ -1313,52 +936,37 @@ void ApplyPeerVitals(ue::UObject* puppet, const net::PeerVitals& vitals) {
         }
     }
 
-    if (vitals.is_down == g_peer_was_down) return;
+    const bool reported_changed = vitals.is_down != g_peer_was_down;
+    const bool body_disagrees = IsDown(fighter) != vitals.is_down;
+    static DWORD last_down_reassert = 0;
+    const DWORD down_now = GetTickCount();
+    if (!reported_changed) {
+        if (!body_disagrees) return;
+        if (last_down_reassert != 0 && down_now - last_down_reassert < 500) return;
+    }
+    last_down_reassert = down_now;
     g_peer_was_down = vitals.is_down;
 
-
-
-
     SetDown(fighter, vitals.is_down);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     const bool peer_is_dead = vitals.max_health > 0.f && vitals.health <= 0.5f;
     if (vitals.is_down && peer_is_dead) {
         NotifyDownStateChanged(fighter, true);
     } else if (!vitals.is_down) {
 
-
-
         NotifyDownStateChanged(fighter, false);
     }
-    SC_LOG("puppet: peer %s%s", vitals.is_down ? "went DOWN" : "got back up",
-           vitals.is_down && !peer_is_dead ? " (knockdown -- state only)" : "");
+    if (reported_changed) {
+        SC_LOG("puppet: peer %s%s", vitals.is_down ? "went DOWN" : "got back up",
+               vitals.is_down && !peer_is_dead ? " (knockdown -- state only)" : "");
+    }
 }
-
-
 
 const char* LevelLeaf(const char* path) {
     if (!path || !path[0]) return "?";
     const char* slash = strrchr(path, '/');
     return slash ? slash + 1 : path;
 }
-
-
-
-
 
 bool IsTransientSelectionLevel(const char* path) {
     if (!path || !path[0]) return true;
@@ -1370,11 +978,6 @@ bool IsTransientSelectionLevel(const char* path) {
     return false;
 }
 
-
-
-
-
-
 bool CoopBodiesMayExist() {
     if (!g_coop_started || !net::IsConnected()) return false;
     char level[192] = {};
@@ -1385,14 +988,8 @@ bool CoopBodiesMayExist() {
     return peer_level && peer_level[0] && _stricmp(level, peer_level) == 0;
 }
 
-
-
-
 char g_invite_level[192] = {};
 bool g_have_invite = false;
-
-
-
 
 void DeclineInvite() {
     const std::uint32_t id = net::GetPendingInviteId();
@@ -1411,27 +1008,15 @@ void AcceptInvite() {
         return;
     }
 
-
     const std::uint32_t invite_id = net::GetPendingInviteId();
     if (invite_id != 0) net::SendInviteReply(invite_id, true);
     g_have_invite = false;
     g_coop_started = true;
 
-
-
     g_arrival_teleport_pending = true;
     SC_LOG("lobby: accepted -- travelling to '%s'", g_invite_level);
     ue::OpenLevel(g_invite_level);
 }
-
-
-
-
-
-
-
-
-
 
 void TeleportToPeer(const char* current_level, bool have_level) {
     if (!net::IsConnected()) {
@@ -1458,8 +1043,6 @@ void TeleportToPeer(const char* current_level, bool have_level) {
     ue::UObject* player = world ? ue::GetPlayerCharacter(world, 0) : nullptr;
     if (!player) return;
 
-
-
     const float yaw_radians = facing.Yaw * 3.14159265f / 180.f;
     where.X -= 150.f * cosf(yaw_radians);
     where.Y -= 150.f * sinf(yaw_radians);
@@ -1469,10 +1052,6 @@ void TeleportToPeer(const char* current_level, bool have_level) {
            ok ? "arrived" : "REFUSED (no room there)");
     if (!ok) coop::ReportProblem("no room to land next to your partner");
 }
-
-
-
-
 
 void ReconcileJoinerArrival(ue::UObject* player) {
     if (!g_arrival_teleport_pending || !player || !net::IsConnected() ||
@@ -1530,9 +1109,6 @@ void InvitePeerHere(const char* current_level, bool have_level) {
     }
 }
 
-
-
-
 void HostAnnounceLevelChanges(const char* current_level, bool have_level) {
     if (!g_coop_started || !coop::Get().auto_follow_level) return;
     if (!have_level || IsTransientSelectionLevel(current_level) ||
@@ -1544,10 +1120,6 @@ void HostAnnounceLevelChanges(const char* current_level, bool have_level) {
     net::SendLevelSync(current_level);
     SC_LOG("lobby: level changed to '%s' -- pulling the peer along", current_level);
 }
-
-
-
-
 
 void JoinerFollowHostLevel(const char* current_level, bool have_level) {
     (void)current_level;
@@ -1574,11 +1146,6 @@ void PublishSyncRows() {
     ui::SetSyncRows(out, count);
 }
 
-
-
-
-
-
 void UpdateLobby(ue::UObject* player) {
     char current_level[192] = {};
     const bool have_level = ue::GetCurrentLevelPath(current_level, sizeof(current_level));
@@ -1598,7 +1165,6 @@ void UpdateLobby(ue::UObject* player) {
         SC_LOG("lobby: level picker reached -- co-op waits for the next Start action");
     }
 
-
     static DWORD last_presence = 0;
     const DWORD now = GetTickCount();
     if (net::IsConnected() && have_level && now - last_presence > 1000) {
@@ -1606,17 +1172,8 @@ void UpdateLobby(ue::UObject* player) {
         net::SendLevelPresence(current_level);
     }
 
-
     HostAnnounceLevelChanges(current_level, have_level);
     JoinerFollowHostLevel(current_level, have_level);
-
-
-
-
-
-
-
-
 
     char invited[192] = {};
     if (net::PopLevelSync(invited, sizeof(invited))) {
@@ -1628,8 +1185,6 @@ void UpdateLobby(ue::UObject* player) {
         } else if (have_level && _stricmp(invited, current_level) == 0) {
             g_coop_started = true;
             g_have_invite = false;
-
-
 
             g_arrival_teleport_pending = net::GetRole() == net::Role::Client;
             SC_LOG("lobby: already in '%s' -- arrival reconciliation queued", invited);
@@ -1646,9 +1201,6 @@ void UpdateLobby(ue::UObject* player) {
             }
         }
     }
-
-
-
 
     ui::MenuRequests requests;
     if (ui::TakeMenuRequests(&requests)) {
@@ -1673,15 +1225,12 @@ void UpdateLobby(ue::UObject* player) {
             g_coop_started = true;
             lstrcpynA(g_announced_level, requests.level, sizeof(g_announced_level));
 
-
             net::BumpLevelRequest();
             net::SendLevelSync(requests.level);
             SC_LOG("lobby: travelling to '%s' and inviting peer", requests.level);
             ue::OpenLevel(requests.level);
         }
     }
-
-
 
     static int counter = 0;
     if (++counter % 15 != 0) return;
@@ -1737,7 +1286,6 @@ void UpdateLobby(ue::UObject* player) {
     lstrcpynA(status.detail, coop::GetStats().last_problem, sizeof(status.detail));
     ui::SetMenuStatus(status);
 
-
     char line[192] = {};
     if (status.invite_pending) {
         snprintf(line, sizeof(line),
@@ -1761,13 +1309,6 @@ void UpdateLobby(ue::UObject* player) {
     }
     ui::SetOverlayText(line);
 
-
-
-
-
-
-
-
     static DWORD last_heartbeat = 0;
     const coop::Stats& stats = coop::GetStats();
     static DWORD last_rx_count = 0;
@@ -1776,11 +1317,6 @@ void UpdateLobby(ue::UObject* player) {
         const DWORD elapsed = now - last_heartbeat;
         last_heartbeat = now;
 
-
-
-
-
-
         const DWORD rx_now = stats.packets_received;
         const DWORD dropped_now = stats.packets_dropped;
         const DWORD rx_delta = rx_now - last_rx_count;
@@ -1788,12 +1324,6 @@ void UpdateLobby(ue::UObject* player) {
         last_rx_count = rx_now;
         last_dropped = dropped_now;
         const int rx_rate = elapsed > 0 ? static_cast<int>(rx_delta * 1000 / elapsed) : 0;
-
-
-
-
-
-
 
         static DWORD last_snapshots = 0;
         const DWORD snapshots_now = stats.snapshots_received;
@@ -1804,11 +1334,6 @@ void UpdateLobby(ue::UObject* player) {
         SC_LOG("coop: %s rtt=%dms | levels me='%s' peer='%s' %s | enemies known=%d active=%d "
                "driven=%d unmatched=%d | dmg out=%.0f in=%.0f | attacks=%u | rejected=%u "
 
-
-
-
-
-
                "| rx=%d/s peerpos=%d/s seqgap=%u (%u total)",
                net::GetRole() == net::Role::Host ? "HOST" : "JOIN", net::GetRoundTripMs(),
                status.my_level, status.peer_level, status.together ? "TOGETHER" : "apart",
@@ -1817,7 +1342,6 @@ void UpdateLobby(ue::UObject* player) {
                stats.attacks_echoed, stats.packets_rejected,
                rx_rate, snapshot_rate, dropped_delta, dropped_now);
     }
-
 
     static bool announced_connected = false;
     if (net::IsConnected() && !announced_connected) {
@@ -1852,8 +1376,6 @@ void InitPuppet(std::uintptr_t base) {
               base + offsets::USCActorManager_RegisterTargetableActor)
         : nullptr;
 
-
-
     SC_LOG("puppet: ready (use F1 -> Debug for diagnostics)");
 }
 
@@ -1879,11 +1401,6 @@ bool SpawnPuppet() {
         return false;
     }
 
-
-
-
-
-
     if (coop::Get().real_second_player) {
         if (ue::UObject* pawn = CreateSecondPlayer()) {
             g_puppet = pawn;
@@ -1894,9 +1411,6 @@ bool SpawnPuppet() {
                    static_cast<void*>(pawn));
             return true;
         }
-
-
-
 
         SC_LOG("puppet: real second player pending -- no clone fallback during travel");
         return false;
@@ -1913,8 +1427,6 @@ bool SpawnPuppet() {
         SC_LOG("puppet: no world");
         return false;
     }
-
-
 
     ue::UObject* player = ue::GetPlayerCharacter(world, 0);
     if (!player) {
@@ -1937,9 +1449,6 @@ bool SpawnPuppet() {
         return false;
     }
 
-
-
-
     have_peer_spawn = net::IsConnected() &&
                       net::GetPeerTransform(&location, &rotation, &peer_velocity);
     if (!have_peer_spawn) {
@@ -1948,10 +1457,6 @@ bool SpawnPuppet() {
         location.Y += 200.f * sinf(yaw_radians);
         rotation.Yaw += 180.f;
     }
-
-
-
-
 
     alignas(16) unsigned char spawn_params[128] = {};
 
@@ -1976,18 +1481,6 @@ bool SpawnPuppet() {
         DriveTo(spawned, location, rotation, peer_velocity, true);
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
     const bool attract_enemies = net::GetRole() != net::Role::Client;
     if (attract_enemies && g_get_targetable_actor_component && g_register_targetable_actor) {
         ue::UObject* targetable = g_get_targetable_actor_component(spawned);
@@ -2003,12 +1496,7 @@ bool SpawnPuppet() {
     }
     g_peer_was_down = false;
 
-
-
     ResetSamples();
-
-
-
 
     g_follow_enabled = !net::IsConnected();
     SC_LOG("puppet: follow mode %s", g_follow_enabled
@@ -2035,14 +1523,9 @@ void DespawnPuppet() {
         return;
     }
 
-
-
     NotifyPuppetWillBeDestroyed(g_puppet);
 
-
-
     if (SecondPlayerActive()) {
-
 
         RemoveSecondPlayer();
         SC_LOG("puppet: real second player removed");
@@ -2073,9 +1556,6 @@ void PreparePuppetLifecycle() {
     const bool had_cached_world = g_puppet_world != nullptr;
     g_puppet_world = world;
 
-
-
-
     ForgetEnemyWorldObjects();
 
     g_puppet_anim_instance = nullptr;
@@ -2105,8 +1585,6 @@ void PreparePuppetLifecycle() {
 
 void NotifyLocalAttackForCosmetic() {
 
-
-
     g_cosmetic_attack_montage_until = GetTickCount() + 750;
 }
 
@@ -2133,7 +1611,6 @@ void TickPuppet() {
 
         g_have_local_velocity = false;
 
-
         InvalidateAttackTemplate();
     }
 
@@ -2143,18 +1620,6 @@ void TickPuppet() {
         return;
     }
     RecordSample(location, rotation);
-
-
-
-
-
-
-
-
-
-
-
-
 
     ue::FVector local_velocity = {};
     const float frame_seconds = sifucoop::hooks::FrameDeltaSeconds();
@@ -2170,18 +1635,11 @@ void TickPuppet() {
             const float vz = (location.Z - g_last_local_location.Z) / frame_seconds;
             const float speed = sqrtf(vx * vx + vy * vy + vz * vz);
 
-
             if (speed <= 3000.f) local_velocity = {vx, vy, vz};
         }
     }
     g_last_local_location = location;
     g_have_local_velocity = true;
-
-
-
-
-
-
 
     Fighter mine = ResolveFighter(player);
     net::LocalState local;
@@ -2197,11 +1655,6 @@ void TickPuppet() {
         local.state_valid = true;
     }
     net::TickSession(local);
-
-
-
-
-
 
     static float last_visual_health = -1.f;
     static float last_visual_guard = -1.f;
@@ -2219,20 +1672,6 @@ void TickPuppet() {
         last_visual_guard = -1.f;
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (coop::Get().sync_montages && net::IsConnected()) {
         ue::UObject* anim_instance = ue::GetAnimInstance(player);
         if (anim_instance) {
@@ -2241,16 +1680,6 @@ void TickPuppet() {
             std::memcpy(&action, bytes + kAnimLastActionAnim, sizeof(action));
             float cursor = 0.f;
             std::memcpy(&cursor, bytes + kAnimLastActionCursor, sizeof(cursor));
-
-
-
-
-
-
-
-
-
-
 
             static ue::UObject* last_action_sent = nullptr;
             static float last_cursor = 0.f;
@@ -2273,7 +1702,6 @@ void TickPuppet() {
                         paired_defender_asset && player_was_just_hit;
                     if (!main_character_asset && !paired_player_reaction) {
 
-
                         static unsigned int refused_wrong_actor = 0;
                         if (++refused_wrong_actor <= 8 || coop::Get().verbose_orders) {
                             SC_LOG("action: refused non-player asset from player channel '%s'",
@@ -2284,7 +1712,6 @@ void TickPuppet() {
                             SC_LOG("action: paired defender visual accepted for the hit player '%s'",
                                    action_path);
                         }
-
 
                         net::SendAnimationSequence(action_path, 0,
                                                    net::AnimationSemantic::Generic, cursor);
@@ -2300,18 +1727,17 @@ void TickPuppet() {
         }
     }
 
-
-
-
-
-
     if (coop::Get().sync_montages && net::IsConnected()) {
         static ue::UObject* last_sent = nullptr;
+        static float last_sent_position = 0.f;
         const DWORD now = GetTickCount();
         const bool attack_pending = now < g_cosmetic_attack_montage_until;
         ue::AnimState anim = {};
-        if (ue::ReadAnimState(player, &anim) && anim.montage &&
-            (anim.montage != last_sent || attack_pending)) {
+        const bool have_anim = ue::ReadAnimState(player, &anim) && anim.montage != nullptr;
+        const bool montage_restarted =
+            have_anim && anim.montage == last_sent && anim.position + 0.01f < last_sent_position;
+        if (have_anim) last_sent_position = anim.position;
+        if (have_anim && (anim.montage != last_sent || montage_restarted || attack_pending)) {
             last_sent = anim.montage;
             char path[192] = {};
             if (ue::GetObjectPathName(anim.montage, path, sizeof(path))) {
@@ -2335,11 +1761,8 @@ void TickPuppet() {
         }
     }
 
-
     PumpRemoteOrders();
     TickEnemyCinematics();
-
-
 
     for (int event = 0; event < 8; ++event) {
         char path[192] = {};
@@ -2386,19 +1809,7 @@ void TickPuppet() {
             continue;
         }
 
-
-
-
-
-
-
-
         if (actor_hash && EnemyRunsLocalBrain(actor_hash) && !enemy_death) continue;
-
-
-
-
-
 
         if (raw_sequence && !ue::ObjectClassIs(animation, "AnimSequence")) {
             static char refused_class[160] = {};
@@ -2420,19 +1831,6 @@ void TickPuppet() {
 
         if (raw_sequence) {
 
-
-
-
-
-
-
-
-
-
-
-
-
-
             const bool peer_resurrection =
                 actor_hash == 0 && strstr(path, "/Death/") && strstr(path, "resurrect_");
             if (peer_resurrection && g_peer_was_down) {
@@ -2451,7 +1849,6 @@ void TickPuppet() {
                         WriteCinematicWeight(reinterpret_cast<std::uint8_t*>(anim_instance), 1.f);
                     }
                 } else {
-
 
                     ArmEnemyCinematic(actor_hash, until);
                     if (anim_instance) {
@@ -2477,19 +1874,11 @@ void TickPuppet() {
         }
     }
 
-
-
-
-
     net::ConsumeConnectedEvent();
     if (net::ConsumeDisconnectedEvent()) {
         SC_LOG("net: peer left -- despawning puppet");
         DespawnPuppet();
     }
-
-
-
-
 
     if (CoopBodiesMayExist() && !g_puppet) {
         static DWORD last_attempt = 0;
@@ -2500,19 +1889,9 @@ void TickPuppet() {
         }
     } else if (!net::IsConnected() && g_puppet && g_puppet_auto_spawned) {
 
-
-
-
         SC_LOG("net: peer gone -- removing its puppet");
         DespawnPuppet();
     }
-
-
-
-
-
-
-
 
     {
         ue::UObject* possessed = PrimaryPlayerPawn();
@@ -2536,12 +1915,7 @@ void TickPuppet() {
     UpdateLobby(player);
     ReconcileJoinerArrival(player);
 
-
-
-
-
     if (coop::Get().real_second_player) {
-
 
         const bool maintain_real = CoopBodiesMayExist() ||
                                    (g_puppet && !g_puppet_auto_spawned);
@@ -2549,9 +1923,6 @@ void TickPuppet() {
             ue::UObject* pawn = MaintainSecondPlayer();
             if (pawn && pawn != g_puppet) {
                 g_puppet = pawn;
-
-
-
 
                 g_puppet_auto_spawned = net::IsConnected();
             } else if (!pawn && SecondPlayerActive()) {
@@ -2562,8 +1933,6 @@ void TickPuppet() {
     }
 
     if (!g_puppet) return;
-
-
 
     if (!SecondPlayerActive()) {
         static DWORD last_visibility_restore = 0;
@@ -2576,9 +1945,7 @@ void TickPuppet() {
     net::PeerVitals vitals;
     if (net::GetPeerVitals(&vitals)) ApplyPeerVitals(g_puppet, vitals);
 
-
     MaintainFriendlyRelationship(player, g_puppet);
-
 
     ue::FVector peer_location = {};
     ue::FRotator peer_rotation = {};
@@ -2592,4 +1959,3 @@ void TickPuppet() {
 }
 
 }
-

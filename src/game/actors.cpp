@@ -47,21 +47,13 @@ GetMovementComponentFn g_get_movement_component = nullptr;
 RequestDirectMoveFn g_request_direct_move = nullptr;
 SetRelationshipFn g_set_relationship = nullptr;
 
-
 using HealthKillFn = void(__fastcall*)(ue::UObject*, std::int32_t, ue::UObject*, ue::UObject*,
                                        bool, bool);
 HealthKillFn g_health_kill = nullptr;
 
-
-
-
-
-
 using HealthNotifyFn = void(__fastcall*)(ue::UObject*);
 HealthNotifyFn g_on_rep_set_is_down = nullptr;
 HealthNotifyFn g_on_character_stands_up = nullptr;
-
-
 
 using SetSpeedStateFn = void(__fastcall*)(ue::UObject*, std::uint8_t);
 SetSpeedStateFn g_set_movement_speed_state = nullptr;
@@ -70,16 +62,10 @@ SetCurrentPoseAssetFn g_set_current_pose_asset = nullptr;
 
 bool g_ready = false;
 
-
 constexpr int kDownStateDown = 0;
-
 
 constexpr int kDownStateDeath = 7;
 constexpr int kDownStateNone = 9;
-
-
-
-
 
 float* FloatAt(ue::UObject* object, std::uint32_t offset) {
     if (!object || offset == 0) return nullptr;
@@ -147,8 +133,6 @@ void InitActors(std::uintptr_t base) {
                   base + offsets::UCharacterHealthComponent_OnCharacterStandsUp)
             : nullptr;
 
-
-
     g_ready = offsets::UCharacterHealthComponent_Get != 0 &&
               offsets::M_UHealthComponent_fHealth != 0 &&
               offsets::M_UHealthComponent_fMaxHealth != 0;
@@ -200,26 +184,10 @@ void SetGuard(const Fighter& fighter, float guard) {
     *value = guard;
 }
 
-
-
-
-
-
-
-
 bool KillWithAnimation(const Fighter& fighter, ue::UObject* instigator,
                        ue::UObject* death_animation) {
 
-
-
-
-
-
-
-
     if (!fighter.health || !g_health_kill) return false;
-
-
 
     if (!instigator) return false;
     g_health_kill(fighter.health, 0, instigator, death_animation, false, false);
@@ -241,14 +209,6 @@ bool IsDead(const Fighter& fighter) {
     return g_is_dead(fighter.health);
 }
 
-
-
-
-
-
-
-
-
 void NotifyDownStateChanged(const Fighter& fighter, bool down) {
     if (!fighter.health) return;
     if (down) {
@@ -260,7 +220,6 @@ void NotifyDownStateChanged(const Fighter& fighter, bool down) {
 
 void SetDown(const Fighter& fighter, bool down) {
     if (!fighter.health) return;
-
 
     if (g_set_is_down) g_set_is_down(fighter.health, down);
     if (g_set_down_state) {
@@ -276,7 +235,6 @@ void SetDeathState(const Fighter& fighter) {
         g_set_down_state(fighter.health, kDownStateDeath, true, &scratch);
     }
 }
-
 
 bool SetCurrentPoseAsset(ue::UObject* actor, ue::UObject* pose_asset) {
     if (!actor || !pose_asset || !g_set_current_pose_asset) return false;
@@ -325,8 +283,6 @@ bool StopBrain(ue::UObject* actor) {
         return false;
     }
 
-
-
     struct FStringParam {
         void* data;
         std::int32_t num;
@@ -334,12 +290,6 @@ bool StopBrain(ue::UObject* actor) {
     } reason = {};
     return ue::CallFunction(component.ReturnValue, L"StopLogic", &reason);
 }
-
-
-
-
-
-
 
 bool StartBrain(ue::UObject* actor) {
     if (!actor || !g_brain_class) return false;
@@ -391,27 +341,8 @@ void SetActorPresent(ue::UObject* actor, bool present) {
     ue::CallFunction(actor, L"SetActorEnableCollision", &collision);
 }
 
-
-
-
-
-
 constexpr std::uintptr_t kMovementVelocityOffset = 0xD4;
 constexpr std::uintptr_t kSceneComponentVelocityOffset = 0x150;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 bool GetActorVelocity(ue::UObject* actor, ue::FVector* out) {
     if (!actor || !out || !g_get_movement_component) return false;
@@ -426,8 +357,6 @@ PresentationTargets ResolvePresentationTargets(ue::UObject* actor) {
     PresentationTargets targets;
     if (!actor || !g_get_movement_component) return targets;
     targets.movement = g_get_movement_component(actor);
-
-
 
     struct RootParams {
         ue::UObject* ReturnValue;
@@ -447,19 +376,6 @@ void WritePresentationVelocity(const PresentationTargets& targets,
                     &velocity, sizeof(velocity));
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 bool SetMovementSpeedState(ue::UObject* movement_component, int state) {
     if (!movement_component || !g_set_movement_speed_state) return false;
@@ -482,28 +398,14 @@ bool RequestDirectMove(ue::UObject* actor, const ue::FVector& desired_velocity,
                        bool force_max_speed) {
     if (!actor || !g_get_movement_component || !g_request_direct_move) return false;
 
-
-
-
     ue::UObject* component = g_get_movement_component(actor);
     if (!component) return false;
     g_request_direct_move(component, desired_velocity, force_max_speed);
     return true;
 }
 
-
-
 std::uint32_t g_teleport_fallbacks = 0;
 std::uint32_t g_teleport_hard_failures = 0;
-
-
-
-
-
-
-
-
-
 
 bool SetLocationNoSweep(ue::UObject* actor, const ue::FVector& location) {
     std::uint8_t params[512] = {};
@@ -526,7 +428,6 @@ bool SetRotationDirect(ue::UObject* actor, const ue::FRotator& rotation) {
 bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
                    const ue::FRotator& rotation) {
 
-
     struct Params {
         ue::FVector DestLocation;
         ue::FRotator DestRotation;
@@ -535,33 +436,12 @@ bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
     params.DestLocation = location;
     params.DestRotation = rotation;
 
-
-
-
-
     if (!ue::CallFunction(actor, L"K2_TeleportTo", &params)) return false;
     if (params.ReturnValue) return true;
-
-
-
-
-
-
-
-
-
 
     ++g_teleport_fallbacks;
     SetLocationNoSweep(actor, location);
     SetRotationDirect(actor, rotation);
-
-
-
-
-
-
-
-
 
     static DWORD last_verify_ms = 0;
     const DWORD verify_now = GetTickCount();
@@ -606,13 +486,6 @@ ue::UObject* GetSocialComponent(ue::UObject* character) {
     return params.ReturnValue;
 }
 
-
-
-
-
-
-
-
 int ReadRelationship(ue::UObject* from_actor, ue::UObject* to_actor) {
     if (!from_actor || !to_actor) return relationship::kUnknown;
     struct Params {
@@ -644,26 +517,7 @@ int ReadRelationshipViaComponent(ue::UObject* from_actor, ue::UObject* to_actor)
 bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
     if (!social || !toward || value < 0) return false;
 
-
-
-
-
-
-
     if (!ue::IsValidObject(social) || !ue::IsValidObject(toward)) return false;
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     static ue::UObject* seen_world = nullptr;
     static DWORD world_settled_at = 0;
@@ -692,21 +546,7 @@ bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
     return ue::CallFunction(social, L"BPF_ServerChangeRelationship", &params);
 }
 
-
-
-
-
-
 constexpr std::uintptr_t kSocialRelationshipsMap = 0x0318;
-
-
-
-
-
-
-
-
-
 
 int g_map_probe_first = -1;
 bool g_map_probe_moved = false;
@@ -738,7 +578,6 @@ float GetActorTimeDilation(ue::UObject* actor) {
                 reinterpret_cast<const std::uint8_t*>(actor) +
                     offsets::M_AActor_CustomTimeDilation,
                 sizeof(value));
-
 
     if (!(value > 0.01f) || value > 4.f) return 1.f;
     return value;
@@ -781,21 +620,6 @@ std::uint32_t ActorHash(ue::UObject* actor) {
     return HashName(name);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 constexpr std::uint32_t kRuntimeNameFloor = 2000000000u;
 
 bool SplitRuntimeSuffix(char* name, std::uint32_t* number_out) {
@@ -817,8 +641,6 @@ bool SplitRuntimeSuffix(char* name, std::uint32_t* number_out) {
 }
 
 std::uint32_t HashNameWithOrdinal(const char* text, int ordinal) {
-
-
 
     std::uint32_t hash = HashName(text);
     hash ^= static_cast<std::uint32_t>(ordinal) & 0xFFu;

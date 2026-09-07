@@ -4,9 +4,6 @@
 
 namespace sifucoop::game {
 
-
-
-
 void TickRunState(ue::UObject* player);
 
 }

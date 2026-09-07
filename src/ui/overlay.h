@@ -2,37 +2,13 @@
 
 namespace sifucoop::ui {
 
-
-
-
-
-
-
-
-
 void StartOverlay();
 void StopOverlay();
 
-
 void SetOverlayText(const char* text);
-
-
-
-
 
 bool StartInGameOverlay();
 void SetInGameOverlayText(const char* text);
-
-
-
-
-
-
-
-
-
-
-
 
 struct MenuRequests {
     bool travel = false;
@@ -54,10 +30,7 @@ struct MenuRequests {
     bool disconnect_network = false;
     bool log_roster = false;};
 
-
-
 bool TakeMenuRequests(MenuRequests* out);
-
 
 struct MenuStatus {
     bool connected = false;
@@ -83,25 +56,18 @@ struct MenuStatus {
     int faction_mine = -1;
     int faction_puppet = -1;
 
-
     bool invite_pending = false;
     char invite_level[128] = {};
-
 
     bool invite_answer_valid = false;
     bool invite_answer_accepted = false;
 
-
     bool friendly_confirmed = false;
-
 
     char public_address[64] = {};
 };
 
 void SetMenuStatus(const MenuStatus& status);
-
-
-
 
 struct SyncRow {
     unsigned int hash = 0;
