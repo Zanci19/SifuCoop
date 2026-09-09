@@ -44,6 +44,51 @@ constexpr float kDisengageDistance = 320.f;
 constexpr float kMoveSpeed = 260.f;
 constexpr DWORD kAttackIntervalMs = 1800;
 
+// player mode: one scripted phase per locomotion band and per remote-presentation
+// path, so a single run exercises everything the puppet code drives.
+enum class Phase {
+    Idle,
+    Walk,
+    Run,
+    Sprint,
+    Attack,
+    Guard,
+    Montage,
+    Down,
+    Claim,
+    Count,
+};
+
+const char* PhaseName(Phase phase) {
+    switch (phase) {
+        case Phase::Idle: return "IDLE      (expect band V0, no locomotion anim)";
+        case Phase::Walk: return "WALK      (expect band V1)";
+        case Phase::Run: return "RUN       (expect band V2)";
+        case Phase::Sprint: return "SPRINT    (expect band V3)";
+        case Phase::Attack: return "ATTACK    (expect swings on your screen)";
+        case Phase::Guard: return "GUARD     (expect the guard bar to drain)";
+        case Phase::Montage: return "MONTAGE   (same montage twice -- restart test)";
+        case Phase::Down: return "DOWN      (knockdown, then stand up)";
+        case Phase::Claim: return "CLAIM     (publish owned enemies -- chunking test)";
+        default: return "?";
+    }
+}
+
+// Orbit speed per phase, in units per second. The thresholds the game reads are
+// roughly 20 / 240 / 475, so these sit clearly inside each band.
+float PhaseSpeed(Phase phase) {
+    switch (phase) {
+        case Phase::Walk: return 150.f;
+        case Phase::Run: return 350.f;
+        case Phase::Sprint: return 620.f;
+        case Phase::Attack:
+        case Phase::Guard: return 60.f;
+        default: return 0.f;
+    }
+}
+
+constexpr DWORD kPhaseMs = 4000;
+
 
 
 constexpr float kDamagePerTick = 6.f;
@@ -160,6 +205,7 @@ int main(int argc, char** argv) {
     }
 
     const bool damage_mode = (_stricmp(mode, "damage") == 0);
+    const bool player_mode = (_stricmp(mode, "player") == 0);
     const bool bot_mode = damage_mode || (_stricmp(mode, "bot") == 0);
     const bool circle_mode = (_stricmp(mode, "circle") == 0);
 
@@ -198,6 +244,13 @@ int main(int argc, char** argv) {
                "Watch it in game -- if it drains and dies, the joining player can fight.\n",
                kDamagePerTick, kDamageIntervalMs);
     }
+    if (player_mode) {
+        printf("PLAYER MODE: a scripted second player. It cycles through one phase every\n"
+               "%lums -- idle, walk, run, sprint, attack, guard, montage, knockdown, and\n"
+               "claiming enemies. Watch the puppet on your screen and compare it with the\n"
+               "phase printed here. Modes: player | bot | circle | damage\n",
+               kPhaseMs);
+    }
     printf("waiting for the game...\n");
 
     bool connected = false;
@@ -205,6 +258,7 @@ int main(int argc, char** argv) {
     DWORD last_hello = 0;
     DWORD last_snapshot = 0;
     DWORD last_attack = 0;
+    DWORD last_claim = 0;
     DWORD last_damage = 0;
     DWORD last_enemy_print = 0;
     DWORD received = 0;
@@ -228,12 +282,68 @@ int main(int argc, char** argv) {
     static const std::int32_t kAttackIndices[] = {0x2C, 0x0E, 0x07, 0x20, 0x30};
     int attack_cursor = 0;
 
+    Vec3 previous_self;
+    Vec3 velocity;
+    bool have_previous_self = false;
+    float orbit_angle = 0.f;
+    Phase phase = Phase::Idle;
+    DWORD phase_started = 0;
+    int phase_step = 0;
+    float guard_value = 100.f;
+    std::uint32_t owned_round = 0;
+    char last_seen_montage[192] = {};
+    bool have_seen_montage = false;
+
     auto fill_header = [&](PacketHeader* header, PacketType type) {
         header->magic = kMagic;
         header->version = kProtocolVersion;
         header->type = static_cast<std::uint16_t>(type);
         header->sequence = ++sequence;
         header->send_time_ms = GetTickCount();
+    };
+
+    // Replays a montage the host itself sent, so the path always resolves there.
+    auto send_montage = [&](float position) {
+        if (!have_seen_montage) return;
+        MontagePacket packet = {};
+        fill_header(&packet.header, PacketType::MontageState);
+        packet.position = position;
+        packet.semantic = static_cast<std::uint8_t>(AnimationSemantic::Generic);
+        lstrcpynA(packet.montage_path, last_seen_montage, sizeof(packet.montage_path));
+        send_packet(&packet, sizeof(packet));
+    };
+
+    // Mirrors the chunked publish in session.cpp so protocol v21 gets exercised.
+    auto send_owned = [&](const EnemyEntry* claimed, int count) {
+        if (count > kMaxOwnedEnemiesTotal) count = kMaxOwnedEnemiesTotal;
+        ++owned_round;
+        const int chunks =
+            count <= 0 ? 1
+                       : (count + kMaxOwnedEnemiesPerPacket - 1) / kMaxOwnedEnemiesPerPacket;
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            const int base = chunk * kMaxOwnedEnemiesPerPacket;
+            int in_chunk = count - base;
+            if (in_chunk < 0) in_chunk = 0;
+            if (in_chunk > kMaxOwnedEnemiesPerPacket) in_chunk = kMaxOwnedEnemiesPerPacket;
+
+            OwnedEnemyPacket packet = {};
+            fill_header(&packet.header, PacketType::OwnedEnemy);
+            packet.count = static_cast<std::uint32_t>(in_chunk);
+            packet.round = owned_round;
+            packet.chunk_index = static_cast<std::uint8_t>(chunk);
+            packet.chunk_count = static_cast<std::uint8_t>(chunks);
+            for (int i = 0; i < in_chunk; ++i) {
+                const EnemyEntry& src = claimed[base + i];
+                OwnedEnemyEntry& out = packet.entries[i];
+                out.name_hash = src.name_hash;
+                out.x = src.x;
+                out.y = src.y;
+                out.z = src.z;
+                out.yaw = src.yaw;
+            }
+            send_packet(&packet, static_cast<int>(OwnedEnemyPacketSize(packet.count)));
+        }
+        return chunks;
     };
 
     for (;;) {
@@ -328,6 +438,17 @@ int main(int argc, char** argv) {
                 EnemyStatePacket packet = {};
                 memcpy(&packet, buffer, sizeof(packet));
                 AbsorbEnemyChunk(enemies, packet);
+            } else if (type == PacketType::MontageState &&
+                       bytes >= static_cast<int>(sizeof(MontagePacket))) {
+                MontagePacket packet = {};
+                memcpy(&packet, buffer, sizeof(packet));
+                packet.montage_path[sizeof(packet.montage_path) - 1] = '\0';
+                if (packet.montage_path[0] && !have_seen_montage) {
+                    have_seen_montage = true;
+                    lstrcpynA(last_seen_montage, packet.montage_path,
+                              sizeof(last_seen_montage));
+                    printf("  <- montage learned: %s\n", last_seen_montage);
+                }
             } else if (type == PacketType::OrderEvent &&
                        bytes >= static_cast<int>(sizeof(OrderEventPacket))) {
                 OrderEventPacket order = {};
@@ -432,11 +553,53 @@ int main(int argc, char** argv) {
                 self.x = player.x + 300.f * cosf(angle);
                 self.y = player.y + 300.f * sinf(angle);
                 self.z = player.z;
+            } else if (player_mode) {
+                if (phase_started == 0) {
+                    phase_started = now;
+                    printf("\nphase: %s\n", PhaseName(phase));
+                }
+
+                // Orbit at a radius the phase's speed can sustain, so the band is
+                // driven by real movement rather than a teleport.
+                const float speed = PhaseSpeed(phase);
+                constexpr float kRadius = 260.f;
+                orbit_angle += (speed / kRadius) * dt;
+                self.x = player.x + kRadius * cosf(orbit_angle);
+                self.y = player.y + kRadius * sinf(orbit_angle);
+                self.z = player.z;
+                yaw = YawTowards(self, player);
             }
+
+            if (have_previous_self && dt > 0.f) {
+                velocity.x = (self.x - previous_self.x) / dt;
+                velocity.y = (self.y - previous_self.y) / dt;
+                velocity.z = (self.z - previous_self.z) / dt;
+            }
+            previous_self = self;
+            have_previous_self = true;
 
 
             const int cycle = static_cast<int>((now - start) / 1000) % 30;
-            is_down = (cycle >= 25 && cycle < 28);
+            if (!player_mode) is_down = (cycle >= 25 && cycle < 28);
+
+            float health = 100.f;
+            float guard = 100.f;
+            if (player_mode) {
+                // Down for the first half of the Down phase, up for the second, so
+                // the puppet has to be put down AND stood back up.
+                is_down = phase == Phase::Down && now - phase_started < kPhaseMs / 2;
+                if (phase == Phase::Guard) {
+                    guard_value -= 60.f * dt;
+                    if (guard_value < 5.f) guard_value = 5.f;
+                } else {
+                    guard_value += 40.f * dt;
+                    if (guard_value > 100.f) guard_value = 100.f;
+                }
+                guard = guard_value;
+            } else {
+                health = 100.f - static_cast<float>(cycle) * 2.f;
+                guard = 100.f - static_cast<float>(cycle % 10) * 8.f;
+            }
 
             SnapshotPacket snapshot = {};
             fill_header(&snapshot.header, PacketType::Snapshot);
@@ -444,11 +607,13 @@ int main(int argc, char** argv) {
             snapshot.y = self.y;
             snapshot.z = self.z;
             snapshot.yaw = yaw;
-
+            snapshot.velocity_x = velocity.x;
+            snapshot.velocity_y = velocity.y;
+            snapshot.velocity_z = velocity.z;
 
             snapshot.max_health = 100.f;
-            snapshot.health = 100.f - static_cast<float>(cycle) * 2.f;
-            snapshot.guard = 100.f - static_cast<float>(cycle % 10) * 8.f;
+            snapshot.health = health;
+            snapshot.guard = guard;
             snapshot.flags = kFlagStateValid | kFlagInLevel;
             if (is_down) snapshot.flags |= kFlagIsDown;
             send_packet(&snapshot, sizeof(snapshot));
@@ -476,6 +641,63 @@ int main(int argc, char** argv) {
                 ++attack_cursor;
                 send_packet(&order, sizeof(order));
                 printf("  -> attack index=0x%02X (dist %.0f)\n", order.attack_index, distance);
+            }
+
+            if (player_mode) {
+                const DWORD in_phase = now - phase_started;
+
+                if (phase == Phase::Attack && now - last_attack > 900) {
+                    last_attack = now;
+                    OrderEventPacket order = {};
+                    fill_header(&order.header, PacketType::OrderEvent);
+                    order.actor_hash = 0;
+                    order.order_type = 0;
+                    order.attack_index = kAttackIndices[attack_cursor % 5];
+                    order.attack_depth = attack_cursor % 3;
+                    ++attack_cursor;
+                    send_packet(&order, sizeof(order));
+                    printf("  -> attack index=0x%02X depth=%d\n", order.attack_index,
+                           order.attack_depth);
+                }
+
+                // Two identical montages back to back. Before the restart fix the
+                // second was dropped, so the move only played once on the host.
+                if (phase == Phase::Montage && have_seen_montage) {
+                    if (phase_step == 0 && in_phase > 300) {
+                        phase_step = 1;
+                        send_montage(0.f);
+                        printf("  -> montage sent (first)\n");
+                    } else if (phase_step == 1 && in_phase > 1800) {
+                        phase_step = 2;
+                        send_montage(0.f);
+                        printf("  -> SAME montage sent again (restart test)\n");
+                    }
+                }
+
+                if (phase == Phase::Claim && enemies.complete && now - last_claim >= 33) {
+                    last_claim = now;
+                    const int chunks = send_owned(enemies.entries, enemies.count);
+                    if (phase_step == 0) {
+                        phase_step = 1;
+                        printf("  -> claiming %d enemies in %d chunk(s)%s\n", enemies.count,
+                               chunks,
+                               enemies.count > kMaxOwnedEnemiesPerPacket
+                                   ? "  <-- past the old 24 cap"
+                                   : "  (need >24 enemies to exercise chunking)");
+                    }
+                }
+
+                if (in_phase >= kPhaseMs) {
+                    if (phase == Phase::Claim) {
+                        send_owned(nullptr, 0);
+                        printf("  -> released all claims (empty round)\n");
+                    }
+                    phase = static_cast<Phase>((static_cast<int>(phase) + 1) %
+                                               static_cast<int>(Phase::Count));
+                    phase_started = now;
+                    phase_step = 0;
+                    printf("\nphase: %s\n", PhaseName(phase));
+                }
             }
         }
 
