@@ -32,6 +32,26 @@ namespace coop = sifucoop::coop;
 
 constexpr std::uintptr_t kClassPrivateOffset = 0x10;
 
+// UPlayerAnim / USCAnimInstance field offsets, verified against the PDB with
+// tools/pdbdump/structdump.py (m_vOwnerVelocity 0xFB4, m_fOwnerVelocityLength
+// 0xFC0, V0/V1/V2 thresholds 0xFC4.., m_fWantedSpeed 0x15E4, m_LastActionAnim
+// 0xE68, m_SpeedState 0x1C2D, alphas 0x1C44, cinematic weight 0x378).
+constexpr std::uintptr_t kAnimOwnerVelocity = 0x0FB4;
+constexpr std::uintptr_t kAnimOwnerVelocityLength = 0x0FC0;
+constexpr std::uintptr_t kAnimVelocityMaxV0 = 0x0FC4;
+constexpr std::uintptr_t kAnimVelocityMaxV1 = 0x0FC8;
+constexpr std::uintptr_t kAnimVelocityMaxV2 = 0x0FCC;
+constexpr std::uintptr_t kAnimBlendspaceAngle = 0x0FD4;
+constexpr std::uintptr_t kAnimWantedSpeed = 0x15E4;
+constexpr std::uintptr_t kAnimLastActionAnim = 0x0E68;
+constexpr std::uintptr_t kAnimLastActionCursor = 0x0E74;
+constexpr std::uintptr_t kAnimMoveStatus = 0x1C29;
+constexpr std::uintptr_t kAnimSpeedState = 0x1C2D;
+constexpr std::uintptr_t kAnimSpeedStateAlphaV0 = 0x1C44;
+
+constexpr std::uintptr_t kAnimCinematicOverallWeight = 0x0378;
+constexpr std::uintptr_t kAnimCinematicLayerCursor = 0x037C;
+
 using SpawnActorFn = ue::UObject*(__fastcall*)(void* world, void* uclass, const ue::FVector*,
                                                const ue::FRotator*, const void* params);
 
@@ -69,13 +89,34 @@ struct EnemyPresentation {
     int candidate_band = 0;
     DWORD candidate_since = 0;
     DWORD until = 0;
+
+    // The band is a blend the graph takes 0.3-1.0 s to reach; commanding it
+    // every frame restarts that blend every frame. Command on change, and
+    // re-assert at most every 400 ms while the graph disagrees.
+    int last_commanded_band = -1;
+    DWORD last_command_ms = 0;
+
+    // Thresholds are read once per instance: the read is a raw offset that only
+    // exists on UPlayerAnim-sized instances, and it must never be trusted or
+    // written through on anything smaller.
+    bool thresholds_ok = false;
+    float v0 = 20.f;
+    float v1 = 240.f;
+    float v2 = 475.f;
+
+    unsigned long long last_frame = 0;
 };
 constexpr int kEnemyPresentationSlots = 96;
 EnemyPresentation g_enemy_presentation[kEnemyPresentationSlots];
 
-// Enemies share UPlayerAnim with the player, so their own V0/V1/V2 thresholds
-// are readable; see CODE-NOTES.md.
-int BandForSpeedFromAnim(const std::uint8_t* bytes, float speed);
+bool ReadLocomotionThresholds(const std::uint8_t* bytes, float* v0, float* v1, float* v2);
+
+int BandForSlot(const EnemyPresentation& slot, float speed) {
+    if (speed <= slot.v0) return 0;
+    if (speed < slot.v1) return 1;
+    if (speed < slot.v2) return 2;
+    return 3;
+}
 
 void ForgetEnemyPresentation() {
     for (EnemyPresentation& slot : g_enemy_presentation) slot = {};
@@ -103,25 +144,41 @@ void NoteEnemyPresentation(ue::UObject* actor, const ue::FVector& velocity) {
 
     const float speed =
         sqrtf(velocity.X * velocity.X + velocity.Y * velocity.Y);
-    const int wanted =
-        BandForSpeedFromAnim(reinterpret_cast<const std::uint8_t*>(anim_instance), speed);
 
+    const bool was_expired =
+        slot->anim_instance == anim_instance && static_cast<LONG>(now - slot->until) >= 0;
+    if (was_expired) slot->last_commanded_band = -1;
     if (slot->anim_instance != anim_instance || slot->world != ue::GetWorld()) {
         *slot = {};
         slot->anim_instance = anim_instance;
         slot->targets = ResolvePresentationTargets(actor);
         slot->world = ue::GetWorld();
-        slot->band = wanted;
-        slot->candidate_band = wanted;
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(anim_instance);
+        slot->thresholds_ok =
+            ue::RangeReadable(bytes, kAnimSpeedStateAlphaV0 + 16) &&
+            ReadLocomotionThresholds(bytes, &slot->v0, &slot->v1, &slot->v2);
+        const int initial = BandForSlot(*slot, speed);
+        slot->band = initial;
+        slot->candidate_band = initial;
         slot->candidate_since = now;
+        static unsigned int announced = 0;
+        if (++announced <= 3 || coop::Get().verbose_enemies) {
+            SC_LOG("enemy anim: %s thresholds %.0f/%.0f/%.0f for a driven body (%s)",
+                   slot->thresholds_ok ? "read" : "FALLBACK", slot->v0, slot->v1, slot->v2,
+                   slot->thresholds_ok ? "UPlayerAnim-sized, band readback enabled"
+                                       : "smaller instance, no raw writes");
+        }
     }
     slot->velocity = velocity;
+    const int wanted = BandForSlot(*slot, speed);
 
-    constexpr DWORD kBandSettleMs = 120;
+    // Hysteresis: going faster is confirmed quickly, slowing down slowly, so a
+    // momentary dip in a 60 Hz velocity stream does not drop a run to a walk.
+    const DWORD settle_ms = wanted > slot->band ? 60u : 180u;
     if (wanted != slot->candidate_band) {
         slot->candidate_band = wanted;
         slot->candidate_since = now;
-    } else if (wanted != slot->band && now - slot->candidate_since >= kBandSettleMs) {
+    } else if (wanted != slot->band && now - slot->candidate_since >= settle_ms) {
         slot->band = wanted;
     }
     slot->until = now + 400;
@@ -139,12 +196,33 @@ DWORD g_cosmetic_attack_montage_until = 0;
 DWORD g_puppet_cinematic_until = 0;
 bool g_puppet_cinematic_needs_clear = false;
 
+// Capture state for the local player's action channel. These used to be
+// function statics that survived a pawn swap, so the first action of a new
+// life could match the previous body's last one and never be sent.
+ue::UObject* g_last_action_sent = nullptr;
+float g_last_action_cursor = 0.f;
+ue::UObject* g_last_montage_sent = nullptr;
+float g_last_montage_position = 0.f;
+float g_last_visual_health = -1.f;
+float g_last_visual_guard = -1.f;
+DWORD g_player_victim_visual_until = 0;
+
+void ResetLocalCaptureState() {
+    g_last_action_sent = nullptr;
+    g_last_action_cursor = 0.f;
+    g_last_montage_sent = nullptr;
+    g_last_montage_position = 0.f;
+    g_last_visual_health = -1.f;
+    g_last_visual_guard = -1.f;
+    g_player_victim_visual_until = 0;
+}
+
 struct CosmeticCinematic {
     std::uint32_t actor_hash = 0;
     DWORD until = 0;
     ue::UObject* anim_instance = nullptr;
 };
-constexpr int kCosmeticCinematicCount = 16;
+constexpr int kCosmeticCinematicCount = 32;
 CosmeticCinematic g_enemy_cinematics[kCosmeticCinematicCount] = {};
 
 bool g_arrival_teleport_pending = false;
@@ -167,22 +245,6 @@ ue::UObject* g_last_player = nullptr;
 
 ue::FVector g_last_local_location;
 bool g_have_local_velocity = false;
-
-constexpr std::uintptr_t kAnimOwnerVelocity = 0x0FB4;
-constexpr std::uintptr_t kAnimOwnerVelocityLength = 0x0FC0;
-constexpr std::uintptr_t kAnimVelocityMaxV0 = 0x0FC4;
-constexpr std::uintptr_t kAnimVelocityMaxV1 = 0x0FC8;
-constexpr std::uintptr_t kAnimVelocityMaxV2 = 0x0FCC;
-constexpr std::uintptr_t kAnimBlendspaceAngle = 0x0FD4;
-constexpr std::uintptr_t kAnimWantedSpeed = 0x15E4;
-constexpr std::uintptr_t kAnimLastActionAnim = 0x0E68;
-constexpr std::uintptr_t kAnimLastActionCursor = 0x0E74;
-constexpr std::uintptr_t kAnimMoveStatus = 0x1C29;
-constexpr std::uintptr_t kAnimSpeedState = 0x1C2D;
-constexpr std::uintptr_t kAnimSpeedStateAlphaV0 = 0x1C44;
-
-constexpr std::uintptr_t kAnimCinematicOverallWeight = 0x0378;
-constexpr std::uintptr_t kAnimCinematicLayerCursor = 0x037C;
 
 float ReadFloatAt(const std::uint8_t* bytes, std::uintptr_t offset) {
     float value = 0.f;
@@ -212,26 +274,28 @@ bool ReadLocomotionThresholds(const std::uint8_t* bytes, float* v0, float* v1, f
     return true;
 }
 
-int BandForSpeedFromAnim(const std::uint8_t* bytes, float speed) {
-    float v0 = 0.f, v1 = 0.f, v2 = 0.f;
-    ReadLocomotionThresholds(bytes, &v0, &v1, &v2);
-    if (speed <= v0) return 0;
-    if (speed < v1) return 1;
-    if (speed < v2) return 2;
-    return 3;
-}
-
 void WriteCinematicWeight(std::uint8_t* bytes, float weight) {
     const float cinematic_layer = 0.f;
     std::memcpy(bytes + kAnimCinematicOverallWeight, &weight, sizeof(weight));
     std::memcpy(bytes + kAnimCinematicLayerCursor, &cinematic_layer, sizeof(cinematic_layer));
 }
 
-DWORD AnimationDeadline(ue::UObject* animation) {
+DWORD AnimationDeadline(ue::UObject* animation, float start_at) {
     float seconds = ue::GetAnimationAssetLength(animation);
+    if (start_at > 0.f && start_at < seconds) seconds -= start_at;
     if (seconds < 0.1f) seconds = 0.5f;
     if (seconds > 10.f) seconds = 10.f;
     return GetTickCount() + static_cast<DWORD>((seconds + 0.12f) * 1000.f);
+}
+
+// Only ever writes the weight of an anim instance that still belongs to a
+// tracked enemy: a freed instance is not touched, whatever the slot remembers.
+void ClearCinematicIfStillLive(const CosmeticCinematic& slot) {
+    if (!slot.actor_hash || !slot.anim_instance) return;
+    ue::UObject* actor = FindEnemyByHash(slot.actor_hash);
+    ue::UObject* anim_instance = actor ? ue::GetAnimInstance(actor) : nullptr;
+    if (anim_instance != slot.anim_instance) return;
+    WriteCinematicWeight(reinterpret_cast<std::uint8_t*>(anim_instance), 0.f);
 }
 
 void ArmEnemyCinematic(std::uint32_t actor_hash, DWORD until) {
@@ -239,11 +303,20 @@ void ArmEnemyCinematic(std::uint32_t actor_hash, DWORD until) {
     const DWORD now = GetTickCount();
     for (CosmeticCinematic& active : g_enemy_cinematics) {
         if (active.actor_hash == actor_hash || !active.actor_hash || now >= active.until) {
+            if (active.actor_hash && active.actor_hash != actor_hash) {
+                ClearCinematicIfStillLive(active);
+            }
             active = {actor_hash, until, nullptr};
             return;
         }
     }
-    g_enemy_cinematics[0] = {actor_hash, until, nullptr};
+    // Every slot is busy: evict the oldest, and leave its body unlocked.
+    CosmeticCinematic* oldest = &g_enemy_cinematics[0];
+    for (CosmeticCinematic& active : g_enemy_cinematics) {
+        if (static_cast<LONG>(active.until - oldest->until) < 0) oldest = &active;
+    }
+    ClearCinematicIfStillLive(*oldest);
+    *oldest = {actor_hash, until, nullptr};
 }
 
 void TickEnemyCinematics() {
@@ -327,8 +400,6 @@ int SpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
 // must never be written through.
 void InjectAnimPresentation(ue::UObject* anim_instance, const ue::FVector& velocity) {
     auto* bytes = reinterpret_cast<std::uint8_t*>(anim_instance);
-    float v0 = 0.f, v1 = 0.f, v2 = 0.f;
-    if (!ReadLocomotionThresholds(bytes, &v0, &v1, &v2)) return;
 
     const float speed = sqrtf(velocity.X * velocity.X + velocity.Y * velocity.Y);
     std::memcpy(bytes + kAnimOwnerVelocity, &velocity, sizeof(velocity));
@@ -350,9 +421,31 @@ EnemyPresentation* FindDrivenEnemy(ue::UObject* anim_instance) {
 
 void ApplyDrivenEnemyPresentation(EnemyPresentation& driven, ue::UObject* anim_instance,
                                   const char* which) {
+    // Both anim hooks can fire for the same instance in one update (the
+    // derived override calls the base). The second pass would only repeat the
+    // writes, so it is skipped.
+    const unsigned long long frame = sifucoop::hooks::FrameCount();
+    if (driven.last_frame == frame) return;
+    driven.last_frame = frame;
+
+    // Velocity is a graph input and must be present every frame.
     WritePresentationVelocity(driven.targets, driven.velocity);
-    SetMovementSpeedState(driven.targets.movement, driven.band);
-    InjectAnimPresentation(anim_instance, driven.velocity);
+
+    // The band is a transition, not an input: command it on change, and only
+    // re-assert when the graph has visibly not taken it; see CODE-NOTES.md.
+    const DWORD now = GetTickCount();
+    bool command = driven.band != driven.last_commanded_band;
+    if (!command && driven.thresholds_ok) {
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(anim_instance);
+        const int graph_band = bytes[kAnimSpeedState + 4];
+        if (graph_band != driven.band && now - driven.last_command_ms >= 400) command = true;
+    }
+    if (command) {
+        SetMovementSpeedState(driven.targets.movement, driven.band);
+        driven.last_commanded_band = driven.band;
+        driven.last_command_ms = now;
+    }
+    if (driven.thresholds_ok) InjectAnimPresentation(anim_instance, driven.velocity);
 
     // Announce each hook once. Both can be live at the same time, so a single
     // slot would flip back and forth and log every frame.
@@ -636,6 +729,23 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
     if (distance > kSnapDistance || fabsf(dz) > kVerticalSnap) {
         if (is_puppet) ++snap_count;
         TeleportActor(target_actor, target, new_rotation);
+        // A snap must not leave the last band or velocity in place: the body
+        // is wherever it is now, moving at whatever the wire says.
+        ue::FVector flat = {reported_velocity.X, reported_velocity.Y, 0.f};
+        const float flat_speed = sqrtf(flat.X * flat.X + flat.Y * flat.Y);
+        const float cap = is_puppet ? 850.f : 1200.f;
+        if (flat_speed > cap) {
+            flat.X *= cap / flat_speed;
+            flat.Y *= cap / flat_speed;
+        }
+        if (is_puppet) {
+            g_puppet_presentation_velocity = flat;
+            g_have_puppet_presentation_velocity = true;
+            g_puppet_anim_instance = ue::GetAnimInstance(target_actor);
+        } else {
+            SetPresentationVelocity(target_actor, flat);
+            NoteEnemyPresentation(target_actor, flat);
+        }
         return;
     }
 
@@ -689,21 +799,39 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
                                        current.Z + dz * alpha};
         ue::FVector presentation_velocity = {reported_velocity.X, reported_velocity.Y, 0.f};
         constexpr float kMaximumEnemyPresentationSpeed = 1200.f;
-        const float speed = sqrtf(presentation_velocity.X * presentation_velocity.X +
-                                  presentation_velocity.Y * presentation_velocity.Y);
+        float speed = sqrtf(presentation_velocity.X * presentation_velocity.X +
+                            presentation_velocity.Y * presentation_velocity.Y);
         if (speed > kMaximumEnemyPresentationSpeed) {
             const float scale = kMaximumEnemyPresentationSpeed / speed;
             presentation_velocity.X *= scale;
             presentation_velocity.Y *= scale;
+            speed = kMaximumEnemyPresentationSpeed;
+        } else if (speed <= 18.f && distance > 35.f) {
+            // The wire says still but the body is being pulled somewhere: show
+            // the motion the correction itself produces rather than an idle
+            // pose sliding across the floor.
+            const float frame_seconds = sifucoop::hooks::FrameDeltaSeconds();
+            if (frame_seconds > 0.001f) {
+                presentation_velocity = {(corrected.X - current.X) / frame_seconds,
+                                         (corrected.Y - current.Y) / frame_seconds, 0.f};
+                speed = sqrtf(presentation_velocity.X * presentation_velocity.X +
+                              presentation_velocity.Y * presentation_velocity.Y);
+                if (speed > kMaximumEnemyPresentationSpeed) {
+                    const float scale = kMaximumEnemyPresentationSpeed / speed;
+                    presentation_velocity.X *= scale;
+                    presentation_velocity.Y *= scale;
+                    speed = kMaximumEnemyPresentationSpeed;
+                }
+            }
         }
         TeleportActor(target_actor, corrected, new_rotation);
         SetPresentationVelocity(target_actor, presentation_velocity);
 
+        // The band is owned by the presentation slot and commanded from the
+        // anim-update hook, once per change. It was also being commanded from
+        // here every frame with a second set of thresholds, which restarted
+        // the locomotion blend sixty times a second.
         NoteEnemyPresentation(target_actor, presentation_velocity);
-
-        int band = 0;
-        if (speed > 18.f) band = speed < 280.f ? 1 : (speed < 600.f ? 2 : 3);
-        SetActorSpeedState(target_actor, band);
         return;
     }
 
@@ -822,7 +950,12 @@ int DiscoverFriendlyRelationValue() {
             continue;
         }
         const int value = ReadRelationship(first, actor);
-        if (value != rel::kUnknown) return value;
+        if (value == rel::kUnknown) continue;
+        // Two same-faction enemies should read as allies; anything hostile
+        // here means the sample was wrong, and must never be copied onto the
+        // two players.
+        if (value == rel::kEnemy || value == rel::kFight) continue;
+        return value;
     }
     return rel::kUnknown;
 }
@@ -988,21 +1121,22 @@ void ApplyPeerVitals(ue::UObject* puppet, const net::PeerVitals& vitals) {
     Fighter fighter = ResolveFighter(puppet);
 
     if (coop::Get().mirror_peer_vitals && vitals.max_health > 0.f) {
+        // The clone was built from the local player, so its maximum is the
+        // local player's. The partner's bar is only right when the maximum is
+        // theirs as well.
+        const float puppet_max_before = GetMaxHealth(fighter);
+        const float gap = puppet_max_before - vitals.max_health;
+        const float magnitude = gap < 0.f ? -gap : gap;
+        if (magnitude > 0.5f) SetMaxHealth(fighter, vitals.max_health);
         SetHealth(fighter, vitals.health);
         SetGuard(fighter, vitals.guard);
 
-        const float puppet_max = GetMaxHealth(fighter);
-        static float last_reported_gap = -1.f;
-        const float gap = puppet_max - vitals.max_health;
-        const float magnitude = gap < 0.f ? -gap : gap;
-        if (last_reported_gap < 0.f || (magnitude - last_reported_gap > 1.f) ||
-            (last_reported_gap - magnitude > 1.f)) {
-            last_reported_gap = magnitude;
-            SC_LOG("puppet: max health here %.0f, theirs %.0f -- %s", puppet_max,
+        static float last_reported_max = -1.f;
+        if (last_reported_max < 0.f || fabsf(last_reported_max - vitals.max_health) > 0.5f) {
+            last_reported_max = vitals.max_health;
+            SC_LOG("puppet: max health here %.0f, theirs %.0f -- %s", puppet_max_before,
                    vitals.max_health,
-                   magnitude <= 1.f
-                       ? "agreed, so the age write reached the stats derived from it"
-                       : "still YOURS, so age alone does not drive it and their bar is wrong");
+                   magnitude <= 0.5f ? "agreed" : "applied theirs to the body");
         }
     }
 
@@ -1650,6 +1784,7 @@ void PreparePuppetLifecycle() {
     g_last_player = nullptr;
     g_have_local_velocity = false;
     ResetSamples();
+    ResetLocalCaptureState();
     InvalidateAttackTemplate();
 }
 
@@ -1678,6 +1813,7 @@ void TickPuppet() {
         }
         g_last_player = player;
         ResetSamples();
+        ResetLocalCaptureState();
 
         g_have_local_velocity = false;
 
@@ -1726,20 +1862,17 @@ void TickPuppet() {
     }
     net::TickSession(local);
 
-    static float last_visual_health = -1.f;
-    static float last_visual_guard = -1.f;
-    static DWORD player_victim_visual_until = 0;
     if (local.state_valid) {
-        const bool health_drop = last_visual_health >= 0.f &&
-            local.health + 0.05f < last_visual_health;
-        const bool guard_drop = last_visual_guard >= 0.f &&
-            local.guard + 0.05f < last_visual_guard;
-        if (health_drop || guard_drop) player_victim_visual_until = GetTickCount() + 250;
-        last_visual_health = local.health;
-        last_visual_guard = local.guard;
+        const bool health_drop = g_last_visual_health >= 0.f &&
+            local.health + 0.05f < g_last_visual_health;
+        const bool guard_drop = g_last_visual_guard >= 0.f &&
+            local.guard + 0.05f < g_last_visual_guard;
+        if (health_drop || guard_drop) g_player_victim_visual_until = GetTickCount() + 250;
+        g_last_visual_health = local.health;
+        g_last_visual_guard = local.guard;
     } else {
-        last_visual_health = -1.f;
-        last_visual_guard = -1.f;
+        g_last_visual_health = -1.f;
+        g_last_visual_guard = -1.f;
     }
 
     if (coop::Get().sync_montages && net::IsConnected()) {
@@ -1751,13 +1884,11 @@ void TickPuppet() {
             float cursor = 0.f;
             std::memcpy(&cursor, bytes + kAnimLastActionCursor, sizeof(cursor));
 
-            static ue::UObject* last_action_sent = nullptr;
-            static float last_cursor = 0.f;
-            const bool restarted = cursor + 0.01f < last_cursor;
-            const bool changed = action != last_action_sent;
-            last_cursor = cursor;
+            const bool restarted = cursor + 0.01f < g_last_action_cursor;
+            const bool changed = action != g_last_action_sent;
+            g_last_action_cursor = cursor;
             if (action && (changed || restarted)) {
-                last_action_sent = action;
+                g_last_action_sent = action;
                 char action_path[192] = {};
                 if (ue::GetObjectPathName(action, action_path, sizeof(action_path))) {
                     const bool main_character_asset =
@@ -1766,8 +1897,8 @@ void TickPuppet() {
                         strstr(action_path, "_defender") != nullptr ||
                         strstr(action_path, "_hitted") != nullptr ||
                         strstr(action_path, "_Hitted") != nullptr;
-                    const bool player_was_just_hit = player_victim_visual_until != 0 &&
-                        static_cast<LONG>(player_victim_visual_until - GetTickCount()) > 0;
+                    const bool player_was_just_hit = g_player_victim_visual_until != 0 &&
+                        static_cast<LONG>(g_player_victim_visual_until - GetTickCount()) > 0;
                     const bool paired_player_reaction =
                         paired_defender_asset && player_was_just_hit;
                     if (!main_character_asset && !paired_player_reaction) {
@@ -1792,23 +1923,22 @@ void TickPuppet() {
                     }
                 }
             } else if (!action) {
-                last_action_sent = nullptr;
+                g_last_action_sent = nullptr;
             }
         }
     }
 
     if (coop::Get().sync_montages && net::IsConnected()) {
-        static ue::UObject* last_sent = nullptr;
-        static float last_sent_position = 0.f;
         const DWORD now = GetTickCount();
         const bool attack_pending = now < g_cosmetic_attack_montage_until;
         ue::AnimState anim = {};
         const bool have_anim = ue::ReadAnimState(player, &anim) && anim.montage != nullptr;
-        const bool montage_restarted =
-            have_anim && anim.montage == last_sent && anim.position + 0.01f < last_sent_position;
-        if (have_anim) last_sent_position = anim.position;
-        if (have_anim && (anim.montage != last_sent || montage_restarted || attack_pending)) {
-            last_sent = anim.montage;
+        const bool montage_restarted = have_anim && anim.montage == g_last_montage_sent &&
+                                       anim.position + 0.01f < g_last_montage_position;
+        if (have_anim) g_last_montage_position = anim.position;
+        if (have_anim &&
+            (anim.montage != g_last_montage_sent || montage_restarted || attack_pending)) {
+            g_last_montage_sent = anim.montage;
             char path[192] = {};
             if (ue::GetObjectPathName(anim.montage, path, sizeof(path))) {
                 net::SendMontageState(path, anim.position);
@@ -1909,7 +2039,7 @@ void TickPuppet() {
             }
 
             if (ue::PlayAnimationAsset(visual_actor, animation, position)) {
-                const DWORD until = AnimationDeadline(animation);
+                const DWORD until = AnimationDeadline(animation, position);
                 ue::UObject* anim_instance = ue::GetAnimInstance(visual_actor);
                 if (actor_hash == 0) {
                     g_puppet_anim_instance = anim_instance;
@@ -1944,7 +2074,11 @@ void TickPuppet() {
         }
     }
 
-    net::ConsumeConnectedEvent();
+    if (net::ConsumeConnectedEvent()) {
+        // A fresh session starts every cumulative total from zero on both
+        // sides; totals left over from the previous one would be re-applied.
+        ResetEnemyLedgers();
+    }
     if (net::ConsumeDisconnectedEvent()) {
         SC_LOG("net: peer left -- despawning puppet");
         DespawnPuppet();

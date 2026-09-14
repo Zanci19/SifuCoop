@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace sifucoop::ue {
@@ -49,6 +50,9 @@ void* GetAnimInstanceClass(UObject* actor);
 bool RestoreAnimationBlueprint(UObject* actor, void* anim_class);
 
 bool IsValidObject(UObject* object);
+
+// Whether [address, address + size) is committed, readable memory.
+bool RangeReadable(const void* address, std::size_t size);
 
 float GetAnimationAssetLength(UObject* animation_asset);
 

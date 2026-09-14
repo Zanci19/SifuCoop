@@ -10,4 +10,7 @@ void RemoveTickHook();
 
 float FrameDeltaSeconds();
 
+// Monotonic count of engine ticks since the hook was installed.
+unsigned long long FrameCount();
+
 }

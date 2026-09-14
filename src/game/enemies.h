@@ -11,6 +11,11 @@ void InitEnemies(std::uintptr_t module_base);
 void TickEnemies();
 
 void ForgetEnemyWorldObjects();
+
+// Forgets every cumulative damage total on both the reporting and the applying
+// side. Called when a session is (re)established so a peer whose totals restart
+// from zero is not read as "everything happened again".
+void ResetEnemyLedgers();
 void NotifyPuppetWillBeDestroyed(ue::UObject* puppet);
 
 ue::UObject* FindEnemyByHash(std::uint32_t hash);

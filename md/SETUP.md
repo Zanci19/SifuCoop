@@ -118,8 +118,9 @@ passphrase=shared-secret ; must match on both machines
 
 ## 4. Play
 
-The host loads a level — through Sifu's own menus, or from the *Levels* tab. The joiner is
-pulled in automatically, and follows the host through every later level change too.
+The host loads a level — through Sifu's own menus, or from the *Levels* tab — and invites
+the joiner (F1 -> Play). The joiner accepts from the same menu, and is invited again on every
+later level change. Set `auto_join_level=1` in `SifuCoop.ini` to travel without the prompt.
 
 The other player's character appears on its own. Fight.
 
@@ -155,9 +156,10 @@ nothing: the next one carries the whole story.
 | | |
 |---|---|
 | Both players: position, movement, attacks, health, guard, knockdown | **yes** |
-| Enemy positions, health, guard, death | **yes** — the host decides |
-| Enemy attacks on the joining screen | **yes**, but see below |
-| Levels — the joiner follows the host automatically | **yes** |
+| Enemy positions, health, guard, death | **yes** — the host owns health and death; whoever an enemy is fighting runs its AI |
+| Enemy attacks on the other screen | **yes**, but see below |
+| Levels — the host invites, the joiner is pulled along | **yes** (`auto_join_level=1` skips the prompt) |
+| Your partner's held weapon | **no** — not equipped on their body |
 | Shrines, upgrades, age, death counter, save progress | **no** — each player keeps their own |
 | Bosses and cutscenes | **untested** — expect them to go their own way |
 | More than two players | no |

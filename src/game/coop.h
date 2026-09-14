@@ -37,7 +37,7 @@ struct Config {
 
     bool sync_run_state = true;
 
-    bool mirror_hit_reactions = false;
+    bool mirror_hit_reactions = true;
 
     bool sync_peer_age = true;
 
@@ -47,11 +47,10 @@ struct Config {
 
     bool peer_fights_locally = true;
 
-    bool retarget_from_down_peer = false;
-    bool observer_cosmetic_enemy_attacks_only = false;
-    bool sync_enemy_death_animations = false;
-    bool use_engine_outfit_refresh = false;
-    bool sync_peer_visual_age = false;
+    bool retarget_from_down_peer = true;
+    bool observer_cosmetic_enemy_attacks_only = true;
+    bool sync_enemy_death_animations = true;
+    bool sync_peer_visual_age = true;
 
     bool remote_player_attacks = true;
 

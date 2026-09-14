@@ -114,32 +114,18 @@ bool WritePuppetOutfit(ue::UObject* puppet, int index) {
     return ue::CallFunction(comp, L"BPF_SwapOutfit", &args);
 }
 
+// The full-body path (UpdateMorphTexAging) reads controller 0's age, and the
+// only way to feed it the partner's age was to write that age onto the LOCAL
+// player for a moment. Age drives stats in Sifu, so anything listening saw the
+// local character age and un-age. That path is gone; only the puppet's own
+// mesh is touched.
 bool RefreshPuppetVisualAge(ue::UObject* puppet, int age) {
-    if (!puppet || !IsSafeToDress(puppet)) return false;
+    if (!puppet || age < 0 || !IsSafeToDress(puppet)) return false;
     ue::UObject* world = ue::GetWorld();
     if (!world) return false;
     ue::UObject* aging = ue::FindObjectByPath(
         L"/Game/Maps/Zoos/Newin/Aging/CharacterAging.Default__CharacterAging_C");
     if (!aging) return false;
-
-    ue::UObject* local = ue::GetPlayerCharacter(world, 0);
-    const int old_local_age = local ? ReadLocalAge(local) : -1;
-    const bool staged =
-        local && old_local_age >= 0 &&
-        (old_local_age == age || WriteCharacterAge(local, age));
-    if (staged) {
-        struct FullParams {
-            ue::UObject* Character;
-            bool OnlyBodyAging;
-            std::uint8_t Padding[7];
-            ue::UObject* WorldContextObject;
-        } full = {puppet, false, {}, world};
-        static_assert(sizeof(FullParams) == 24,
-                      "UpdateMorphTexAging parameter frame changed");
-        const bool refreshed = ue::CallFunction(aging, L"UpdateMorphTexAging", &full);
-        if (old_local_age != age) WriteCharacterAge(local, old_local_age);
-        if (refreshed) return true;
-    }
 
     ue::UObject* mesh = ue::GetSkeletalMeshComponent(puppet);
     if (!mesh) return false;
@@ -432,8 +418,15 @@ DWORD g_last_send = 0;
 }
 
 void TickRunState(ue::UObject* player) {
-    if (!coop::Get().sync_run_state) return;
     if (!player) return;
+
+    // Restoring the joiner's own cheat selection after a session ends is a
+    // lifecycle duty, not part of run-state synchronisation; it must run even
+    // with sync_run_state off.
+    if (!coop::Get().sync_run_state) {
+        TickCheatAuthority();
+        return;
+    }
 
     if (!net::IsConnected()) {
         TickCheatAuthority();
@@ -548,7 +541,9 @@ void TickRunState(ue::UObject* player) {
                     dressed_world = ue::GetWorld();
                     dressed_as = outfit_state.outfit_index;
 
-                    if (coop::Get().sync_peer_visual_age) {
+                    // An outfit swap rebuilds the mesh, so the aging morph has
+                    // to be re-applied -- but only once a real age is known.
+                    if (coop::Get().sync_peer_visual_age && g_last_peer_age >= 0) {
                         visual_age_puppet = outfit_puppet;
                         visual_age_world = ue::GetWorld();
                         visual_age_due = now + 500;

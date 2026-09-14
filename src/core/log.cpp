@@ -71,8 +71,10 @@ void Write(const char* fmt, ...) {
 
     if (g_lock_ready) EnterCriticalSection(&g_lock);
     DWORD written = 0;
+    // No FlushFileBuffers here: the OS cache keeps the line through a process
+    // crash, and a device flush per line stalled the game thread under
+    // verbose logging.
     WriteFile(g_file, line, static_cast<DWORD>(n), &written, nullptr);
-    FlushFileBuffers(g_file);
     if (g_lock_ready) LeaveCriticalSection(&g_lock);
 
     OutputDebugStringA(line);

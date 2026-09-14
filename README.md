@@ -47,18 +47,22 @@ has been play-tested.
 | | |
 |---|---|
 | Both players: position, movement, attacks, health, guard, knockdown | yes |
-| Enemy positions, health, guard and death | yes — the host's game decides |
-| Enemy attacks on the joining screen | yes, though the exact strike may differ |
-| Levels — the joiner follows the host automatically | yes |
+| Enemy positions, health, guard and death | yes — one machine simulates each enemy, the other shows it |
+| Enemy attacks and hit reactions on the other screen | yes, as the owner's exact animation sequence |
+| Levels — the host invites, the joiner is pulled along | yes (`auto_join_level=1` skips the prompt) |
+| Your partner's age and outfit on their body | yes |
+| Your partner's held weapon on their body | no — it is reported but not equipped |
+| Dodges, guards and parries as reliable events | no — only attacks are; the rest travel as animation |
 | Shrines, upgrades, age, death counter, save progress | no — each player keeps their own |
 | Bosses and cutscenes | untested; expect them to go their own way |
 | More than two players | no |
 
 ## How it works
 
-**The host's game is the authority for every enemy.** Their AI, position, health and death
-all come from the host; the joiner's copies have their brains switched off and are driven
-from what the host reports.
+**One machine simulates each enemy, and the host's game owns its health and death.** An
+enemy that is fighting the joining player runs its AI on the joiner's machine and is shown on
+the host's; every other enemy runs on the host and is shown on the joiner's. The copy that is
+only shown has its brain switched off and is driven from what the owner reports.
 
 This is not a preference. Sifu's hitboxes, animation timings, parry windows and AI all live
 inside the Windows executable, so only a running Sifu can decide whether a hit landed. A

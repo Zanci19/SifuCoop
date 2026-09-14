@@ -38,6 +38,10 @@ struct LocalState {
     bool in_level = false;
 };
 
+// Keeps the session alive every engine tick, world or no world.
+void PumpNetwork();
+
+// Sends the local player's snapshot; call once per frame from gameplay.
 void TickSession(const LocalState& local);
 
 bool GetPeerTransform(ue::FVector* location, ue::FRotator* rotation, ue::FVector* velocity);
@@ -100,6 +104,9 @@ int GetEnemyStates(EnemyStateOut* out, int max_out);
 bool HasEnemySweep();
 
 bool EnemySweepIsFresh();
+
+// Milliseconds since the last enemy data arrived (huge when none ever has).
+unsigned long EnemySweepAgeMs();
 
 void ResetEnemyReplication();
 

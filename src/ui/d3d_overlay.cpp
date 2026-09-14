@@ -481,6 +481,11 @@ BOOL WINAPI ClipCursorHook(const RECT* rect) {
 
 void FeedMenuInput() {
     ImGuiIO& io = ImGui::GetIO();
+    if (GetForegroundWindow() != g_window) {
+        io.AddMouseButtonEvent(0, false);
+        io.AddMouseButtonEvent(1, false);
+        return;
+    }
 
     POINT cursor = {};
     if (GetCursorPos(&cursor) && ScreenToClient(g_window, &cursor)) {
@@ -525,7 +530,8 @@ HRESULT __stdcall PresentHook(IDXGISwapChain* swap_chain, UINT sync_interval, UI
 
     if (g_initialised) {
         static bool f1_was_down = false;
-        const bool f1_down = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
+        const bool game_focused = GetForegroundWindow() == g_window;
+        const bool f1_down = game_focused && (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
         if (f1_down && !f1_was_down) {
             g_menu_open = !g_menu_open;
             ImGui::GetIO().MouseDrawCursor = g_menu_open;

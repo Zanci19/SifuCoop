@@ -13,6 +13,7 @@
 #include "game/replay.h"
 #include "game/selftest.h"
 #include "net/instance_guard.h"
+#include "net/protocol.h"
 #include "net/session.h"
 #include "ui/overlay.h"
 #include "core/offsets.g.h"
@@ -28,35 +29,55 @@ namespace {
 
 HANDLE g_game_process_mutex = nullptr;
 
+// Launching through the root Sifu.exe shim (which SifuCoopLauncher does) starts
+// a short-lived first game process that loads this dll, holds the guard for a
+// few seconds, relaunches the real game and exits. Measured live 2026-09-14:
+// the real process attached 3.4 s later, found the guard taken, and stayed
+// inert. So a taken guard is retried for a while before it is believed.
 bool AcquireGameProcessGuard() {
-    SetLastError(ERROR_SUCCESS);
-    HANDLE mutex = CreateMutexA(nullptr, FALSE, sifucoop::net::kGameProcessMutexNameA);
-    const DWORD error = GetLastError();
-    if (!mutex) {
-        char message[192] = {};
-        _snprintf(message, sizeof(message),
-                  "SifuCoop could not create its process guard (Windows error %lu). "
-                  "The mod will stay inactive to avoid unsafe duplicate hooks.",
-                  error);
-        SC_LOG("guard: process mutex creation failed (%lu) -- refusing to hook", error);
-        MessageBoxA(nullptr, message, "SifuCoop not started",
-                    MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
-        return false;
-    }
-    if (error == ERROR_ALREADY_EXISTS) {
+    constexpr DWORD kRetryForMs = 20000;
+    constexpr DWORD kRetryEveryMs = 500;
+    const DWORD started = GetTickCount();
+    bool logged_wait = false;
+    for (;;) {
+        SetLastError(ERROR_SUCCESS);
+        HANDLE mutex = CreateMutexA(nullptr, FALSE, sifucoop::net::kGameProcessMutexNameA);
+        const DWORD error = GetLastError();
+        if (!mutex) {
+            char message[192] = {};
+            _snprintf(message, sizeof(message),
+                      "SifuCoop could not create its process guard (Windows error %lu). "
+                      "The mod will stay inactive to avoid unsafe duplicate hooks.",
+                      error);
+            SC_LOG("guard: process mutex creation failed (%lu) -- refusing to hook", error);
+            MessageBoxA(nullptr, message, "SifuCoop not started",
+                        MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+            return false;
+        }
+        if (error != ERROR_ALREADY_EXISTS) {
+            g_game_process_mutex = mutex;
+            SC_LOG("guard: acquired process-lifetime instance guard%s",
+                   logged_wait ? " (the earlier process has exited)" : "");
+            return true;
+        }
         CloseHandle(mutex);
-        SC_LOG("guard: another SifuCoop game process is active -- refusing to hook");
-        MessageBoxA(nullptr,
-                    "Another SifuCoop-enabled Sifu process is already running. Close it "
-                    "before starting another copy. This game will continue without the mod.",
-                    "SifuCoop already running",
-                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
-        return false;
+        if (!logged_wait) {
+            logged_wait = true;
+            SC_LOG("guard: another SifuCoop game process holds the guard -- waiting up to "
+                   "%lus in case it is the launcher shim handing over",
+                   kRetryForMs / 1000);
+        }
+        if (GetTickCount() - started >= kRetryForMs) break;
+        Sleep(kRetryEveryMs);
     }
 
-    g_game_process_mutex = mutex;
-    SC_LOG("guard: acquired process-lifetime instance guard");
-    return true;
+    SC_LOG("guard: another SifuCoop game process is still active -- refusing to hook");
+    MessageBoxA(nullptr,
+                "Another SifuCoop-enabled Sifu process is already running. Close it "
+                "before starting another copy. This game will continue without the mod.",
+                "SifuCoop already running",
+                MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+    return false;
 }
 
 struct PeIdentity {
@@ -124,6 +145,48 @@ bool VerifyGameBuild(HMODULE game, uintptr_t base) {
         }
         break;
     }
+
+    // Without these the mod cannot hook, reflect or track anything, and a zero
+    // offset resolves to the PE header. Refuse rather than execute that.
+    struct Required {
+        const char* name;
+        std::uint32_t value;
+    };
+    const Required required[] = {
+        {"UGameEngine::Tick", offsets::UGameEngine_Tick},
+        {"GEngine", offsets::GEngine},
+        {"GWorld", offsets::GWorld},
+        {"FName ctor", offsets::FName_FromWide},
+        {"UObject::FindFunction", offsets::UObject_FindFunction},
+        {"UObject::ProcessEvent", offsets::UObject_ProcessEvent},
+        {"UGameplayStatics::GetPlayerCharacter", offsets::UGameplayStatics_GetPlayerCharacter},
+        {"UObjectBaseUtility::GetPathName", offsets::UObjectBaseUtility_GetPathName},
+        {"StaticFindObjectSafe", offsets::StaticFindObjectSafe},
+        {"UGameplayStatics::GetAllActorsOfClass", offsets::UGameplayStatics_GetAllActorsOfClass},
+        {"AFightingCharacter::StaticClass", offsets::AFightingCharacter_StaticClass},
+        {"UWorld::SpawnActor", offsets::UWorld_SpawnActor_VecRot},
+        {"UCharacterHealthComponent::Get", offsets::UCharacterHealthComponent_Get},
+        {"UHealthComponent::m_fHealth", offsets::M_UHealthComponent_fHealth},
+        {"UHealthComponent::m_fMaxHealth", offsets::M_UHealthComponent_fMaxHealth},
+        {"AFightingCharacter::PlayOrder", offsets::AFightingCharacter_PlayOrder},
+    };
+    int required_missing = 0;
+    for (const Required& item : required) {
+        if (item.value != 0) continue;
+        ++required_missing;
+        SC_LOG("guard: REQUIRED offset '%s' is missing from the '%s' table", item.name, build);
+    }
+    if (required_missing > 0) {
+        char message[512] = {};
+        wsprintfA(message,
+                  "SifuCoop did not start: %d required offset(s) are missing from its '%s' "
+                  "table. Rebuild the mod against this game folder before playing.\n\n"
+                  "The game will continue normally without the mod.",
+                  required_missing, build);
+        MessageBoxA(nullptr, message, "SifuCoop needs a rebuild",
+                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+        return false;
+    }
     return true;
 }
 
@@ -135,7 +198,14 @@ void LogResolved(uintptr_t base, const char* name, uint32_t rva) {
            bytes[3], bytes[4]);
 }
 
+#ifndef SIFUCOOP_COMMIT
+#define SIFUCOOP_COMMIT "unknown"
+#endif
+
 DWORD WINAPI Bootstrap(LPVOID) {
+    SC_LOG("build: SifuCoop protocol v%u, commit %s, compiled %s %s",
+           static_cast<unsigned int>(sifucoop::net::kProtocolVersion), SIFUCOOP_COMMIT,
+           __DATE__, __TIME__);
     if (!AcquireGameProcessGuard()) return 0;
 
     HMODULE game = GetModuleHandleA(nullptr);

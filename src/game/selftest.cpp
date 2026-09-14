@@ -249,6 +249,12 @@ void TickSelfTest() {
 
         case Step::Report:
             ReportRound();
+            if (g_round == Round::ModDriven) {
+                ue::UObject* enemy = FindEnemyByHash(g_target_hash);
+                if (enemy && StartBrain(enemy)) {
+                    SC_LOG("selftest: test enemy's brain restarted");
+                }
+            }
             g_round = (g_round == Round::AiDriven) ? Round::ModDriven : Round::Done;
             if (g_round == Round::Done) {
                 SC_LOG("selftest: finished. Set selftest=0 in SifuCoop.ini.");

@@ -101,8 +101,6 @@ void Load() {
         g_config.observer_cosmetic_enemy_attacks_only, ini);
     g_config.sync_enemy_death_animations = ReadBool(
         "sync_enemy_death_animations", g_config.sync_enemy_death_animations, ini);
-    g_config.use_engine_outfit_refresh = ReadBool(
-        "use_engine_outfit_refresh", g_config.use_engine_outfit_refresh, ini);
     g_config.sync_peer_visual_age =
         ReadBool("sync_peer_visual_age", g_config.sync_peer_visual_age, ini);
     g_config.mirror_hit_reactions =
@@ -154,6 +152,24 @@ void Load() {
            g_config.echo_enemy_attacks, g_config.report_damage,
            g_config.park_extra_enemies, g_config.auto_follow_level,
            g_config.adaptive_interp);
+    // The complete effective configuration, so a log can be tied to behaviour
+    // without guessing which defaults a fresh install picked up.
+    SC_LOG("coop: effective -- echo_player=%d friendly_rel=%d remote_player_attacks=%d "
+           "montages=%d peer_vitals=%d run_state=%d hit_reactions=%d peer_age=%d "
+           "visual_age=%d client_sim=%d peer_fights_locally=%d retarget_down=%d "
+           "observer_cosmetic=%d death_anims=%d puppet_invincible=%d pawn_collision_off=%d "
+           "auto_join=%d interp=%dms hz=%d overlay=%d verbose=%d/%d",
+           g_config.echo_player_attacks, g_config.friendly_relationship,
+           g_config.remote_player_attacks, g_config.sync_montages,
+           g_config.mirror_peer_vitals, g_config.sync_run_state,
+           g_config.mirror_hit_reactions, g_config.sync_peer_age,
+           g_config.sync_peer_visual_age, g_config.client_simulates_enemies,
+           g_config.peer_fights_locally, g_config.retarget_from_down_peer,
+           g_config.observer_cosmetic_enemy_attacks_only,
+           g_config.sync_enemy_death_animations, g_config.puppet_invincible,
+           g_config.puppet_ignores_pawn_collision, g_config.auto_join_level,
+           g_config.interp_delay_ms, g_config.snapshot_hz, g_config.in_game_overlay,
+           g_config.verbose_enemies, g_config.verbose_orders);
 }
 
 void Save() {
@@ -189,7 +205,6 @@ void Save() {
     WriteBool("observer_cosmetic_enemy_attacks_only",
               g_config.observer_cosmetic_enemy_attacks_only, ini);
     WriteBool("sync_enemy_death_animations", g_config.sync_enemy_death_animations, ini);
-    WriteBool("use_engine_outfit_refresh", g_config.use_engine_outfit_refresh, ini);
     WriteBool("sync_peer_visual_age", g_config.sync_peer_visual_age, ini);
     WriteBool("mirror_hit_reactions", g_config.mirror_hit_reactions, ini);
     WriteBool("sync_peer_age", g_config.sync_peer_age, ini);

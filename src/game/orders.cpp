@@ -304,9 +304,29 @@ OrderTypeStat g_order_census[kOrderTypeSlots];
 
 DWORD g_hit_window_until = 0;
 
-const void* g_reaction_actor = nullptr;
-DWORD g_reaction_armed_ms = 0;
-unsigned int g_reaction_order_type = 0;
+// Several bodies can be hit by one sweep in the same frame, so the reaction
+// being armed cannot be a single slot: the last PlayOrder would win and the
+// others would never have their hit sequence captured.
+struct ArmedReaction {
+    const void* actor = nullptr;
+    DWORD armed_ms = 0;
+    unsigned int order_type = 0;
+};
+constexpr int kArmedReactionSlots = 8;
+ArmedReaction g_armed_reactions[kArmedReactionSlots] = {};
+
+void ArmReaction(const void* actor, unsigned int order_type, DWORD now) {
+    ArmedReaction* slot = nullptr;
+    for (ArmedReaction& candidate : g_armed_reactions) {
+        if (candidate.actor == actor) {
+            slot = &candidate;
+            break;
+        }
+        if (!slot && (!candidate.actor || now - candidate.armed_ms > 100)) slot = &candidate;
+    }
+    if (!slot) slot = &g_armed_reactions[0];
+    *slot = {actor, now, order_type};
+}
 
 void NoteOrderType(unsigned int type, bool from_player, bool in_hit_window) {
     for (int i = 0; i < kOrderTypeSlots; ++i) {
@@ -355,9 +375,7 @@ extern "C" void sifucoop_on_playorder(void* self, unsigned int order_type,
     NoteOrderType(order_type & 0xFF, from_player, in_hit_window);
 
     if (IsReactionOrder(order_type & 0xFF)) {
-        g_reaction_actor = self;
-        g_reaction_armed_ms = order_now;
-        g_reaction_order_type = order_type & 0xFF;
+        ArmReaction(self, order_type & 0xFF, order_now);
         NoteEnemyReactionOrder(self, order_type & 0xFF);
     }
 
@@ -513,31 +531,44 @@ struct UObjectArray {
 
 UObjectArray g_hit_anim_histories[kPendingReactionCount] = {};
 
-void __fastcall OrderHittedOnStartHook(void* order) {
-    g_original_order_hitted_on_start(order);
-    if (!order || g_mirroring || !net::IsConnected()) return;
-    if (!coop::Get().mirror_hit_reactions) return;
+constexpr DWORD kReactionCaptureWindowMs = 700;
 
-    const DWORD now = GetTickCount();
-    const void* actor = g_reaction_actor;
-    const unsigned int type = g_reaction_order_type;
-
-    if (!actor || now - g_reaction_armed_ms > 100) return;
-    g_reaction_actor = nullptr;
-
-    const std::uint32_t actor_hash = EnemyHashForActor(actor);
-    if (actor_hash == 0) return;
-    if (!EnemyActionsAreLocallyAuthoritative(actor_hash)) return;
-
+void QueuePendingReaction(std::uint32_t actor_hash, unsigned int type, DWORD now) {
     for (PendingReaction& pending : g_pending_reactions) {
         if (pending.actor_hash != actor_hash && pending.until_ms != 0 &&
             static_cast<LONG>(pending.until_ms - now) > 0) {
             continue;
         }
-        pending = {actor_hash, type, now + 400, nullptr};
+        pending = {actor_hash, type, now + kReactionCaptureWindowMs, nullptr, nullptr};
         return;
     }
-    g_pending_reactions[0] = {actor_hash, type, now + 400, nullptr};
+    g_pending_reactions[0] = {actor_hash, type, now + kReactionCaptureWindowMs, nullptr,
+                              nullptr};
+}
+
+void __fastcall OrderHittedOnStartHook(void* order) {
+    g_original_order_hitted_on_start(order);
+    if (!order || g_mirroring || !net::IsConnected()) return;
+    if (!coop::Get().mirror_hit_reactions) return;
+
+    // The order does not say whose it is, so every body armed in the last
+    // 100 ms gets a capture; the capture itself reads that body's own history.
+    const DWORD now = GetTickCount();
+    for (ArmedReaction& armed : g_armed_reactions) {
+        if (!armed.actor) continue;
+        if (now - armed.armed_ms > 100) {
+            armed = {};
+            continue;
+        }
+        const void* actor = armed.actor;
+        const unsigned int type = armed.order_type;
+        armed = {};
+
+        const std::uint32_t actor_hash = EnemyHashForActor(actor);
+        if (actor_hash == 0) continue;
+        if (!EnemyActionsAreLocallyAuthoritative(actor_hash)) continue;
+        QueuePendingReaction(actor_hash, type, now);
+    }
 }
 
 void PumpReactionCaptures() {
@@ -782,7 +813,14 @@ bool InstallOrderHook(std::uintptr_t base, ue::UObject* any_character) {
     if (attempted) return false;
     attempted = true;
 
-    g_save_to = reinterpret_cast<SaveToFn>(base + offsets::OrderBase_SaveTo);
+    if (offsets::ABaseCharacter_OnLocalPlayOrder == 0 &&
+        offsets::AFightingCharacter_OnLocalPlayOrder == 0) {
+        SC_LOG("order: OnLocalPlayOrder offsets missing on this build -- not hooking");
+        return false;
+    }
+    g_save_to = offsets::OrderBase_SaveTo
+                    ? reinterpret_cast<SaveToFn>(base + offsets::OrderBase_SaveTo)
+                    : nullptr;
 
     const void* candidates[] = {
         reinterpret_cast<void*>(base + offsets::ABaseCharacter_OnLocalPlayOrder),
@@ -1115,6 +1153,10 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
         return false;
     }
 
+    if (offsets::AFightingCharacter_PlayOrder == 0) {
+        SC_LOG("order: PlayOrder offset missing on this build -- order hooks disabled");
+        return false;
+    }
     auto* target = reinterpret_cast<void*>(base + offsets::AFightingCharacter_PlayOrder);
 
     MH_STATUS status = MH_CreateHook(target, reinterpret_cast<void*>(&sifucoop_playorder_detour),
@@ -1134,7 +1176,8 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
 
     auto* multicast =
         reinterpret_cast<void*>(base + offsets::UOrderComponent_MultiCastPlayOrder_Impl);
-    if (MH_CreateHook(multicast, reinterpret_cast<void*>(&sifucoop_multicast_detour),
+    if (offsets::UOrderComponent_MultiCastPlayOrder_Impl != 0 &&
+        MH_CreateHook(multicast, reinterpret_cast<void*>(&sifucoop_multicast_detour),
                       &g_multicast_trampoline) == MH_OK &&
         MH_EnableHook(multicast) == MH_OK) {
         SC_LOG("order: MultiCastPlayOrder hook ACTIVE at %p", multicast);
@@ -1144,11 +1187,13 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
 
     auto* selector =
         reinterpret_cast<void*>(base + offsets::FComboTransitions_GeNextAttackID);
-    if (MH_CreateHook(selector, reinterpret_cast<void*>(&GeNextAttackIDHook),
+    if (offsets::FComboTransitions_GeNextAttackID != 0 &&
+        MH_CreateHook(selector, reinterpret_cast<void*>(&GeNextAttackIDHook),
                       reinterpret_cast<void**>(&g_original_next_attack_id)) == MH_OK &&
         MH_EnableHook(selector) == MH_OK) {
         SC_LOG("order: move selector hook ACTIVE at %p", selector);
     } else {
+        g_original_next_attack_id = nullptr;
         SC_LOG("order: move selector hook FAILED -- attacks will not match");
     }
 
@@ -1177,16 +1222,22 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
         }
     }
 
-    g_launch_ai_attack = reinterpret_cast<LaunchAIAttackFn>(
-        base + offsets::UAttackBTTask_LaunchAttack);
+    g_launch_ai_attack = offsets::UAttackBTTask_LaunchAttack
+        ? reinterpret_cast<LaunchAIAttackFn>(base + offsets::UAttackBTTask_LaunchAttack)
+        : nullptr;
 
-    g_get_attack_handler = reinterpret_cast<GetAttackHandlerFn>(
-        base + offsets::UAIFightingComponent_GetAttackHandler);
-    g_prepare_next_ai_attack = reinterpret_cast<PrepareNextAIAttackFn>(
-        base + offsets::FAIAttackHandler_PrepareNextAttack);
+    g_get_attack_handler = offsets::UAIFightingComponent_GetAttackHandler
+        ? reinterpret_cast<GetAttackHandlerFn>(
+              base + offsets::UAIFightingComponent_GetAttackHandler)
+        : nullptr;
+    g_prepare_next_ai_attack = offsets::FAIAttackHandler_PrepareNextAttack
+        ? reinterpret_cast<PrepareNextAIAttackFn>(
+              base + offsets::FAIAttackHandler_PrepareNextAttack)
+        : nullptr;
     auto* set_next_target = reinterpret_cast<void*>(
         base + offsets::UAttackComponent_SetNextAttackTarget);
-    if (MH_CreateHook(set_next_target, reinterpret_cast<void*>(&SetNextAttackTargetHook),
+    if (offsets::UAttackComponent_SetNextAttackTarget != 0 &&
+        MH_CreateHook(set_next_target, reinterpret_cast<void*>(&SetNextAttackTargetHook),
                       reinterpret_cast<void**>(&g_original_set_next_attack_target)) == MH_OK &&
         MH_EnableHook(set_next_target) == MH_OK) {
         SC_LOG("order: mirrored enemy target hook ACTIVE at %p", set_next_target);
@@ -1199,7 +1250,8 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
            reinterpret_cast<void*>(g_launch_ai_attack));
 
     auto* launch = reinterpret_cast<void*>(base + offsets::UAttackComponent_LaunchAttack);
-    if (MH_CreateHook(launch, reinterpret_cast<void*>(&sifucoop_launch_attack_detour),
+    if (offsets::UAttackComponent_LaunchAttack != 0 &&
+        MH_CreateHook(launch, reinterpret_cast<void*>(&sifucoop_launch_attack_detour),
                       &g_launch_attack_trampoline) == MH_OK &&
         MH_EnableHook(launch) == MH_OK) {
         SC_LOG("order: LaunchAttack hook ACTIVE at %p", launch);
@@ -1239,7 +1291,8 @@ bool InstallPlayOrderHook(std::uintptr_t base) {
 
     auto* prepare =
         reinterpret_cast<void*>(base + offsets::UAttackComponent_PrepareToLaunchAttack);
-    if (MH_CreateHook(prepare, reinterpret_cast<void*>(&sifucoop_prepare_attack_detour),
+    if (offsets::UAttackComponent_PrepareToLaunchAttack != 0 &&
+        MH_CreateHook(prepare, reinterpret_cast<void*>(&sifucoop_prepare_attack_detour),
                       &g_prepare_attack_trampoline) == MH_OK &&
         MH_EnableHook(prepare) == MH_OK) {
         SC_LOG("order: PrepareToLaunchAttack hook ACTIVE at %p", prepare);

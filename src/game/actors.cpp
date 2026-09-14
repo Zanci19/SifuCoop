@@ -62,6 +62,13 @@ SetCurrentPoseAssetFn g_set_current_pose_asset = nullptr;
 
 bool g_ready = false;
 
+// A zero offset means the symbol was not found on this build; base + 0 is the
+// PE header, not a function. Resolve it to null so every guard below holds.
+template <typename Fn>
+Fn Resolve(std::uintptr_t base, std::uint32_t rva) {
+    return rva ? reinterpret_cast<Fn>(base + rva) : nullptr;
+}
+
 constexpr int kDownStateDown = 0;
 
 constexpr int kDownStateDeath = 7;
@@ -80,61 +87,37 @@ ue::UObject** ObjectAt(ue::UObject* object, std::uint32_t offset) {
 }
 
 void InitActors(std::uintptr_t base) {
-    g_get_health =
-        reinterpret_cast<GetHealthComponentFn>(base + offsets::UCharacterHealthComponent_Get);
-    g_get_attack = reinterpret_cast<GetAttackComponentFn>(base + offsets::UAttackComponent_Get);
-    g_get_defense =
-        reinterpret_cast<GetDefenseComponentFn>(base + offsets::UDefenseComponent_Get);
-    g_apply_damage =
-        reinterpret_cast<ApplyDamageFn>(base + offsets::UHealthComponent_BPF_ApplyDamage);
-    g_is_down = reinterpret_cast<IsDownFn>(base + offsets::UCharacterHealthComponent_IsDown);
-    g_is_dead = reinterpret_cast<IsDeadFn>(base + offsets::UHealthComponent_IsDead);
-    g_set_is_down =
-        reinterpret_cast<SetIsDownFn>(base + offsets::UCharacterHealthComponent_SetIsDown);
-    g_set_down_state = reinterpret_cast<SetDownStateFn>(
-        base + offsets::UCharacterHealthComponent_InternalSetDownState);
-    g_get_faction =
-        reinterpret_cast<GetFactionFn>(base + offsets::AFightingCharacter_GetFaction);
-    g_set_faction =
-        reinterpret_cast<SetFactionFn>(base + offsets::AFightingCharacter_BPF_SetFaction);
-    g_set_invincibility = reinterpret_cast<SetInvincibilityFn>(
-        base + offsets::AFightingCharacter_BPF_SetInvincibility);
-    g_brain_class = reinterpret_cast<BrainClassFn>(base + offsets::UBrainComponent_StaticClass);
-    g_get_movement_component = offsets::ACharacter_GetMovementComponent
-                                   ? reinterpret_cast<GetMovementComponentFn>(base + offsets::ACharacter_GetMovementComponent)
-                                   : nullptr;
-    g_request_direct_move = offsets::UCharacterMovementComponent_RequestDirectMove
-                                 ? reinterpret_cast<RequestDirectMoveFn>(base + offsets::UCharacterMovementComponent_RequestDirectMove) : nullptr;
+    g_get_health = Resolve<GetHealthComponentFn>(base, offsets::UCharacterHealthComponent_Get);
+    g_get_attack = Resolve<GetAttackComponentFn>(base, offsets::UAttackComponent_Get);
+    g_get_defense = Resolve<GetDefenseComponentFn>(base, offsets::UDefenseComponent_Get);
+    g_apply_damage = Resolve<ApplyDamageFn>(base, offsets::UHealthComponent_BPF_ApplyDamage);
+    g_is_down = Resolve<IsDownFn>(base, offsets::UCharacterHealthComponent_IsDown);
+    g_is_dead = Resolve<IsDeadFn>(base, offsets::UHealthComponent_IsDead);
+    g_set_is_down = Resolve<SetIsDownFn>(base, offsets::UCharacterHealthComponent_SetIsDown);
+    g_set_down_state =
+        Resolve<SetDownStateFn>(base, offsets::UCharacterHealthComponent_InternalSetDownState);
+    g_get_faction = Resolve<GetFactionFn>(base, offsets::AFightingCharacter_GetFaction);
+    g_set_faction = Resolve<SetFactionFn>(base, offsets::AFightingCharacter_BPF_SetFaction);
+    g_set_invincibility =
+        Resolve<SetInvincibilityFn>(base, offsets::AFightingCharacter_BPF_SetInvincibility);
+    g_brain_class = Resolve<BrainClassFn>(base, offsets::UBrainComponent_StaticClass);
+    g_get_movement_component =
+        Resolve<GetMovementComponentFn>(base, offsets::ACharacter_GetMovementComponent);
+    g_request_direct_move =
+        Resolve<RequestDirectMoveFn>(base, offsets::UCharacterMovementComponent_RequestDirectMove);
     g_set_movement_speed_state =
-        offsets::UFightingMovementComponent_SetSpeedState
-            ? reinterpret_cast<SetSpeedStateFn>(
-                  base + offsets::UFightingMovementComponent_SetSpeedState)
-            : nullptr;
+        Resolve<SetSpeedStateFn>(base, offsets::UFightingMovementComponent_SetSpeedState);
     g_set_current_pose_asset =
-        offsets::USCAnimInstance_SetCurrentPoseAsset
-            ? reinterpret_cast<SetCurrentPoseAssetFn>(
-                  base + offsets::USCAnimInstance_SetCurrentPoseAsset)
-            : nullptr;
-    g_set_relationship = offsets::USocialComponent_SetRelationship
-        ? reinterpret_cast<SetRelationshipFn>(
-              base + offsets::USocialComponent_SetRelationship)
-        : nullptr;
-    g_health_kill = offsets::UHealthComponent_Kill
-                        ? reinterpret_cast<HealthKillFn>(base + offsets::UHealthComponent_Kill)
-                        : nullptr;
+        Resolve<SetCurrentPoseAssetFn>(base, offsets::USCAnimInstance_SetCurrentPoseAsset);
+    g_set_relationship =
+        Resolve<SetRelationshipFn>(base, offsets::USocialComponent_SetRelationship);
+    g_health_kill = Resolve<HealthKillFn>(base, offsets::UHealthComponent_Kill);
     g_on_rep_set_is_down =
-        offsets::UCharacterHealthComponent_OnRepSetIsDown
-            ? reinterpret_cast<HealthNotifyFn>(
-                  base + offsets::UCharacterHealthComponent_OnRepSetIsDown)
-            : nullptr;
+        Resolve<HealthNotifyFn>(base, offsets::UCharacterHealthComponent_OnRepSetIsDown);
     g_on_character_stands_up =
-        offsets::UCharacterHealthComponent_OnCharacterStandsUp
-            ? reinterpret_cast<HealthNotifyFn>(
-                  base + offsets::UCharacterHealthComponent_OnCharacterStandsUp)
-            : nullptr;
+        Resolve<HealthNotifyFn>(base, offsets::UCharacterHealthComponent_OnCharacterStandsUp);
 
-    g_ready = offsets::UCharacterHealthComponent_Get != 0 &&
-              offsets::M_UHealthComponent_fHealth != 0 &&
+    g_ready = g_get_health != nullptr && offsets::M_UHealthComponent_fHealth != 0 &&
               offsets::M_UHealthComponent_fMaxHealth != 0;
 
     SC_LOG("actors: %s (health=+0x%X maxhealth=+0x%X guard=+0x%X combo=+0x%X)",
@@ -170,6 +153,13 @@ void SetHealth(const Fighter& fighter, float health) {
     if (!value) return;
     if (health < 0.f) health = 0.f;
     *value = health;
+}
+
+void SetMaxHealth(const Fighter& fighter, float max_health) {
+    float* value = FloatAt(fighter.health, offsets::M_UHealthComponent_fMaxHealth);
+    if (!value) return;
+    if (!(max_health > 1.f) || max_health > 10000.f) return;
+    *value = max_health;
 }
 
 float GetGuard(const Fighter& fighter) {
@@ -325,6 +315,16 @@ void SetActorCollisionEnabled(ue::UObject* actor, bool enabled) {
     ue::CallFunction(actor, L"SetActorEnableCollision", &collision);
 }
 
+bool GetActorCollisionEnabled(ue::UObject* actor, bool* out) {
+    if (!actor || !out) return false;
+    struct Params {
+        bool ReturnValue;
+    } params = {};
+    if (!ue::CallFunction(actor, L"GetActorEnableCollision", &params)) return false;
+    *out = params.ReturnValue;
+    return true;
+}
+
 void SetActorPresent(ue::UObject* actor, bool present) {
     if (!actor) return;
 
@@ -425,6 +425,25 @@ bool SetRotationDirect(ue::UObject* actor, const ue::FRotator& rotation) {
     return ue::CallFunction(actor, L"K2_SetActorRotation", &params);
 }
 
+// K2_SetActorLocationAndRotation(FVector, FRotator, bool bSweep, FHitResult&,
+// bool bTeleport) -> bool. FHitResult is 0x8C bytes, 4-aligned, on this build
+// (tools/pdbdump/structdump.py FHitResult), which places the trailing fields at
+// 0xA8/0xA9. A swept move stops at whatever blocks it instead of passing
+// through walls or into another body.
+constexpr std::size_t kHitResultSize = 0x8C;
+constexpr std::size_t kSweepParamsSize = 0x1C + kHitResultSize + 4;
+
+bool MoveActorSwept(ue::UObject* actor, const ue::FVector& location,
+                    const ue::FRotator& rotation) {
+    alignas(16) std::uint8_t params[kSweepParamsSize + 64] = {};
+    std::memcpy(params + 0x00, &location, sizeof(location));
+    std::memcpy(params + 0x0C, &rotation, sizeof(rotation));
+    params[0x18] = 1;
+    params[0x1C + kHitResultSize] = 0;
+    if (!ue::CallFunction(actor, L"K2_SetActorLocationAndRotation", params)) return false;
+    return params[0x1C + kHitResultSize + 1] != 0;
+}
+
 bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
                    const ue::FRotator& rotation) {
 
@@ -439,9 +458,26 @@ bool TeleportActor(ue::UObject* actor, const ue::FVector& location,
     if (!ue::CallFunction(actor, L"K2_TeleportTo", &params)) return false;
     if (params.ReturnValue) return true;
 
+    // The destination is encroached. Sweep towards it rather than writing the
+    // transform through whatever is in the way; the unswept write is kept only
+    // for a body that is hopelessly stuck far from where it should be.
     ++g_teleport_fallbacks;
-    SetLocationNoSweep(actor, location);
-    SetRotationDirect(actor, rotation);
+    const bool swept = MoveActorSwept(actor, location, rotation);
+    if (!swept) {
+        ue::FVector where = {};
+        float gap2 = 0.f;
+        if (ue::GetActorLocation(actor, &where)) {
+            const float gx = where.X - location.X;
+            const float gy = where.Y - location.Y;
+            const float gz = where.Z - location.Z;
+            gap2 = gx * gx + gy * gy + gz * gz;
+        }
+        constexpr float kStuckDistance = 300.f;
+        if (gap2 > kStuckDistance * kStuckDistance) {
+            SetLocationNoSweep(actor, location);
+            SetRotationDirect(actor, rotation);
+        }
+    }
 
     static DWORD last_verify_ms = 0;
     const DWORD verify_now = GetTickCount();

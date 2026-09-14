@@ -112,6 +112,10 @@ struct Tracked {
     DWORD last_host_motion_ms = 0;
     bool have_host_motion = false;
 
+    ue::FVector last_owned_location = {};
+    DWORD last_owned_ms = 0;
+    bool have_owned_motion = false;
+
     std::uint8_t host_target_flags = 0;
     ue::UObject* mirrored_target = nullptr;
     DWORD last_target_sample_ms = 0;
@@ -142,11 +146,17 @@ struct Tracked {
 
 Tracked g_tracked[net::kMaxTrackedEnemies];
 int g_tracked_count = 0;
-bool g_announce_empty_ownership = false;
+
+// When the last owned enemy is released the host must hear "nothing owned"
+// promptly instead of waiting for its 1.5 s lease to go stale; a few empty
+// rounds cover a lost packet.
+int g_last_owned_sent_count = 0;
+int g_empty_owned_rounds_left = 0;
 
 ue::UObject* g_tracked_world = nullptr;
 bool g_had_host_sweep = false;
 bool g_refresh_requested = false;
+DWORD g_refresh_backoff_ms = 250;
 
 bool TrackingIsCurrent() {
     return g_tracked_count > 0 && g_tracked_world != nullptr &&
@@ -595,6 +605,35 @@ struct SourceLink {
     std::uint32_t source_hash = 0;
 };
 
+// Spawner path names are read once per spawner per world (see the note on
+// GetCurrentLevelPath in reflection.cpp for why re-reading is not free).
+struct SpawnerNameCache {
+    ue::UObject* spawner = nullptr;
+    std::uint32_t source_hash = 0;
+};
+constexpr int kSpawnerNameCacheSize = net::kMaxTrackedEnemies * 2;
+SpawnerNameCache g_spawner_names[kSpawnerNameCacheSize];
+int g_spawner_name_count = 0;
+ue::UObject* g_spawner_name_world = nullptr;
+
+std::uint32_t SpawnerSourceHash(ue::UObject* spawner) {
+    ue::UObject* world = ue::GetWorld();
+    if (g_spawner_name_world != world) {
+        g_spawner_name_world = world;
+        g_spawner_name_count = 0;
+    }
+    for (int i = 0; i < g_spawner_name_count; ++i) {
+        if (g_spawner_names[i].spawner == spawner) return g_spawner_names[i].source_hash;
+    }
+    char path[256] = {};
+    if (!ue::GetObjectPathName(spawner, path, sizeof(path))) return 0;
+    const std::uint32_t hash = HashName(path);
+    if (g_spawner_name_count < kSpawnerNameCacheSize) {
+        g_spawner_names[g_spawner_name_count++] = {spawner, hash};
+    }
+    return hash;
+}
+
 int EnumerateSpawnerSources(SourceLink* out, int max_out) {
     if (!out || max_out <= 0 || !g_get_all_actors) return 0;
     ue::UObject* world = ue::GetWorld();
@@ -621,9 +660,9 @@ int EnumerateSpawnerSources(SourceLink* out, int max_out) {
         if (!ue::CallFunction(spawner, L"BPF_GetSpawnedAI", &spawned_params)) continue;
         ue::UObject* spawned = spawned_params.ReturnValue;
         if (!spawned) continue;
-        char path[256] = {};
-        if (!ue::GetObjectPathName(spawner, path, sizeof(path))) continue;
-        out[count++] = {spawned, HashName(path)};
+        const std::uint32_t source_hash = SpawnerSourceHash(spawner);
+        if (source_hash == 0) continue;
+        out[count++] = {spawned, source_hash};
     }
     return count;
 }
@@ -688,18 +727,34 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
         ue::UObject* actor = fighters[i];
         if (!actor || actor == player || actor == puppet) continue;
 
-        char name[sizeof(Tracked::name)] = {};
-        if (!LeafName(actor, name, sizeof(name))) continue;
-
         Tracked& entry = g_tracked[g_tracked_count];
         entry = Tracked();
-        entry.actor = actor;
-        entry.attack_component = ResolveFighter(actor).attack;
-        entry.ai_fighting = GetAIFightingComponent(actor);
-        entry.source_hash = SourceHashForActor(actor, source_links, source_count);
 
-        entry.runtime_named = SplitRuntimeSuffix(name, &entry.runtime_number);
-        lstrcpynA(entry.name, name, sizeof(entry.name));
+        // A body seen in the previous refresh of this world keeps its name and
+        // components; only new bodies pay for a path-name read.
+        const Tracked* known = nullptr;
+        for (int k = 0; same_world && k < previous_count; ++k) {
+            if (previous[k].actor == actor && previous[k].name[0]) {
+                known = &previous[k];
+                break;
+            }
+        }
+        if (known) {
+            lstrcpynA(entry.name, known->name, sizeof(entry.name));
+            entry.runtime_named = known->runtime_named;
+            entry.runtime_number = known->runtime_number;
+            entry.attack_component = known->attack_component;
+            entry.ai_fighting = known->ai_fighting;
+        } else {
+            char name[sizeof(Tracked::name)] = {};
+            if (!LeafName(actor, name, sizeof(name))) continue;
+            entry.runtime_named = SplitRuntimeSuffix(name, &entry.runtime_number);
+            lstrcpynA(entry.name, name, sizeof(entry.name));
+            entry.attack_component = ResolveFighter(actor).attack;
+            entry.ai_fighting = GetAIFightingComponent(actor);
+        }
+        entry.actor = actor;
+        entry.source_hash = SourceHashForActor(actor, source_links, source_count);
         ++g_tracked_count;
     }
 
@@ -749,6 +804,9 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
             entry.last_host_location = previous[k].last_host_location;
             entry.last_host_motion_ms = previous[k].last_host_motion_ms;
             entry.have_host_motion = previous[k].have_host_motion;
+            entry.last_owned_location = previous[k].last_owned_location;
+            entry.last_owned_ms = previous[k].last_owned_ms;
+            entry.have_owned_motion = previous[k].have_owned_motion;
             entry.ever_seen_from_host = previous[k].ever_seen_from_host;
 
             entry.peer_aggro_until = previous[k].peer_aggro_until;
@@ -1022,8 +1080,11 @@ void PublishEnemies() {
         const bool was_active = entry.active;
         entry.active = !IsPooled(location);
         if (was_active && !entry.active) {
-
-            entry.death_announce_until = now + 2000;
+            // Entering the pool is only a death if the body was already dead or
+            // down; a live body pulled for a scripted despawn is not a corpse
+            // and must not be advertised as one.
+            const bool looked_dead = entry.health <= 0.5f || entry.was_down;
+            entry.death_announce_until = looked_dead ? now + 2000 : 0;
         }
         const bool announcing_death = !entry.active && entry.death_announce_until != 0 &&
                                      static_cast<LONG>(now - entry.death_announce_until) < 0;
@@ -1075,7 +1136,15 @@ void PublishEnemies() {
                 static_cast<LONG>(presence_now - entry.next_presence_refresh) >= 0) {
                 entry.next_presence_refresh = presence_now + 500;
 
-                SetActorCollisionEnabled(entry.actor, true);
+                bool collision_on = true;
+                if (GetActorCollisionEnabled(entry.actor, &collision_on) && !collision_on) {
+                    SetActorCollisionEnabled(entry.actor, true);
+                    static unsigned int repaired = 0;
+                    if (++repaired <= 10 || coop::Get().verbose_enemies) {
+                        SC_LOG("enemies: %s had collision OFF while alive -- re-enabled (%u)",
+                               entry.name, repaired);
+                    }
+                }
                 RegisterEnemyTargetable(entry.actor);
             }
         }
@@ -1088,28 +1157,44 @@ void PublishEnemies() {
         state.z = location.Z;
         state.yaw = rotation.Yaw;
 
+        // Root-motion moves (attacks, reactions, traversal) carry the body while
+        // the movement component reports zero, so a reported zero is only
+        // trusted when the transform agrees; otherwise the observer slides.
         ue::FVector measured = {};
+        float measured_speed = 0.f;
+        bool have_measured = false;
         if (GetActorVelocity(entry.actor, &measured)) {
-            const float speed = sqrtf(measured.X * measured.X + measured.Y * measured.Y +
-                                      measured.Z * measured.Z);
-            if (std::isfinite(speed) && speed <= 3000.f) {
-                state.velocity_x = measured.X;
-                state.velocity_y = measured.Y;
-                state.velocity_z = measured.Z;
-            }
-        } else if (entry.have_host_motion) {
+            measured_speed = sqrtf(measured.X * measured.X + measured.Y * measured.Y +
+                                   measured.Z * measured.Z);
+            have_measured = std::isfinite(measured_speed) && measured_speed <= 3000.f;
+        }
+        ue::FVector derived = {};
+        float derived_speed = 0.f;
+        bool have_derived = false;
+        if (entry.have_host_motion) {
             const DWORD elapsed_ms = now - entry.last_host_motion_ms;
             if (elapsed_ms > 0 && elapsed_ms <= 250) {
                 const float seconds = static_cast<float>(elapsed_ms) / 1000.f;
-                state.velocity_x = (location.X - entry.last_host_location.X) / seconds;
-                state.velocity_y = (location.Y - entry.last_host_location.Y) / seconds;
-                state.velocity_z = (location.Z - entry.last_host_location.Z) / seconds;
-                const float speed = sqrtf(state.velocity_x * state.velocity_x +
-                                          state.velocity_y * state.velocity_y +
-                                          state.velocity_z * state.velocity_z);
-
-                if (speed > 3000.f) state.velocity_x = state.velocity_y = state.velocity_z = 0.f;
+                derived.X = (location.X - entry.last_host_location.X) / seconds;
+                derived.Y = (location.Y - entry.last_host_location.Y) / seconds;
+                derived.Z = (location.Z - entry.last_host_location.Z) / seconds;
+                derived_speed = sqrtf(derived.X * derived.X + derived.Y * derived.Y +
+                                      derived.Z * derived.Z);
+                have_derived = std::isfinite(derived_speed) && derived_speed <= 3000.f;
             }
+        }
+        if (have_measured && measured_speed > 5.f) {
+            state.velocity_x = measured.X;
+            state.velocity_y = measured.Y;
+            state.velocity_z = measured.Z;
+        } else if (have_derived && derived_speed > 30.f) {
+            state.velocity_x = derived.X;
+            state.velocity_y = derived.Y;
+            state.velocity_z = derived.Z;
+        } else if (have_measured) {
+            state.velocity_x = measured.X;
+            state.velocity_y = measured.Y;
+            state.velocity_z = measured.Z;
         }
 
         net::OwnedEnemy owned = {};
@@ -1138,6 +1223,9 @@ void PublishEnemies() {
                 state.y = target.Y;
                 state.z = target.Z;
                 state.yaw = owned.yaw;
+                state.velocity_x = owned.velocity_x;
+                state.velocity_y = owned.velocity_y;
+                state.velocity_z = owned.velocity_z;
             }
         } else if (entry.ai_stopped) {
 
@@ -1231,8 +1319,12 @@ void SendOwnedEnemies() {
     net::OwnedEnemy owned[net::kMaxOwnedEnemiesTotal];
     int count = 0;
     bool dropped_dead_owner = false;
+    const DWORD now = GetTickCount();
+    const auto finite3 = [](const ue::FVector& v) {
+        return std::isfinite(v.X) && std::isfinite(v.Y) && std::isfinite(v.Z);
+    };
     for (int i = 0; i < g_tracked_count && count < net::kMaxOwnedEnemiesTotal; ++i) {
-        const Tracked& entry = g_tracked[i];
+        Tracked& entry = g_tracked[i];
         if (!entry.local_brain || !entry.active || !entry.actor)
             continue;
         Fighter fighter = ResolveFighter(entry.actor);
@@ -1243,10 +1335,35 @@ void SendOwnedEnemies() {
 
         ue::FVector where = {};
         ue::FRotator facing = {};
-        if (!ue::GetActorLocation(entry.actor, &where)) continue;
+        if (!ue::GetActorLocation(entry.actor, &where) || !finite3(where)) continue;
         ue::GetActorRotation(entry.actor, &facing);
+        if (!std::isfinite(facing.Yaw)) facing.Yaw = 0.f;
+
         ue::FVector velocity = {};
-        GetActorVelocity(entry.actor, &velocity);
+        if (!GetActorVelocity(entry.actor, &velocity) || !finite3(velocity)) velocity = {};
+        const float measured_speed =
+            sqrtf(velocity.X * velocity.X + velocity.Y * velocity.Y + velocity.Z * velocity.Z);
+        // Same rule as the host publish: a body moving under root motion
+        // reports zero, so fall back to what the transform says it did.
+        if (measured_speed <= 5.f && entry.have_owned_motion) {
+            const DWORD elapsed_ms = now - entry.last_owned_ms;
+            if (elapsed_ms > 0 && elapsed_ms <= 250) {
+                const float seconds = static_cast<float>(elapsed_ms) / 1000.f;
+                const ue::FVector derived = {(where.X - entry.last_owned_location.X) / seconds,
+                                             (where.Y - entry.last_owned_location.Y) / seconds,
+                                             (where.Z - entry.last_owned_location.Z) / seconds};
+                const float derived_speed = sqrtf(derived.X * derived.X + derived.Y * derived.Y +
+                                                  derived.Z * derived.Z);
+                if (std::isfinite(derived_speed) && derived_speed > 30.f &&
+                    derived_speed <= 3000.f) {
+                    velocity = derived;
+                }
+            }
+        }
+        if (measured_speed > 3000.f) velocity = {};
+        entry.last_owned_location = where;
+        entry.last_owned_ms = now;
+        entry.have_owned_motion = true;
 
         net::OwnedEnemy& out = owned[count++];
         out.name_hash = entry.wire_hash ? entry.wire_hash : entry.hash;
@@ -1259,24 +1376,45 @@ void SendOwnedEnemies() {
         out.velocity_z = velocity.Z;
     }
 
-    if (count > 0 || g_announce_empty_ownership || dropped_dead_owner) {
+    if (count == 0 && g_last_owned_sent_count > 0) g_empty_owned_rounds_left = 3;
+    g_last_owned_sent_count = count;
+
+    if (count > 0 || dropped_dead_owner || g_empty_owned_rounds_left > 0) {
+        if (count == 0 && g_empty_owned_rounds_left > 0) --g_empty_owned_rounds_left;
         net::SendOwnedEnemies(count > 0 ? owned : nullptr, count);
     }
 }
 
+// A report carries at most 24 entries and totals never shrink, so the first
+// 24 damaged enemies used to occupy every report for the rest of the level and
+// anyone hit after them was never told to the host. Entries the host has not
+// yet acknowledged go first; everything else fills the remaining room in
+// rotation, so every total is eventually repeated.
 void SendDamageReports() {
     net::DamageReport reports[net::kMaxDamagePerPacket];
     int count = 0;
-    for (int i = 0; i < g_tracked_count && count < net::kMaxDamagePerPacket; ++i) {
-        if (g_tracked[i].reported_total <= 0.f && g_tracked[i].reported_guard_total <= 0.f) continue;
-        if (!g_tracked[i].seen_from_host) continue;
+    if (g_tracked_count <= 0) return;
+    static int cursor = 0;
+    const int n = g_tracked_count;
+    cursor %= n;
 
-        reports[count].name_hash =
-            g_tracked[i].wire_hash ? g_tracked[i].wire_hash : g_tracked[i].hash;
-        reports[count].total = g_tracked[i].reported_total;
-        reports[count].guard_total = g_tracked[i].reported_guard_total;
-        ++count;
+    for (int pass = 0; pass < 2 && count < net::kMaxDamagePerPacket; ++pass) {
+        for (int k = 0; k < n && count < net::kMaxDamagePerPacket; ++k) {
+            const Tracked& entry = g_tracked[(cursor + k) % n];
+            if (entry.reported_total <= 0.f && entry.reported_guard_total <= 0.f) continue;
+            if (!entry.seen_from_host) continue;
+            const bool pending =
+                entry.reported_total > entry.host_applied + 0.05f ||
+                entry.reported_guard_total > entry.host_guard_applied + 0.05f;
+            if ((pass == 0) != pending) continue;
+
+            reports[count].name_hash = entry.wire_hash ? entry.wire_hash : entry.hash;
+            reports[count].total = entry.reported_total;
+            reports[count].guard_total = entry.reported_guard_total;
+            ++count;
+        }
     }
+    cursor = (cursor + 1) % n;
     if (count == 0) return;
     net::SendEnemyDamage(reports, count);
     ++coop::GetStats().damage_reports;
@@ -1307,7 +1445,12 @@ void ApplyRemoteEnemies() {
     const bool local_player_is_out =
         local_fighter.health &&
         (GetHealth(local_fighter) <= 0.5f || IsDown(local_fighter));
-    g_announce_empty_ownership = false;
+    const bool local_player_is_dead = local_fighter.health && GetHealth(local_fighter) <= 0.5f;
+
+    // Stale host data must not keep driving bodies around (the host is in a
+    // menu, loading, or gone); brains stay stopped, transforms stay put.
+    constexpr unsigned long kDriveStaleMs = 3000;
+    const bool sweep_fresh = net::EnemySweepAgeMs() <= kDriveStaleMs;
 
     for (int i = 0; i < g_tracked_count; ++i) {
         g_tracked[i].seen_from_host = false;
@@ -1345,6 +1488,10 @@ void ApplyRemoteEnemies() {
         entry.seen_from_host = true;
         entry.ever_seen_from_host = true;
         entry.active = (state.flags & net::kEnemyActive) != 0;
+        // What the host has acknowledged of our damage: read on every packet,
+        // it is what decides which totals still need repeating.
+        entry.host_applied = state.damage_applied;
+        entry.host_guard_applied = state.guard_damage_applied;
 
         bool near_us = false;
         if (config.peer_fights_locally && entry.active) {
@@ -1381,7 +1528,11 @@ void ApplyRemoteEnemies() {
 
         const bool host_says_dead = (state.flags & net::kEnemyDead) != 0 ||
                                     (state.max_health > 0.f && state.health <= 0.5f);
-        const bool must_release = host_says_dead || !entry.active;
+        // A dead player cannot be fought, and an enemy this machine keeps
+        // owning would only stand over the corpse (its brain here has no
+        // combat ticket for the partner's body). Hand it back so the host's
+        // own AI fights the survivor. A mere knockdown keeps the lease.
+        const bool must_release = host_says_dead || !entry.active || local_player_is_dead;
 
         const DWORD own_now = GetTickCount();
         if (host_says_ours && !must_release) {
@@ -1417,6 +1568,10 @@ void ApplyRemoteEnemies() {
             entry.local_brain = fights_us;
             entry.owned_since = fights_us ? own_now : 0;
             if (fights_us) {
+                // The host's hitstop dilation was being copied onto this body;
+                // its own brain owns time from here on.
+                SetActorTimeDilation(entry.actor, 1.f);
+                entry.have_owned_motion = false;
                 if (StartBrain(entry.actor)) {
                     entry.ai_stopped = false;
 
@@ -1426,7 +1581,8 @@ void ApplyRemoteEnemies() {
             } else {
                 entry.ai_stopped = false;
                 entry.not_ours_since = 0;
-                SC_LOG("enemies: %s returned to the host's drive", entry.name);
+                SC_LOG("enemies: %s returned to the host's drive%s", entry.name,
+                       local_player_is_dead ? " (you are dead)" : "");
             }
         }
 
@@ -1477,7 +1633,15 @@ void ApplyRemoteEnemies() {
                 static_cast<LONG>(presence_now - entry.next_presence_refresh) >= 0) {
                 entry.next_presence_refresh = presence_now + 500;
 
-                SetActorCollisionEnabled(entry.actor, true);
+                bool collision_on = true;
+                if (GetActorCollisionEnabled(entry.actor, &collision_on) && !collision_on) {
+                    SetActorCollisionEnabled(entry.actor, true);
+                    static unsigned int repaired = 0;
+                    if (++repaired <= 10 || config.verbose_enemies) {
+                        SC_LOG("enemies: %s had collision OFF while alive -- re-enabled (%u)",
+                               entry.name, repaired);
+                    }
+                }
                 RegisterEnemyTargetable(entry.actor);
             }
         }
@@ -1604,12 +1768,14 @@ void ApplyRemoteEnemies() {
 
             const DWORD death_now = GetTickCount();
             const bool have_death_anim =
-                entry.pending_death_anim && death_now - entry.pending_death_anim_ms <= 2000;
+                entry.pending_death_anim && death_now - entry.pending_death_anim_ms <= 5000;
 
             if (dead && fighter.health) {
+                // The host's game killed this body; credit the host's body here
+                // rather than the local player, who may never have touched it.
                 ue::UObject* death_world = ue::GetWorld();
-                ue::UObject* killer =
-                    death_world ? ue::GetPlayerCharacter(death_world, 0) : nullptr;
+                ue::UObject* killer = GetPuppet();
+                if (!killer && death_world) killer = ue::GetPlayerCharacter(death_world, 0);
 
                 const float local_now = GetHealth(fighter);
                 if (local_now > 0.5f) {
@@ -1671,7 +1837,9 @@ void ApplyRemoteEnemies() {
 
         const bool host_reaction_motion =
             (state.flags & net::kEnemyReactionMotion) != 0;
-        if (host_reaction_motion && !dead && config.sync_enemies &&
+        if (!sweep_fresh) {
+            // Nothing below may move a body on stale data.
+        } else if (host_reaction_motion && !dead && config.sync_enemies &&
             !reaction_motion_here) {
             const ue::FVector target = {state.x, state.y, state.z};
             const ue::FRotator facing = {0.f, state.yaw, 0.f};
@@ -1718,7 +1886,7 @@ void ApplyRemoteEnemies() {
             }
         }
 
-        if (!dead && config.sync_enemies && !local_ai && !host_reaction_motion) {
+        if (sweep_fresh && !dead && config.sync_enemies && !local_ai && !host_reaction_motion) {
             const ue::FVector target = {state.x, state.y, state.z};
             const ue::FRotator facing = {0.f, state.yaw, 0.f};
             const ue::FVector velocity = {state.velocity_x, state.velocity_y, state.velocity_z};
@@ -1754,6 +1922,7 @@ void ApplyRemoteEnemies() {
         entry.ours_wanted_since = 0;
         entry.not_ours_since = 0;
         entry.active = false;
+        SetActorTimeDilation(entry.actor, 1.f);
         SetActorPresent(entry.actor, false);
         entry.parked = true;
         entry.present = false;
@@ -1786,7 +1955,11 @@ void ApplyRemoteEnemies() {
             if (config.verbose_enemies) SC_LOG("enemies: parked %s", entry.name);
         }
     }
-    if (unmatched > 0) g_refresh_requested = true;
+    if (unmatched > 0) {
+        g_refresh_requested = true;
+    } else {
+        g_refresh_backoff_ms = 250;
+    }
 
     stats.enemies_driven = driven;
     stats.enemies_unmatched = unmatched;
@@ -1939,8 +2112,30 @@ void ForgetEnemyWorldObjects() {
     g_tracked_count = 0;
     g_tracked_world = nullptr;
     g_had_host_sweep = false;
-    g_announce_empty_ownership = false;
+    g_last_owned_sent_count = 0;
+    g_empty_owned_rounds_left = 0;
     g_refresh_requested = true;
+    g_refresh_backoff_ms = 250;
+    // Hostility discovery is per world: giving up in one level must not
+    // silence it in every later one.
+    g_hostility_hopeless = false;
+    g_hostility_attempts = 0;
+}
+
+void ResetEnemyLedgers() {
+    ResetAppliedTotals();
+    for (int i = 0; i < g_tracked_count; ++i) {
+        Tracked& entry = g_tracked[i];
+        entry.reported_total = 0.f;
+        entry.reported_guard_total = 0.f;
+        entry.host_applied = 0.f;
+        entry.host_guard_applied = 0.f;
+        entry.last_local_health = -1.f;
+        entry.last_local_guard = -1.f;
+    }
+    g_last_owned_sent_count = 0;
+    g_empty_owned_rounds_left = 0;
+    SC_LOG("enemies: damage ledgers reset for the new session");
 }
 
 void NotifyPuppetWillBeDestroyed(ue::UObject* puppet) {
@@ -2116,7 +2311,8 @@ void TickEnemies() {
     if (world_changed) {
         g_tracked_count = 0;
         g_had_host_sweep = false;
-        g_announce_empty_ownership = false;
+        g_last_owned_sent_count = 0;
+        g_empty_owned_rounds_left = 0;
 
         net::ResetEnemyReplication();
     }
@@ -2125,11 +2321,15 @@ void TickEnemies() {
     ue::UObject* puppet = GetPuppet();
 
     static DWORD last_refresh = 0;
+    const bool requested_refresh = g_refresh_requested && now - last_refresh > g_refresh_backoff_ms;
     if (world_changed || puppet != last_puppet || now - last_refresh > 2000 ||
-        (g_refresh_requested && now - last_refresh > 250)) {
+        requested_refresh) {
         last_refresh = now;
         last_puppet = puppet;
         RefreshTracked(player, puppet);
+        // An unmatched host enemy that keeps failing to bind should not cost a
+        // full roster walk four times a second forever.
+        if (requested_refresh && g_refresh_backoff_ms < 2000) g_refresh_backoff_ms *= 2;
         g_refresh_requested = false;
 
         static ue::UObject* dumped_world = nullptr;

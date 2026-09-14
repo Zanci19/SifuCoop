@@ -26,6 +26,8 @@ float GetMaxHealth(const Fighter& fighter);
 
 void SetHealth(const Fighter& fighter, float health);
 
+void SetMaxHealth(const Fighter& fighter, float max_health);
+
 float GetGuard(const Fighter& fighter);
 void SetGuard(const Fighter& fighter, float guard);
 
@@ -58,6 +60,9 @@ bool StartBrain(ue::UObject* actor);
 void SetActorPresent(ue::UObject* actor, bool present);
 
 void SetActorCollisionEnabled(ue::UObject* actor, bool enabled);
+
+// Reads the actor's collision switch back; false when the call did not dispatch.
+bool GetActorCollisionEnabled(ue::UObject* actor, bool* out);
 
 bool SetPresentationVelocity(ue::UObject* actor, const ue::FVector& velocity);
 

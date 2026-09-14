@@ -8,6 +8,7 @@
 #include "../game/replay.h"
 #include "../game/runstate.h"
 #include "../game/selftest.h"
+#include "../net/session.h"
 #include "../ue/reflection.h"
 #include "log.h"
 #include "offsets.g.h"
@@ -29,6 +30,10 @@ unsigned long long g_frames = 0;
 
 void OnFrame() {
     ++g_frames;
+
+    // The socket is pumped before anything that needs a world, so menus and
+    // level loads keep acknowledging, pinging and receiving.
+    sifucoop::net::PumpNetwork();
 
     sifucoop::game::PreparePuppetLifecycle();
 
@@ -126,5 +131,7 @@ void RemoveTickHook() {
 }
 
 float FrameDeltaSeconds() { return g_frame_delta; }
+
+unsigned long long FrameCount() { return g_frames; }
 
 }

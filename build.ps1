@@ -112,7 +112,20 @@ $dll = Join-Path $OutDir "dsound.dll"
 
 
 $imguiInc = "-I`"$(Join-Path $Root 'third_party\imgui')`" -I`"$(Join-Path $Root 'third_party\imgui\backends')`""
+
+# The commit is stamped into the DLL and printed in the first log block, so a
+# runtime log can be tied to a source revision without guessing.
+$commit = "unknown"
+try {
+    $c = (& git -C $Root rev-parse --short HEAD 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $c) {
+        $commit = $c.Trim()
+        $dirty = (& git -C $Root status --porcelain 2>$null)
+        if ($dirty) { $commit = "$commit-dirty" }
+    }
+} catch {}
 $flags = "-O2 -std=c++17 -static -static-libgcc -static-libstdc++ $imguiInc " +
+         "-DSIFUCOOP_COMMIT=\`"$commit\`" " +
          "-Wall -Wextra -s -lkernel32 -luser32 -lws2_32 -lgdi32 -ld3d11 -ldxgi " +
          "-ld3dcompiler -ldwmapi"
 $srcArgs = ($sources | ForEach-Object { "`"$_`"" }) -join " "
@@ -196,6 +209,7 @@ Copy-Item (Join-Path $Root "md\SETUP.md") (Join-Path $Dist "SETUP.md") -Force
 Copy-Item (Join-Path $Root "md\KAKO-DELUJE-SL.md") (Join-Path $Dist "KAKO-DELUJE-SL.md") -Force
 Copy-Item (Join-Path $Root "md\*.md") (Join-Path $Dist "md") -Force
 Copy-Item (Join-Path $Root "README.md") (Join-Path $Dist "README.md") -Force
+Copy-Item (Join-Path $Root "LICENSE") (Join-Path $Dist "LICENSE") -Force
 
 
 $distIni = Join-Path $Dist "SifuCoop.ini"
@@ -221,10 +235,10 @@ host=127.0.0.1
 port=7777
 passphrase=
 
-; Primary synchronization defaults are shown below. Change one setting at a
-; time while diagnosing and restore it before testing another subsystem.
+; Every gameplay switch, with the values the mod was tested with. Change one
+; setting at a time while diagnosing and restore it before testing another.
 ;   versus              = 1 to spar against each other instead of co-operating
-;   echo_enemy_attacks  = replay the host's enemy swings on the joining screen
+;   echo_enemy_attacks  = show the owner's enemy swings on the other screen
 ;   report_damage       = let the joining player hurt what the host can see
 ;   park_extra_enemies  = hide enemies the host has not activated
 ;   adaptive_interp     = size the smoothing buffer from measured ping
@@ -240,13 +254,45 @@ echo_enemy_attacks=1
 ; swings kill you. Their damage already resolved on their own machine. Versus
 ; mode replays them regardless (hitting each other is the point there).
 echo_player_attacks=0
-real_second_player=0
 report_damage=1
 mirror_peer_vitals=1
 auto_follow_level=1
+; 1 = travel to the host's level without the F1 prompt
+auto_join_level=0
 adaptive_interp=1
 interp_delay_ms=60
 snapshot_hz=60
+
+; Your partner's body on your screen. It is a visual copy: its health is
+; mirrored from their machine, so it stays invincible here.
+remote_player_attacks=1
+sync_montages=1
+sync_run_state=1
+sync_peer_age=1
+sync_peer_visual_age=1
+puppet_invincible=1
+puppet_ignores_pawn_collision=1
+hide_second_player_hud=1
+
+; Enemy authority. One brain per enemy: the machine whose player an enemy is
+; fighting runs its AI, the other machine shows it. Observers present the
+; owner's exact attack sequence instead of launching a second real attack.
+peer_fights_locally=1
+client_simulates_enemies=0
+observer_cosmetic_enemy_attacks_only=1
+mirror_hit_reactions=1
+sync_enemy_death_animations=1
+retarget_from_down_peer=1
+
+; Settled dead ends, forced off in code as well. Leave them 0.
+real_second_player=0
+force_enemy_engage=0
+director_targets_partner=0
+friendly_relationship=0
+
+; Extra log detail for a paired play-test; both are off for normal play.
+verbose_enemies=0
+verbose_orders=0
 
 ; The F1 menu draws by hooking the game's swap chain. That is the riskiest
 ; thing this mod does and it is purely cosmetic -- set this to 0 if the game

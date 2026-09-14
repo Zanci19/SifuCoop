@@ -28,7 +28,6 @@ using StaticFindObjectSafeFn = UObject*(__fastcall*)(void* uclass, UObject* oute
 
 using OpenLevelFn = void(__fastcall*)(const UObject* world_context, FName level,
                                       bool absolute, void* options);
-using ConnectionCheckFn = void(__fastcall*)(const UObject* world_context, float, int, float, bool)
 
 FNameCtorFn g_fname_ctor = nullptr;
 FindFunctionFn g_find_function = nullptr;
@@ -41,9 +40,26 @@ GetPathNameFn g_get_path_name = nullptr;
 StaticFindObjectSafeFn g_static_find_object_safe = nullptr;
 OpenLevelFn g_open_level = nullptr;
 UObject** g_gworld = nullptr;
-ConnectionCheckFn = nullptr;
 
 bool g_ready = false;
+
+// A zero offset means the PDB pass never found the symbol on this build.
+// base + 0 is the PE header, which is not a function: resolve it to null so
+// every caller's existing null check does what it says.
+template <typename Fn>
+Fn Resolve(std::uintptr_t base, std::uint32_t rva) {
+    return rva ? reinterpret_cast<Fn>(base + rva) : nullptr;
+}
+
+std::uintptr_t g_module_base = 0;
+
+FName MakeName(const wchar_t* text) {
+    FName name = {};
+    g_fname_ctor(&name, text, kFNameAdd);
+    return name;
+}
+
+}
 
 bool RangeReadable(const void* address, std::size_t size) {
     MEMORY_BASIC_INFORMATION info = {};
@@ -55,39 +71,27 @@ bool RangeReadable(const void* address, std::size_t size) {
     const auto end = start + info.RegionSize;
     return reinterpret_cast<std::uintptr_t>(address) + size <= end;
 }
-std::uintptr_t g_module_base = 0;
-
-FName MakeName(const wchar_t* text) {
-    FName name = {};
-    g_fname_ctor(&name, text, kFNameAdd);
-    return name;
-}
-
-}
 
 bool InitReflection(std::uintptr_t base) {
     g_module_base = base;
-    g_fname_ctor = reinterpret_cast<FNameCtorFn>(base + offsets::FName_FromWide);
-    g_find_function = reinterpret_cast<FindFunctionFn>(base + offsets::UObject_FindFunction);
-    g_process_event = reinterpret_cast<ProcessEventFn>(base + offsets::UObject_ProcessEvent);
-    g_get_player_character = reinterpret_cast<GetPlayerCharacterFn>(
-        base + offsets::UGameplayStatics_GetPlayerCharacter);
+    g_fname_ctor = Resolve<FNameCtorFn>(base, offsets::FName_FromWide);
+    g_find_function = Resolve<FindFunctionFn>(base, offsets::UObject_FindFunction);
+    g_process_event = Resolve<ProcessEventFn>(base, offsets::UObject_ProcessEvent);
+    g_get_player_character =
+        Resolve<GetPlayerCharacterFn>(base, offsets::UGameplayStatics_GetPlayerCharacter);
     g_skeletal_mesh_class =
-        reinterpret_cast<StaticClassFn>(base + offsets::USkeletalMeshComponent_StaticClass);
-    g_montage_get_position = reinterpret_cast<MontageGetPositionFn>(
-        base + offsets::UAnimInstance_Montage_GetPosition);
-    g_montage_play =
-        reinterpret_cast<MontagePlayFn>(base + offsets::UAnimInstance_Montage_Play);
-    g_get_path_name =
-        reinterpret_cast<GetPathNameFn>(base + offsets::UObjectBaseUtility_GetPathName);
+        Resolve<StaticClassFn>(base, offsets::USkeletalMeshComponent_StaticClass);
+    g_montage_get_position =
+        Resolve<MontageGetPositionFn>(base, offsets::UAnimInstance_Montage_GetPosition);
+    g_montage_play = Resolve<MontagePlayFn>(base, offsets::UAnimInstance_Montage_Play);
+    g_get_path_name = Resolve<GetPathNameFn>(base, offsets::UObjectBaseUtility_GetPathName);
     g_static_find_object_safe =
-        reinterpret_cast<StaticFindObjectSafeFn>(base + offsets::StaticFindObjectSafe);
-    g_open_level =
-        reinterpret_cast<OpenLevelFn>(base + offsets::UGameplayStatics_OpenLevel);
-    g_gworld = reinterpret_cast<UObject**>(base + offsets::GWorld);
+        Resolve<StaticFindObjectSafeFn>(base, offsets::StaticFindObjectSafe);
+    g_open_level = Resolve<OpenLevelFn>(base, offsets::UGameplayStatics_OpenLevel);
+    g_gworld = Resolve<UObject**>(base, offsets::GWorld);
 
     g_ready = g_fname_ctor && g_find_function && g_process_event && g_get_player_character &&
-              g_gworld;
+              g_gworld && g_get_path_name && g_static_find_object_safe;
     SC_LOG("reflection: %s", g_ready ? "ready" : "FAILED to resolve entry points");
     return g_ready;
 }
@@ -163,17 +167,26 @@ UObject* FindObjectByPath(const wchar_t* path_name) {
     return g_static_find_object_safe(nullptr, nullptr, path_name, false);
 }
 
+// GetPathName hands back an FString allocated by the engine that nothing here
+// can free (no allocator entry point is resolved), so every call leaks its
+// buffer. This ran up to three times a frame; the answer only changes with the
+// world, so it is cached against the world pointer.
 bool GetCurrentLevelPath(char* out, int out_size) {
     UObject* world = GetWorld();
     if (!world) return false;
 
-    char full[512] = {};
-    if (!GetObjectPathName(world, full, sizeof(full))) return false;
+    static UObject* cached_world = nullptr;
+    static char cached_path[512] = {};
+    if (cached_world != world || !cached_path[0]) {
+        char full[512] = {};
+        if (!GetObjectPathName(world, full, sizeof(full))) return false;
+        char* dot = strrchr(full, '.');
+        if (dot) *dot = '\0';
+        lstrcpynA(cached_path, full, sizeof(cached_path));
+        cached_world = world;
+    }
 
-    char* dot = strrchr(full, '.');
-    if (dot) *dot = '\0';
-
-    lstrcpynA(out, full, out_size);
+    lstrcpynA(out, cached_path, out_size);
     return out[0] != '\0';
 }
 
@@ -373,13 +386,6 @@ float GetAnimationAssetLength(UObject* animation_asset) {
     } params = {};
     if (!CallFunction(animation_asset, L"GetPlayLength", &params)) return 0.f;
     return params.ReturnValue;
-}
-
-void AllowConnection(peer, peer, float, int, bool) {
-    unsigned int8_t ConnectionStatus;
-    bool IsConnected? = false;
-    constexpr std::uintptr_t ConnectionHzSpan = 0x10000000u;
-    
 }
 
 }

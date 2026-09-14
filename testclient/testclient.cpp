@@ -233,7 +233,9 @@ int main(int argc, char** argv) {
     printf("waiting for the game...\n");
 
     bool connected = false;
-    std::uint32_t sequence = 0;
+    // The mod numbers each packet type separately; one shared counter here
+    // made every non-snapshot packet look like a lost snapshot on its side.
+    std::uint32_t sequence_by_type[32] = {};
     DWORD last_hello = 0;
     DWORD last_snapshot = 0;
     DWORD last_attack = 0;
@@ -261,6 +263,20 @@ int main(int argc, char** argv) {
     static const std::int32_t kAttackIndices[] = {0x2C, 0x0E, 0x07, 0x20, 0x30};
     int attack_cursor = 0;
 
+    // Protocol 22 order events are acknowledged and retransmitted; the mod
+    // logs "never acknowledged" against any peer that does not ack, and a
+    // client sending event_id 0 only exercises the legacy path.
+    std::uint32_t next_event_id = 1;
+    struct PendingOrder {
+        OrderEventPacket packet;
+        DWORD first_sent = 0;
+        DWORD last_sent = 0;
+        bool live = false;
+    };
+    PendingOrder pending_orders[16] = {};
+    std::uint32_t seen_event_ids[64] = {};
+    int seen_write = 0;
+
     Vec3 previous_self;
     Vec3 velocity;
     bool have_previous_self = false;
@@ -277,8 +293,44 @@ int main(int argc, char** argv) {
         header->magic = kMagic;
         header->version = kProtocolVersion;
         header->type = static_cast<std::uint16_t>(type);
-        header->sequence = ++sequence;
+        const int slot = static_cast<int>(type) % 32;
+        header->sequence = ++sequence_by_type[slot];
         header->send_time_ms = GetTickCount();
+    };
+
+    auto send_order = [&](std::uint32_t actor_hash, std::int32_t index, std::int32_t depth) {
+        OrderEventPacket order = {};
+        fill_header(&order.header, PacketType::OrderEvent);
+        order.actor_hash = actor_hash;
+        order.order_type = 0;
+        order.attack_index = index;
+        order.attack_depth = depth;
+        order.event_id = next_event_id++;
+        if (next_event_id == 0) next_event_id = 1;
+        send_packet(&order, sizeof(order));
+        for (PendingOrder& slot : pending_orders) {
+            if (slot.live) continue;
+            slot.packet = order;
+            slot.first_sent = slot.last_sent = GetTickCount();
+            slot.live = true;
+            break;
+        }
+        return order;
+    };
+
+    auto retransmit_orders = [&](DWORD now) {
+        for (PendingOrder& slot : pending_orders) {
+            if (!slot.live) continue;
+            if (now - slot.first_sent > 2000) {
+                printf("  !! order event %u was never acknowledged\n", slot.packet.event_id);
+                slot.live = false;
+                continue;
+            }
+            if (now - slot.last_sent < 100) continue;
+            fill_header(&slot.packet.header, PacketType::OrderEvent);
+            send_packet(&slot.packet, sizeof(slot.packet));
+            slot.last_sent = now;
+        }
     };
 
     // Replays a montage the host itself sent, so the path always resolves there.
@@ -413,10 +465,21 @@ int main(int argc, char** argv) {
                 pong.probe_time_ms = ping.probe_time_ms;
                 send_packet(&pong, sizeof(pong));
             } else if (type == PacketType::EnemyState &&
-                       bytes >= static_cast<int>(sizeof(EnemyStatePacket))) {
+                       bytes >= static_cast<int>(offsetof(EnemyStatePacket, entries))) {
+                // Production sends count-sized packets, never the full struct.
                 EnemyStatePacket packet = {};
-                memcpy(&packet, buffer, sizeof(packet));
-                AbsorbEnemyChunk(enemies, packet);
+                memcpy(&packet, buffer, static_cast<std::size_t>(bytes));
+                if (packet.count <= kMaxEnemiesPerPacket &&
+                    bytes == static_cast<int>(EnemyStatePacketSize(packet.count))) {
+                    AbsorbEnemyChunk(enemies, packet);
+                }
+            } else if (type == PacketType::OrderAck &&
+                       bytes >= static_cast<int>(sizeof(OrderAckPacket))) {
+                OrderAckPacket ack = {};
+                memcpy(&ack, buffer, sizeof(ack));
+                for (PendingOrder& slot : pending_orders) {
+                    if (slot.live && slot.packet.event_id == ack.event_id) slot.live = false;
+                }
             } else if (type == PacketType::MontageState &&
                        bytes >= static_cast<int>(sizeof(MontagePacket))) {
                 MontagePacket packet = {};
@@ -432,6 +495,20 @@ int main(int argc, char** argv) {
                        bytes >= static_cast<int>(sizeof(OrderEventPacket))) {
                 OrderEventPacket order = {};
                 memcpy(&order, buffer, sizeof(order));
+                if (order.event_id != 0) {
+                    // Acknowledge every copy; drop the duplicates silently.
+                    OrderAckPacket ack = {};
+                    fill_header(&ack.header, PacketType::OrderAck);
+                    ack.event_id = order.event_id;
+                    send_packet(&ack, sizeof(ack));
+                    bool seen = false;
+                    for (std::uint32_t id : seen_event_ids) {
+                        if (id != 0 && id == order.event_id) seen = true;
+                    }
+                    if (seen) continue;
+                    seen_event_ids[seen_write] = order.event_id;
+                    seen_write = (seen_write + 1) % 64;
+                }
                 if (order.actor_hash == 0) {
                     printf("  <- player attacked (index 0x%X)\n", order.attack_index);
                 } else {
@@ -612,14 +689,11 @@ int main(int argc, char** argv) {
             if (bot_mode && !is_down && distance <= kEngageDistance * 1.25f &&
                 now - last_attack > kAttackIntervalMs) {
                 last_attack = now;
-                OrderEventPacket order = {};
-                fill_header(&order.header, PacketType::OrderEvent);
-                order.actor_hash = 0;
-                order.attack_index = kAttackIndices[attack_cursor % 5];
-                order.attack_depth = attack_cursor % 3;
+                const OrderEventPacket order =
+                    send_order(0, kAttackIndices[attack_cursor % 5], attack_cursor % 3);
                 ++attack_cursor;
-                send_packet(&order, sizeof(order));
-                printf("  -> attack index=0x%02X (dist %.0f)\n", order.attack_index, distance);
+                printf("  -> attack index=0x%02X (dist %.0f) event=%u\n", order.attack_index,
+                       distance, order.event_id);
             }
 
             if (player_mode) {
@@ -627,16 +701,11 @@ int main(int argc, char** argv) {
 
                 if (phase == Phase::Attack && now - last_attack > 900) {
                     last_attack = now;
-                    OrderEventPacket order = {};
-                    fill_header(&order.header, PacketType::OrderEvent);
-                    order.actor_hash = 0;
-                    order.order_type = 0;
-                    order.attack_index = kAttackIndices[attack_cursor % 5];
-                    order.attack_depth = attack_cursor % 3;
+                    const OrderEventPacket order =
+                        send_order(0, kAttackIndices[attack_cursor % 5], attack_cursor % 3);
                     ++attack_cursor;
-                    send_packet(&order, sizeof(order));
-                    printf("  -> attack index=0x%02X depth=%d\n", order.attack_index,
-                           order.attack_depth);
+                    printf("  -> attack index=0x%02X depth=%d event=%u\n", order.attack_index,
+                           order.attack_depth, order.event_id);
                 }
 
                 // Two identical montages back to back. Before the restart fix the
@@ -731,6 +800,8 @@ int main(int argc, char** argv) {
                 }
             }
         }
+
+        if (connected) retransmit_orders(now);
 
         Sleep(5);
     }

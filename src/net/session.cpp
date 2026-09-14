@@ -45,6 +45,24 @@ constexpr int kBufferSize = 64;
 
 constexpr DWORD kTimeoutMs = 12000;
 
+// Sequence numbers wrap; a plain "<=" would call every packet stale after the
+// wrap. Modular comparison: newer means "ahead by less than half the range".
+bool SequenceNewer(std::uint32_t candidate, std::uint32_t last) {
+    return static_cast<std::int32_t>(candidate - last) > 0;
+}
+
+std::uint32_t g_send_failures = 0;
+DWORD g_last_send_failure_log = 0;
+
+void NoteSendFailure(int size) {
+    ++g_send_failures;
+    const DWORD now = GetTickCount();
+    if (g_last_send_failure_log != 0 && now - g_last_send_failure_log < 5000) return;
+    g_last_send_failure_log = now;
+    SC_LOG("net: sendto failed (error %d, %d bytes, %u failures so far)", WSAGetLastError(),
+           size, g_send_failures);
+}
+
 constexpr DWORD kStallMs = 500;
 constexpr DWORD kPingIntervalMs = 500;
 
@@ -104,7 +122,7 @@ std::uint32_t g_bytes_in = 0;
 std::uint32_t g_bytes_out = 0;
 DWORD g_rate_window_start = 0;
 
-constexpr int kOrderQueueSize = 64;
+constexpr int kOrderQueueSize = 128;
 
 struct QueuedOrder {
     std::uint32_t actor_hash;
@@ -121,12 +139,18 @@ std::uint32_t g_last_order_sequence = 0;
 // Attacks, dodges and guards are one-shot events: a dropped packet is a swing
 // that never happens on the other screen. They are retransmitted until the peer
 // acknowledges them; see CODE-NOTES.md.
-constexpr int kPendingOrderSlots = 24;
-constexpr DWORD kOrderRetryMs = 40;
-constexpr int kOrderMaxAttempts = 6;
+constexpr int kPendingOrderSlots = 48;
+
+// The retry interval follows the measured round trip: a fixed 40 ms x 6 tries
+// gave up after ~200 ms, which is less than one round trip on a loaded link
+// (454 ms was measured live), so a healthy peer could miss every copy.
+constexpr DWORD kOrderRetryFloorMs = 40;
+constexpr DWORD kOrderRetryCeilingMs = 250;
+constexpr DWORD kOrderRetryLifetimeMs = 2000;
 
 struct PendingOrder {
     OrderEventPacket packet;
+    DWORD first_sent_ms = 0;
     DWORD last_sent_ms = 0;
     int attempts = 0;
     bool live = false;
@@ -135,7 +159,7 @@ struct PendingOrder {
 PendingOrder g_pending_orders[kPendingOrderSlots];
 std::uint32_t g_next_order_event_id = 1;
 
-constexpr int kSeenOrderIds = 64;
+constexpr int kSeenOrderIds = 256;
 std::uint32_t g_seen_order_ids[kSeenOrderIds] = {};
 int g_seen_order_write = 0;
 
@@ -477,8 +501,12 @@ void LogLocalAddresses(int port) {
 void SendPacket(void* data, int size) {
     if (!g_have_peer_addr || g_socket == INVALID_SOCKET) return;
     SignPacket(data, size);
-    sendto(g_socket, static_cast<const char*>(data), size, 0,
-           reinterpret_cast<sockaddr*>(&g_peer_addr), sizeof(g_peer_addr));
+    const int sent = sendto(g_socket, static_cast<const char*>(data), size, 0,
+                            reinterpret_cast<sockaddr*>(&g_peer_addr), sizeof(g_peer_addr));
+    if (sent != size) {
+        NoteSendFailure(size);
+        return;
+    }
     g_bytes_out += static_cast<std::uint32_t>(size);
     ++coop::GetStats().packets_sent;
 }
@@ -486,14 +514,36 @@ void SendPacket(void* data, int size) {
 void SendPacketTo(void* data, int size, const sockaddr_in& to) {
     if (g_socket == INVALID_SOCKET) return;
     SignPacket(data, size);
-    sendto(g_socket, static_cast<const char*>(data), size, 0,
-           reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+    const int sent = sendto(g_socket, static_cast<const char*>(data), size, 0,
+                            reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+    if (sent != size) {
+        NoteSendFailure(size);
+        return;
+    }
     g_bytes_out += static_cast<std::uint32_t>(size);
     ++coop::GetStats().packets_sent;
 }
 
-constexpr int kPacketTypeCount = 16;
+constexpr int kPacketTypeCount = 32;
+static_assert(static_cast<int>(PacketType::OrderAck) < kPacketTypeCount,
+              "every packet type needs its own sequence slot");
 std::uint32_t g_send_sequence_by_type[kPacketTypeCount] = {};
+
+// Which packets a peer in this role may receive. Enemy state and host cheats
+// only flow host -> joiner; damage reports, ownership and invite replies only
+// flow joiner -> host. Anything else is a confused or hostile peer.
+bool PacketAllowedFromPeer(PacketType type) {
+    switch (type) {
+        case PacketType::Hello: return g_role == Role::Host;
+        case PacketType::Welcome: return g_role == Role::Client;
+        case PacketType::EnemyState:
+        case PacketType::CheatState: return g_role == Role::Client;
+        case PacketType::EnemyDamage:
+        case PacketType::OwnedEnemy:
+        case PacketType::InviteReply: return g_role == Role::Host;
+        default: return true;
+    }
+}
 
 void FillHeader(PacketHeader* header, PacketType type) {
     header->magic = kMagic;
@@ -512,7 +562,7 @@ struct PendingAnimation {
     AnimationAssetKind kind = AnimationAssetKind::Montage;
     AnimationSemantic semantic = AnimationSemantic::Generic;
 };
-constexpr int kAnimationQueueSize = 32;
+constexpr int kAnimationQueueSize = 128;
 PendingAnimation g_animation_queue[kAnimationQueueSize] = {};
 int g_animation_read = 0;
 int g_animation_write = 0;
@@ -527,11 +577,15 @@ int g_owned_staging_count = 0;
 std::uint32_t g_owned_staging_round = 0;
 bool g_owned_staging_active = false;
 std::uint32_t g_owned_staging_seen = 0;
+int g_owned_staging_chunks = 0;
+std::uint32_t g_owned_committed_round = 0;
+bool g_owned_have_committed_round = false;
 
 void ResetOwnedStaging() {
     g_owned_staging_count = 0;
     g_owned_staging_seen = 0;
     g_owned_staging_active = false;
+    g_owned_staging_chunks = 0;
 }
 
 // A publish round is split across up to kMaxOwnedEnemyChunks packets and only
@@ -551,10 +605,23 @@ void HandleOwnedEnemies(const OwnedEnemyPacket& packet) {
         if (!IsFiniteVector(in.velocity_x, in.velocity_y, in.velocity_z)) return;
     }
 
+    // A delayed packet from an older round must not restart staging or, worse,
+    // commit stale ownership over a newer round. Rounds only move forward.
+    if (g_owned_have_committed_round && !SequenceNewer(packet.round, g_owned_committed_round)) {
+        return;
+    }
     if (!g_owned_staging_active || packet.round != g_owned_staging_round) {
+        if (g_owned_staging_active && !SequenceNewer(packet.round, g_owned_staging_round)) {
+            return;
+        }
         ResetOwnedStaging();
         g_owned_staging_round = packet.round;
         g_owned_staging_active = true;
+        g_owned_staging_chunks = chunk_count;
+    } else if (chunk_count != g_owned_staging_chunks) {
+        // The first chunk fixed the round's shape; a chunk claiming a different
+        // total cannot belong to it.
+        return;
     }
 
     const std::uint32_t bit = 1u << chunk_index;
@@ -577,10 +644,14 @@ void HandleOwnedEnemies(const OwnedEnemyPacket& packet) {
     for (int i = 0; i < g_owned_staging_count; ++i) g_owned_enemies[i] = g_owned_staging[i];
     g_owned_enemy_count = g_owned_staging_count;
     g_owned_enemies_at = NowMs();
+    g_owned_committed_round = packet.round;
+    g_owned_have_committed_round = true;
     ResetOwnedStaging();
 }
 
 void ResetLevelSyncState();
+std::uint32_t g_run_state_sequence = 0;
+std::uint32_t g_cheat_state_sequence = 0;
 void ResetPeerState() {
     g_animation_read = g_animation_write = 0;
     g_last_animation_sequence = 0;
@@ -617,6 +688,10 @@ void ResetPeerState() {
     g_damage_sequence = 0;
     g_owned_enemy_count = 0;
     ResetOwnedStaging();
+    g_owned_have_committed_round = false;
+    g_owned_committed_round = 0;
+    g_run_state_sequence = 0;
+    g_cheat_state_sequence = 0;
     g_rtt_ms = -1;
     g_rtt_jitter_ms = 0;
 }
@@ -631,9 +706,9 @@ void HandleSnapshot(const SnapshotPacket& packet) {
     }
 
     if (g_last_snapshot_sequence != 0) {
-        if (packet.header.sequence <= g_last_snapshot_sequence) return;
+        if (!SequenceNewer(packet.header.sequence, g_last_snapshot_sequence)) return;
         const std::uint32_t gap = packet.header.sequence - g_last_snapshot_sequence;
-        if (gap > 1) coop::GetStats().packets_dropped += gap - 1;
+        if (gap > 1 && gap < 1000) coop::GetStats().packets_dropped += gap - 1;
     }
     g_last_snapshot_sequence = packet.header.sequence;
 
@@ -743,7 +818,13 @@ void HandleLevelSync(const LevelSyncPacket& packet) {
     lstrcpynA(g_peer_level, packet.level_path, sizeof(g_peer_level));
     if (level_changed || packet.request_id != 0) g_level_activity_ms = NowMs();
 
-    if (packet.request_id == 0 || packet.request_id == g_level_request_seen) return;
+    if (packet.request_id == 0) return;
+    // Only the host invites. A delayed copy of an older invitation must not
+    // replace a newer one, so the id has to be strictly newer, not just different.
+    if (g_role != Role::Client) return;
+    if (g_level_request_seen != 0 && !SequenceNewer(packet.request_id, g_level_request_seen)) {
+        return;
+    }
     g_level_request_seen = packet.request_id;
 
     lstrcpynA(g_pending_level, packet.level_path, sizeof(g_pending_level));
@@ -812,6 +893,7 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
         out.flags = in.flags;
         if (g_enemy_sweep_seen) MergeEnemyLive(out);
     }
+    if (g_enemy_sweep_seen && count > 0) g_enemy_sweep_at = NowMs();
 
     g_enemy_chunks_seen |= chunk_bit;
 
@@ -827,7 +909,9 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
 }
 
 void HandleEnemyDamage(const EnemyDamagePacket& packet) {
-    if (g_damage_sequence != 0 && packet.header.sequence <= g_damage_sequence) return;
+    if (g_damage_sequence != 0 && !SequenceNewer(packet.header.sequence, g_damage_sequence)) {
+        return;
+    }
     g_damage_sequence = packet.header.sequence;
 
     int count = static_cast<int>(packet.count);
@@ -877,13 +961,15 @@ void HandlePong(const PingPacket& packet) {
 }
 
 void HandleMontage(const MontagePacket& packet) {
-    if (packet.kind > 1 ||
+    if (packet.kind > static_cast<std::uint8_t>(AnimationAssetKind::PoseAsset) ||
         packet.semantic > static_cast<std::uint8_t>(AnimationSemantic::Death)) {
         return;
     }
+    if (!IsFinite(packet.position) || packet.position < 0.f || packet.position > 600.f) return;
+    if (strncmp(packet.montage_path, "/Game/", 6) != 0) return;
 
     if (g_last_animation_sequence != 0 &&
-        packet.header.sequence <= g_last_animation_sequence) {
+        !SequenceNewer(packet.header.sequence, g_last_animation_sequence)) {
         return;
     }
     g_last_animation_sequence = packet.header.sequence;
@@ -902,6 +988,11 @@ void HandleMontage(const MontagePacket& packet) {
 }
 
 void HandleRunState(const RunStatePacket& packet) {
+    if (g_run_state_sequence != 0 &&
+        !SequenceNewer(packet.header.sequence, g_run_state_sequence)) {
+        return;
+    }
+    g_run_state_sequence = packet.header.sequence;
 
     g_peer_run = RunSnapshot();
     g_peer_run.age = packet.age;
@@ -916,6 +1007,11 @@ void HandleRunState(const RunStatePacket& packet) {
 void HandleCheatState(const CheatStatePacket& packet) {
 
     if (g_role != Role::Client) return;
+    if (g_cheat_state_sequence != 0 &&
+        !SequenceNewer(packet.header.sequence, g_cheat_state_sequence)) {
+        return;
+    }
+    g_cheat_state_sequence = packet.header.sequence;
     std::memcpy(g_host_cheats.active, packet.active, sizeof(g_host_cheats.active));
     g_host_cheats_valid = true;
 }
@@ -932,7 +1028,7 @@ void QueueOrder(const OrderEventPacket& packet) {
         if (OrderAlreadySeen(packet.event_id)) return;
         RememberOrderId(packet.event_id);
     } else if (g_last_order_sequence != 0 &&
-               packet.header.sequence <= g_last_order_sequence) {
+               !SequenceNewer(packet.header.sequence, g_last_order_sequence)) {
         return;
     }
     g_last_order_sequence = packet.header.sequence;
@@ -987,22 +1083,38 @@ void PumpReceive() {
             continue;
         }
 
+        // Nothing but the handshake is meaningful before a session exists, and
+        // once one exists only the established endpoint may speak.
+        if (!handshake && !g_connected) continue;
         if (g_connected && !handshake) {
             if (from.sin_addr.s_addr != g_peer_addr.sin_addr.s_addr ||
                 from.sin_port != g_peer_addr.sin_port) {
                 continue;
             }
         }
+        if (!PacketAllowedFromPeer(type)) {
+            static DWORD last_wrong_direction_log = 0;
+            const DWORD now = GetTickCount();
+            if (now - last_wrong_direction_log >= 5000) {
+                last_wrong_direction_log = now;
+                SC_LOG("net: ignored packet type %u -- it does not flow in this direction",
+                       static_cast<unsigned int>(header.type));
+            }
+            continue;
+        }
 
         g_last_recv_ms = NowMs();
         g_bytes_in += static_cast<std::uint32_t>(received);
         ++coop::GetStats().packets_received;
 
+        // Fixed-layout packets must be exactly their size: a longer datagram is
+        // a different (future or foreign) layout, not this one with padding.
         auto fits = [&](std::size_t size) { return received >= static_cast<int>(size); };
+        auto exact = [&](std::size_t size) { return received == static_cast<int>(size); };
 
         switch (type) {
             case PacketType::Hello: {
-                if (!fits(sizeof(HelloPacket))) break;
+                if (!exact(sizeof(HelloPacket))) break;
                 HelloPacket hello = {};
                 memcpy(&hello, buffer, sizeof(hello));
 
@@ -1052,7 +1164,7 @@ void PumpReceive() {
                 break;
             }
             case PacketType::Welcome: {
-                if (!fits(sizeof(WelcomePacket))) break;
+                if (!exact(sizeof(WelcomePacket))) break;
                 WelcomePacket welcome = {};
                 memcpy(&welcome, buffer, sizeof(welcome));
 
@@ -1075,28 +1187,28 @@ void PumpReceive() {
                 break;
             }
             case PacketType::Snapshot:
-                if (fits(sizeof(SnapshotPacket))) {
+                if (exact(sizeof(SnapshotPacket))) {
                     SnapshotPacket snapshot = {};
                     memcpy(&snapshot, buffer, sizeof(snapshot));
                     HandleSnapshot(snapshot);
                 }
                 break;
             case PacketType::OrderEvent:
-                if (fits(sizeof(OrderEventPacket))) {
+                if (exact(sizeof(OrderEventPacket))) {
                     OrderEventPacket order = {};
                     memcpy(&order, buffer, sizeof(order));
                     QueueOrder(order);
                 }
                 break;
             case PacketType::OrderAck:
-                if (fits(sizeof(OrderAckPacket))) {
+                if (exact(sizeof(OrderAckPacket))) {
                     OrderAckPacket ack = {};
                     memcpy(&ack, buffer, sizeof(ack));
                     HandleOrderAck(ack);
                 }
                 break;
             case PacketType::LevelSync:
-                if (fits(sizeof(LevelSyncPacket))) {
+                if (exact(sizeof(LevelSyncPacket))) {
                     LevelSyncPacket level = {};
                     memcpy(&level, buffer, sizeof(level));
                     level.level_path[sizeof(level.level_path) - 1] = '\0';
@@ -1134,28 +1246,28 @@ void PumpReceive() {
                 }
                 break;
             case PacketType::InviteReply:
-                if (fits(sizeof(InviteReplyPacket))) {
+                if (exact(sizeof(InviteReplyPacket))) {
                     InviteReplyPacket reply = {};
                     memcpy(&reply, buffer, sizeof(reply));
                     HandleInviteReply(reply);
                 }
                 break;
             case PacketType::Ping:
-                if (fits(sizeof(PingPacket))) {
+                if (exact(sizeof(PingPacket))) {
                     PingPacket ping = {};
                     memcpy(&ping, buffer, sizeof(ping));
                     HandlePing(ping);
                 }
                 break;
             case PacketType::Pong:
-                if (fits(sizeof(PingPacket))) {
+                if (exact(sizeof(PingPacket))) {
                     PingPacket pong = {};
                     memcpy(&pong, buffer, sizeof(pong));
                     HandlePong(pong);
                 }
                 break;
             case PacketType::RunState:
-                if (fits(sizeof(RunStatePacket))) {
+                if (exact(sizeof(RunStatePacket))) {
                     RunStatePacket run = {};
                     memcpy(&run, buffer, sizeof(run));
                     run.weapon_path[sizeof(run.weapon_path) - 1] = '\0';
@@ -1163,14 +1275,14 @@ void PumpReceive() {
                 }
                 break;
             case PacketType::CheatState:
-                if (fits(sizeof(CheatStatePacket))) {
+                if (exact(sizeof(CheatStatePacket))) {
                     CheatStatePacket cheats = {};
                     memcpy(&cheats, buffer, sizeof(cheats));
                     HandleCheatState(cheats);
                 }
                 break;
             case PacketType::MontageState:
-                if (fits(sizeof(MontagePacket))) {
+                if (exact(sizeof(MontagePacket))) {
                     MontagePacket montage = {};
                     memcpy(&montage, buffer, sizeof(montage));
                     montage.montage_path[sizeof(montage.montage_path) - 1] = '\0';
@@ -1268,7 +1380,12 @@ bool StartSession() {
     local.sin_family = AF_INET;
     local.sin_addr.s_addr = INADDR_ANY;
 
-    const int local_port = GetPrivateProfileIntA("net", "local_port", 0, ini_path);
+    int local_port = GetPrivateProfileIntA("net", "local_port", 0, ini_path);
+    if (local_port < 0 || local_port > 65535) {
+        SC_LOG("net: local_port=%d is not a valid UDP port -- using an ephemeral one",
+               local_port);
+        local_port = 0;
+    }
     const int bind_port = is_host ? port : local_port;
     local.sin_port = htons(static_cast<u_short>(bind_port));
 
@@ -1449,19 +1566,37 @@ void SendOrderEvent(std::uint32_t actor_hash, std::uint32_t order_type,
         }
     }
     slot->packet = packet;
-    slot->last_sent_ms = NowMs();
+    slot->first_sent_ms = NowMs();
+    slot->last_sent_ms = slot->first_sent_ms;
     slot->attempts = 1;
     slot->live = true;
 }
 
+DWORD OrderRetryIntervalMs() {
+    const int rtt = g_rtt_ms < 0 ? 100 : g_rtt_ms;
+    int interval = rtt / 2 + g_rtt_jitter_ms * 2 + 20;
+    if (interval < static_cast<int>(kOrderRetryFloorMs)) interval = kOrderRetryFloorMs;
+    if (interval > static_cast<int>(kOrderRetryCeilingMs)) interval = kOrderRetryCeilingMs;
+    return static_cast<DWORD>(interval);
+}
+
 void RetransmitPendingOrders(DWORD now) {
     if (!g_connected) return;
+    const DWORD interval = OrderRetryIntervalMs();
     for (PendingOrder& pending : g_pending_orders) {
         if (!pending.live) continue;
-        if (now - pending.last_sent_ms < kOrderRetryMs) continue;
-        if (pending.attempts >= kOrderMaxAttempts) {
-            SC_LOG("net: order event %u never acknowledged after %d tries",
-                   pending.packet.event_id, pending.attempts);
+        if (now - pending.last_sent_ms < interval) continue;
+        if (now - pending.first_sent_ms >= kOrderRetryLifetimeMs) {
+            static DWORD last_give_up_log = 0;
+            static unsigned int given_up = 0;
+            ++given_up;
+            if (now - last_give_up_log >= 5000) {
+                last_give_up_log = now;
+                SC_LOG("net: order event %u never acknowledged after %d tries over %lums "
+                       "(%u given up so far)",
+                       pending.packet.event_id, pending.attempts, now - pending.first_sent_ms,
+                       given_up);
+            }
             pending.live = false;
             continue;
         }
@@ -1609,6 +1744,11 @@ int GetEnemyStates(EnemyStateOut* out, int max_out) {
 
 bool HasEnemySweep() { return g_enemy_sweep_seen; }
 
+unsigned long EnemySweepAgeMs() {
+    if (!g_enemy_sweep_seen) return 0xFFFFFFFFul;
+    return NowMs() - g_enemy_sweep_at;
+}
+
 bool EnemySweepIsFresh() {
 
     constexpr DWORD kSweepStaleMs = 1000;
@@ -1628,6 +1768,8 @@ void ResetEnemyReplication() {
     g_damage_sequence = 0;
     g_owned_enemy_count = 0;
     ResetOwnedStaging();
+    g_owned_have_committed_round = false;
+    g_owned_committed_round = 0;
 }
 
 void SendOwnedEnemies(const OwnedEnemy* entries, int count) {
@@ -1725,6 +1867,9 @@ int GetEnemyDamage(DamageReport* out, int max_out) {
 
 void SendMontageState(const char* montage_path, float position) {
     if (!g_connected || !montage_path || !montage_path[0]) return;
+    // A dynamic montage lives at /Engine/Transient.AnimMontage_N: the same name
+    // on the other machine is a different object, so it must not be sent.
+    if (strncmp(montage_path, "/Game/", 6) != 0) return;
     MontagePacket packet = {};
     FillHeader(&packet.header, PacketType::MontageState);
     packet.position = position;
@@ -1735,6 +1880,7 @@ void SendMontageState(const char* montage_path, float position) {
 void SendAnimationSequence(const char* asset_path, std::uint32_t actor_hash,
                            AnimationSemantic semantic, float position) {
     if (!g_connected || !asset_path || !asset_path[0]) return;
+    if (strncmp(asset_path, "/Game/", 6) != 0) return;
     MontagePacket packet = {};
     FillHeader(&packet.header, PacketType::MontageState);
     packet.kind = static_cast<std::uint8_t>(AnimationAssetKind::Sequence);
@@ -1869,14 +2015,21 @@ int GetInterpolationDelayMs() {
     const coop::Config& config = coop::Get();
     if (!config.adaptive_interp || g_rtt_ms < 0) return config.interp_delay_ms;
 
-    int delay = g_rtt_ms / 2 + g_rtt_jitter_ms * 2 + 2000 / kSnapshotHz;
+    int hz = config.snapshot_hz;
+    if (hz < 30) hz = 30;
+    if (hz > 60) hz = 60;
+    int delay = g_rtt_ms / 2 + g_rtt_jitter_ms * 2 + 2000 / hz;
 
     if (delay < 80) delay = 80;
     if (delay > 250) delay = 250;
     return delay;
 }
 
-void TickSession(const LocalState& local) {
+// Everything that keeps the session alive -- receiving, acknowledging,
+// retransmitting, pinging, timing out -- runs from the engine tick whether or
+// not a world or a player exists. Menus and level loads used to stop all of it,
+// and the peer timed out while this process was perfectly healthy.
+void PumpNetwork() {
     if (g_socket == INVALID_SOCKET) return;
 
     PumpReceive();
@@ -1973,6 +2126,11 @@ void TickSession(const LocalState& local) {
         ping.probe_time_ms = now;
         SendPacket(&ping, sizeof(ping));
     }
+}
+
+void TickSession(const LocalState& local) {
+    if (g_socket == INVALID_SOCKET || !g_connected) return;
+    const DWORD now = NowMs();
 
     int hz = coop::Get().snapshot_hz;
     if (hz < 30) hz = 30;
