@@ -319,18 +319,62 @@ int SpeedStateForSpeed(const std::uint8_t* bytes, float speed) {
     return g_puppet_held_speed_band;
 }
 
+// The cached copies UPlayerAnim samples during its own update. Writing the
+// movement component alone is not enough: the graph reads these, and for the
+// player puppet writing them is what made locomotion animate at all. Enemies
+// inherit the same class, so they need the identical write. Guarded by the
+// threshold probe -- a plain USCAnimInstance is smaller than these offsets and
+// must never be written through.
+void InjectAnimPresentation(ue::UObject* anim_instance, const ue::FVector& velocity) {
+    auto* bytes = reinterpret_cast<std::uint8_t*>(anim_instance);
+    float v0 = 0.f, v1 = 0.f, v2 = 0.f;
+    if (!ReadLocomotionThresholds(bytes, &v0, &v1, &v2)) return;
+
+    const float speed = sqrtf(velocity.X * velocity.X + velocity.Y * velocity.Y);
+    std::memcpy(bytes + kAnimOwnerVelocity, &velocity, sizeof(velocity));
+    std::memcpy(bytes + kAnimOwnerVelocityLength, &speed, sizeof(speed));
+    std::memcpy(bytes + kAnimWantedSpeed, &speed, sizeof(speed));
+}
+
+EnemyPresentation* FindDrivenEnemy(ue::UObject* anim_instance) {
+    if (!anim_instance) return nullptr;
+    const DWORD now = GetTickCount();
+    for (EnemyPresentation& driven : g_enemy_presentation) {
+        if (driven.anim_instance != anim_instance) continue;
+        if (static_cast<LONG>(now - driven.until) >= 0) return nullptr;
+        if (driven.world != ue::GetWorld()) return nullptr;
+        return &driven;
+    }
+    return nullptr;
+}
+
+void ApplyDrivenEnemyPresentation(EnemyPresentation& driven, ue::UObject* anim_instance,
+                                  const char* which) {
+    WritePresentationVelocity(driven.targets, driven.velocity);
+    SetMovementSpeedState(driven.targets.movement, driven.band);
+    InjectAnimPresentation(anim_instance, driven.velocity);
+
+    // Announce each hook once. Both can be live at the same time, so a single
+    // slot would flip back and forth and log every frame.
+    static const char* announced[2] = {};
+    for (const char*& slot : announced) {
+        if (slot == which) break;
+        if (slot != nullptr) continue;
+        slot = which;
+        char class_path[160] = {};
+        ue::GetObjectClassPathName(anim_instance, class_path, sizeof(class_path));
+        SC_LOG("enemy anim: driven through %s hook, class '%s'", which, class_path);
+        break;
+    }
+}
+
 void __fastcall SCAnimUpdateHook(ue::UObject* anim_instance, float delta_seconds) {
     const DWORD now = GetTickCount();
 
     // Velocity and band are graph inputs, so they must land before the original
     // samples them; see CODE-NOTES.md.
-    for (EnemyPresentation& driven : g_enemy_presentation) {
-        if (driven.anim_instance != anim_instance) continue;
-        if (static_cast<LONG>(now - driven.until) >= 0) break;
-        if (driven.world != ue::GetWorld()) break;
-        WritePresentationVelocity(driven.targets, driven.velocity);
-        SetMovementSpeedState(driven.targets.movement, driven.band);
-        break;
+    if (EnemyPresentation* driven = FindDrivenEnemy(anim_instance)) {
+        ApplyDrivenEnemyPresentation(*driven, anim_instance, "USCAnimInstance");
     }
 
     if (g_original_sc_anim_update) g_original_sc_anim_update(anim_instance, delta_seconds);
@@ -346,6 +390,14 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
 
     const bool is_puppet_anim = anim_instance && anim_instance == g_puppet_anim_instance;
     const bool inject = is_puppet_anim && g_have_puppet_presentation_velocity;
+
+    // Enemies inherit UPlayerAnim, so this override -- not USCAnimInstance's --
+    // is what runs for them, and the injection has to land here too.
+    if (!is_puppet_anim) {
+        if (EnemyPresentation* driven = FindDrivenEnemy(anim_instance)) {
+            ApplyDrivenEnemyPresentation(*driven, anim_instance, "UPlayerAnim");
+        }
+    }
     auto* bytes = reinterpret_cast<std::uint8_t*>(anim_instance);
     float speed = 0.f;
     if (inject) {
@@ -790,9 +842,20 @@ bool TrySetRelationshipBothWays(ue::UObject* player, ue::UObject* puppet, int va
     const int was_comp = ReadRelationshipViaComponent(player, puppet);
 
     const int before = RelationshipMapSize(player_social);
-    WriteRelationship(player_social, puppet, value);
-    WriteRelationship(puppet_social, player, value);
+    const RelationshipWrite wrote_player =
+        WriteRelationshipChecked(player_social, puppet, value);
+    const RelationshipWrite wrote_puppet =
+        WriteRelationshipChecked(puppet_social, player, value);
     const int after = RelationshipMapSize(player_social);
+
+    // A suppressed write never reached the game, so nothing about the readback
+    // is evidence either way.
+    if (wrote_player == RelationshipWrite::Suppressed ||
+        wrote_puppet == RelationshipWrite::Suppressed) {
+        if (out_player) *out_player = rel::kUnknown;
+        if (out_puppet) *out_puppet = rel::kUnknown;
+        return false;
+    }
 
     const int back_player = ReadRelationship(player, puppet);
     const int back_puppet = ReadRelationship(puppet, player);
@@ -879,6 +942,13 @@ void MaintainFriendlyRelationship(ue::UObject* player, ue::UObject* puppet) {
         g_friendly_verified = true;
         SC_LOG("puppet: relationship %s STUCK -- readback %d/%d, remote attacks may play",
                rel::Name(value), back_player, back_puppet);
+        return;
+    }
+
+    // kUnknown here means every attempt was suppressed, not refused: the world
+    // has not settled yet and the next pass will try again.
+    if (back_player == rel::kUnknown && back_puppet == rel::kUnknown) {
+        g_next_relationship_attempt = now + 250;
         return;
     }
 
@@ -1195,7 +1265,7 @@ void UpdateLobby(ue::UObject* player) {
                 SC_LOG("lobby: auto-joining '%s'", invited);
                 AcceptInvite();
             } else {
-                SC_LOG("lobby: host invited you to '%s' -- F1 -> Lobby -> Join to accept",
+                SC_LOG("lobby: host invited you to '%s' -- F1 -> Play -> Join them to accept",
                        invited);
                 coop::ReportProblem("host invited you to %s -- F1 to join", LevelLeaf(invited));
             }
@@ -1289,7 +1359,7 @@ void UpdateLobby(ue::UObject* player) {
     char line[192] = {};
     if (status.invite_pending) {
         snprintf(line, sizeof(line),
-                 "SifuCoop  your partner is in %s - F1 -> Lobby -> Join to go there",
+                 "SifuCoop  your partner is in %s - F1 -> Play -> Join them to go there",
                  status.invite_level);
     } else if (status.offline) {
         snprintf(line, sizeof(line), "SifuCoop  offline - open the menu with F1");

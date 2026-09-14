@@ -23,12 +23,17 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $KitName = "SifuCoop-SteamKit"
-$Stage = Join-Path $StageRoot $KitName
+$StageRootPath = [IO.Path]::GetFullPath($StageRoot)
+$Stage = [IO.Path]::GetFullPath((Join-Path $StageRootPath $KitName))
+$StagePrefix = $StageRootPath.TrimEnd('\') + '\'
+if (-not $Stage.StartsWith($StagePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+    [IO.Path]::GetFileName($Stage) -ne $KitName) {
+    throw "refusing unsafe staging path: $Stage"
+}
 
 
-$Dirs  = @("src", "tools", "builds", "third_party", "testclient", "launcher")
-$Files = @("build.ps1", "STEAM-BUILD.md", "SETUP.md", "README.md", "LICENSE",
-           "THIRD_PARTY.md")
+$Dirs  = @("src", "tools", "builds", "third_party", "testclient", "launcher", "installer", "md")
+$Files = @("build.ps1", "README.md", "LICENSE")
 
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
 New-Item -ItemType Directory -Force $Stage | Out-Null
@@ -65,7 +70,7 @@ if (Test-Path $epic) {
 
 Write-Host "staged $Stage" -ForegroundColor Green
 
-$zip = Join-Path $StageRoot "$KitName.zip"
+$zip = Join-Path $StageRootPath "$KitName.zip"
 if (-not $NoZip) {
     Compress-Archive -Path "$Stage\*" -DestinationPath $zip -Force
     $megabytes = "{0:N1}" -f ((Get-Item $zip).Length / 1MB)
@@ -73,14 +78,20 @@ if (-not $NoZip) {
 }
 
 if ($Destination) {
-    if (-not (Test-Path $Destination)) {
+    $destinationRoot = [IO.Path]::GetFullPath($Destination)
+    if (-not (Test-Path $destinationRoot)) {
         Write-Host "destination '$Destination' is not reachable -- kit left staged locally." `
             -ForegroundColor Yellow
         Write-Host "re-run with the same -Destination once it is up." -ForegroundColor Yellow
         return
     }
     $name = if ($DestinationName) { $DestinationName } else { $KitName }
-    $target = Join-Path $Destination $name
+    $target = [IO.Path]::GetFullPath((Join-Path $destinationRoot $name))
+    $destinationPrefix = $destinationRoot.TrimEnd('\') + '\'
+    if (-not $target.StartsWith($destinationPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($target) -ne $name) {
+        throw "refusing unsafe destination path: $target"
+    }
     if ($NoClean) {
         New-Item -ItemType Directory -Force $target | Out-Null
         Copy-Item -Recurse -Force (Join-Path $Stage "*") $target
@@ -89,7 +100,7 @@ if ($Destination) {
     } else {
         if (Test-Path $target) { Remove-Item -Recurse -Force $target }
         Copy-Item -Recurse -Force $Stage $target
-        if (-not $NoZip) { Copy-Item -Force $zip $Destination }
+        if (-not $NoZip) { Copy-Item -Force $zip $destinationRoot }
         Write-Host "copied to $target" -ForegroundColor Green
     }
 }

@@ -1,5 +1,9 @@
 # SifuCoop — complete handoff
 
+> Historical engineering record. Protocol numbers, hashes, offsets, defaults, UI names, and
+> deployment status describe the dated test sessions below. Verify current behavior against
+> source, `README.md`, `SETUP.md`, and `DEVELOPER_GUIDE.md` before changing code.
+
 ## 2026-08-15 locomotion and alternating-hit correction (protocol 19)
 
 The 21:19 paired log proves the locomotion regression: transmitted/measured speed

@@ -234,11 +234,11 @@ void DrawSetupTab(const MenuStatus& status) {
     ImGui::InputText("Partner's IP", g_field_address, sizeof(g_field_address));
     ImGui::EndDisabled();
     if (g_field_hosting) {
-        ImGui::TextColored(dim, "Give your partner your ZeroTier address (the 10.x one).");
+        ImGui::TextColored(dim, "Give your partner an address that can reach this PC.");
         if (g_public_address[0]) ImGui::TextColored(dim, "Seen from outside: %s",
                                                     g_public_address);
     } else {
-        ImGui::TextColored(dim, "Use the host's ZeroTier address.");
+        ImGui::TextColored(dim, "Use the host's reachable LAN, VPN, or public address.");
     }
 
     ImGui::InputInt("Port", &g_field_port);
@@ -277,7 +277,7 @@ void DrawSetupTab(const MenuStatus& status) {
             r.discover_address = true;
             PostRequests(r);
         }
-        ImGui::TextColored(dim, "ZeroTier is the supported way to reach each other.");
+        ImGui::TextColored(dim, "Use LAN, a private VPN, port forwarding, or hole punching.");
         ImGui::TreePop();
     }
 }

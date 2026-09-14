@@ -35,27 +35,22 @@ Run Sifu in **borderless**, not exclusive fullscreen, if you want the overlay to
 
 ## 2. Network (both players)
 
-There are three ways to reach each other. Try them in this order — the **Internet** tab in
-the in-game menu (F1) repeats all of this with a button for the awkward part.
+There are three ways to reach each other. SifuCoop only sends UDP packets; it does not
+install or manage a VPN. Use the **Setup** tab in the in-game menu (F1) to configure the
+connection.
 
-### Option 1 — a private network (recommended)
+### Option 1 — the same LAN or an existing private VPN
 
-ZeroTier puts both machines on a private virtual network, so no router configuration is
-needed and **nothing is exposed to the internet**. Free for personal use.
+If both PCs are on the same local network, use the host's LAN address. If you already use
+a private VPN or virtual-LAN product, use the host's address on that network. Install and
+manage that product separately; it is not bundled with or required by SifuCoop.
 
-**Player A (host):**
-1. Sign up at <https://my.zerotier.com>, click *Create A Network*, copy the 16-character ID.
-2. Install ZeroTier, tray icon → *Join Network* → paste the ID.
-
-**Player B:** install ZeroTier, join the same ID.
-
-**Player A again:** on the ZeroTier web page, tick **Auth** next to each device. Until you do,
-nothing connects. The page then shows each device's **Managed IP** (like `10.147.x.x`) — that
-is the address to use, *not* your normal IP.
-
-The host's log lists its own addresses at startup and flags the likely ZeroTier one:
+The launcher and log list the host's local addresses:
 
     %LOCALAPPDATA%\Sifu\Saved\Logs\SifuCoop.log
+
+Private addresses such as `10.x.x.x`, `172.16.x.x`–`172.31.x.x`, and `192.168.x.x` only
+work when the other PC can route to that private network.
 
 ### Option 2 — the host forwards a port
 
@@ -65,7 +60,7 @@ this** — see below.
 
 ### Option 3 — hole punching, no router access needed
 
-Both of you press **Find my public address** on the F1 → *Internet* tab and send each other
+Both of you press **Find my public address** under F1 → *Setup* → *Connection trouble?* and send each other
 what it prints. Then in `SifuCoop.ini`, each of you sets the *other* person's address:
 
 ```ini
@@ -74,8 +69,8 @@ punch=203.0.113.9:7777   ; the OTHER player's public address
 local_port=7777          ; both players set the same number
 ```
 
-Connect at the same time. This works on most home routers and fails on some — if nothing
-happens within a minute, fall back to option 1.
+Connect at the same time. This works on many home routers and fails on some. If nothing
+happens within a minute, use a private VPN or port forwarding.
 
 ### Passphrase (all options)
 
@@ -92,7 +87,7 @@ also has. That is fine on a private VPN or LAN. It is **not** fine on a forwarde
 because the protocol moves your character, applies damage, and tells your game which level to
 load: an unauthenticated packet is a stranger with a hand inside your session.
 
-A mismatched passphrase looks like nothing happening. The Lobby tab says so explicitly, and
+A mismatched passphrase looks like nothing happening. The Setup tab shows rejected packets, and
 the log counts what it rejected.
 
 **Firewall:** the host needs inbound UDP allowed. Approve the Windows prompt on first launch.
@@ -106,8 +101,8 @@ netsh advfirewall firewall add rule name="SifuCoop" dir=in action=allow protocol
 
 Launch Sifu on both machines and press **F1**.
 
-- Host: *Lobby* tab → **Host** → *Apply & (re)connect*.
-- Joiner: *Lobby* tab → **Join**, type the host's `10.x` address → *Apply & (re)connect*.
+- Host: *Setup* tab → **Host the game** → **Connect**.
+- Joiner: *Setup* tab → **Join a game**, type a reachable host address → **Connect**.
 
 Within a second or two both should show **CONNECTED** and a ping in milliseconds.
 
@@ -116,7 +111,7 @@ You can also edit `SifuCoop.ini` by hand, or use `SifuCoopLauncher.exe`:
 ```ini
 [net]
 mode=host                ; or: client
-host=10.147.x.x          ; the HOST's address, client only
+host=192.168.1.10        ; the HOST's reachable address, client only
 port=7777
 passphrase=shared-secret ; must match on both machines
 ```
@@ -128,8 +123,9 @@ pulled in automatically, and follows the host through every later level change t
 
 The other player's character appears on its own. Fight.
 
-**F1** opens the menu at any time. The *Sync* tab shows every enemy currently being kept in
-step, and the *Tuning* tab has a switch for each part of the machinery.
+**F1** opens the menu at any time. *Play* controls level invitations, *Setup* controls the
+connection, *Options* contains normal player settings, and *Diagnostics* shows live enemy
+and damage counters plus logging actions.
 
 ---
 
@@ -188,9 +184,9 @@ up explains every failure below it.
 1. **It loaded.** Launch Sifu, press **F1**. If the menu appears, the DLL is in and hooked.
    If it does not, read `SifuCoop.log` — a build-fingerprint mismatch is stated there in
    plain words.
-2. **It can see the fight.** Load a level with enemies, open *Sync*. The table should list
-   the enemies around you with live distances and health. If it is empty mid-fight, nothing
-   downstream can work — send me the log.
+2. **It can see the fight.** Load a level with enemies and open *Diagnostics*. The active
+   and synchronized enemy counts should be nonzero. If they remain zero mid-fight, nothing
+   downstream can work — inspect the log.
 3. **Remote animation works.** Throw a punch, press **F9** to spawn a practice character, then
    **F6**. It should attack. This is the exact path a peer's attacks take.
 4. **Enemy animation works.** Press **F7** near an enemy. It should swing. This is the exact
@@ -202,20 +198,21 @@ up explains every failure below it.
 
 ### On one machine, with the bot
 
-`tools\testclient.exe` is a real protocol peer — it authenticates like any other, so pass the
+`build\testclient.exe` is a real protocol peer — it authenticates like any other. From the
+source tree, build it first with `.\build.ps1`. Pass the
 same passphrase the game is using (omit it if you have none set). Set the game to **Host**,
 then:
 
 ```bash
-tools\testclient.exe 127.0.0.1 7777 bot my-passphrase
+build\testclient.exe 127.0.0.1 7777 bot my-passphrase
 ```
 
-5. **Connection and ping.** The Lobby should show CONNECTED with a ping. A second character
-   appears, walks up to you, and attacks. Its health bar in the Lobby should be moving.
+5. **Connection and ping.** The *Play* tab should show *Connected* and a ping. A second
+   character appears, walks up to you, and attacks.
 6. **The joiner can fight.** Now the important one — load a level with enemies and run:
 
    ```bash
-   tools\testclient.exe 127.0.0.1 7777 damage my-passphrase
+   build\testclient.exe 127.0.0.1 7777 damage my-passphrase
    ```
 
    It picks the enemy nearest you and reports damage on it. **In your game, that enemy should
@@ -223,13 +220,12 @@ tools\testclient.exe 127.0.0.1 7777 bot my-passphrase
    player will be able to fight. The console prints what it is doing.
 
    The bot also sends **run state** (age, room-clear %, a placeholder weapon) while connected,
-   in every mode. Open **F1 → Sync/Tuning** and look under *Session*: `peer age`,
-   `peer room-clear`, and `peer weapon` should populate and tick — synthetic values that move
-   slowly on purpose. `SifuCoop.log` shows the same as `run: peer age=.. room=.. weapon=..`.
-   This is how the run-state display is checked without a second Sifu.
+   in every mode. `SifuCoop.log` should show
+   `run: peer age=.. room=.. weapon=..` with synthetic values that move slowly on
+   purpose. This checks run-state transport without a second Sifu.
 
-7'. **Friendly fire (the experimental fix).** In `SifuCoop.ini` set `friendly_relationship=1`
-   (or tick it in F1 → *Remote player's attacks*), load a level with at least two enemies,
+7'. **Friendly fire (experimental).** In `SifuCoop.ini` set `friendly_relationship=1`,
+   load a level with at least two enemies,
    press **F9** to spawn a puppet, stand next to it and press **F6** to make it replay your
    last attack. If your health does **not** drop, Sifu's melee honours the relationship system
    and remote attacks can be made safe (then `echo_player_attacks=1`). If it still drops, that
@@ -241,8 +237,8 @@ tools\testclient.exe 127.0.0.1 7777 bot my-passphrase
 7. Connect, get into the same level, and stand still. You should see each other move.
 8. One of you attacks thin air. The other should see the swing.
 9. Both attack the same enemy. It should die once, on both screens, at about the same time.
-10. Let an enemy hit you. Your health drops on your screen, and the other player sees your
-    character's health bar in their Lobby drop by the same amount.
+10. Let an enemy hit you. Your health drops locally, and the other player should see the
+    mirrored value on the partner HUD.
 11. Walk through a door / finish a room. The joiner should be pulled along.
 
 ---
@@ -299,29 +295,30 @@ moves enemies around and is not for normal play.
 
 ## When something is wrong
 
-Open **F1 → Tuning**. Every part of the machinery has its own switch and a note on what turning
-it off costs. Working down that list is the fastest way to find the guilty half:
+Use F1 → *Options* for normal settings and F1 → *Diagnostics* for ping, enemy counts,
+damage totals, logging, and roster capture. Lower-level synchronization switches remain in
+`SifuCoop.ini`. Change only one at a time:
 
-- **Enemies teleport or jitter** → turn off *Drive enemies from the host*. If it stops, the
-  problem is the position stream (check ping on the *Network* tab).
+- **Enemies teleport or jitter** → set `sync_enemies=0` temporarily. If it stops, the
+  problem is inside enemy synchronization; restore it, check ping on *Diagnostics*, and use
+  paired logs to narrow the transform/ownership path.
 - **Enemies behave strangely, or the game hitches when they attack** → turn off *Replay the
   host's enemy attacks*. This is the least proven feature here.
-- **Enemies die on one screen but not the other** → check *Sync* → `unmatched`. Anything above
-  zero usually means you are not in the same level.
-- **Nothing connects at all, no error** → almost always a mismatched passphrase. The Lobby tab
-  shows a rejected-packet count when that is what is happening.
-- **The joiner's hits do nothing** → check *Report my hits to the host* is on, and that *Sync*
-  shows a rising "dealt ... reported".
-- **The other player looks untouched no matter what** → *Show the peer's real health*.
-- **Enemies stand around inert on the joining side** → *Hide enemies the host has not
-  activated*, and check you are in the same level.
+- **Enemies die on one screen but not the other** → use *Diagnostics* → *Write roster to log*
+  and compare actor/source hashes on both machines.
+- **Nothing connects at all, no error** → check for rejected packets and verify the
+  passphrases, protocol versions, addresses, firewall, and UDP port.
+- **The joiner's hits do nothing** → confirm `report_damage=1` and watch the sent/applied
+  damage totals on *Diagnostics*.
+- **The other player looks untouched** → confirm `mirror_peer_vitals=1` and that the
+  partner HUD is not hidden under *Options*.
+- **Enemies stand inert on the joining side** → confirm `park_extra_enemies=1` and that
+  both players are in the same level.
 
-*Network* tab shows ping, jitter, packet loss and bandwidth. Occasional loss is normal and
-invisible. Steady loss above a few percent looks like the other player stuttering and is worth
-a look at the VPN rather than at these settings.
-
-Full log: `%LOCALAPPDATA%\Sifu\Saved\Logs\SifuCoop.log`. *Sync* → *Dump full roster to the log*
-writes every tracked character, pooled ones included.
+*Diagnostics* shows ping and the most useful live counters. Occasional UDP loss is normally
+repaired by later snapshots; persistent loss appears as stutter. The full log is
+`%LOCALAPPDATA%\Sifu\Saved\Logs\SifuCoop.log`. *Write roster to log* records tracked
+characters, including pooled ones.
 
 ---
 

@@ -132,6 +132,7 @@ void Load() {
     g_config.menu_exclusive_input =
         ReadBool("menu_exclusive_input", g_config.menu_exclusive_input, ini);
     g_config.selftest = ReadBool("selftest", g_config.selftest, ini);
+    g_config.replay_probe = ReadBool("replay_probe", g_config.replay_probe, ini);
     g_config.verbose_enemies = ReadBool("verbose_enemies", g_config.verbose_enemies, ini);
     g_config.verbose_orders = ReadBool("verbose_orders", g_config.verbose_orders, ini);
 

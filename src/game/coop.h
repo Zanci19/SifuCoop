@@ -77,6 +77,8 @@ struct Config {
     bool verbose_orders = false;
 
     bool selftest = false;
+
+    bool replay_probe = false;
 };
 
 struct Stats {

@@ -2,15 +2,13 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
-#include <urlmon.h>
 #include <algorithm>
 #include <string>
 #include <vector>
 
 namespace {
 constexpr int kPath = 1001, kDetect = 1002, kBrowse = 1003, kReplaceConfig = 1004,
-              kInstall = 1005, kStatus = 1006, kZeroTierNetwork = 1007,
-              kZeroTierSetup = 1008, kZeroTierCentral = 1009;
+              kInstall = 1005, kStatus = 1006;
 HINSTANCE g_instance;
 
 std::wstring Parent(std::wstring value) {
@@ -174,101 +172,6 @@ std::wstring ModuleDirectory() {
     }
 }
 
-bool IsNetworkId(const std::wstring& value) {
-    return value.size() == 16 && std::all_of(value.begin(), value.end(),
-        [](wchar_t ch) { return iswxdigit(ch) != 0; });
-}
-
-std::wstring FindZeroTierCli() {
-    std::vector<std::wstring> roots = {
-        GetEnvironment(L"ProgramFiles(x86)"), GetEnvironment(L"ProgramW6432"),
-        GetEnvironment(L"ProgramFiles")};
-    for (const auto& root : roots) {
-        if (root.empty()) continue;
-        const std::wstring folder = Join(root, L"ZeroTier\\One");
-        for (const wchar_t* name : {L"zerotier-cli.bat", L"zerotier-cli.exe"}) {
-            const std::wstring candidate = Join(folder, name);
-            if (Exists(candidate)) return candidate;
-        }
-    }
-    return L"";
-}
-
-bool RunElevatedAndWait(HWND owner, const std::wstring& executable,
-                        const std::wstring& parameters, std::wstring& error) {
-    SHELLEXECUTEINFOW info{};
-    info.cbSize = sizeof(info);
-    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-    info.hwnd = owner;
-    info.lpVerb = L"runas";
-    info.lpFile = executable.c_str();
-    info.lpParameters = parameters.empty() ? nullptr : parameters.c_str();
-    info.nShow = SW_SHOWNORMAL;
-    if (!ShellExecuteExW(&info)) {
-        error = L"Administrator approval was cancelled or could not be started.\n\nWindows error " +
-                std::to_wstring(GetLastError());
-        return false;
-    }
-    WaitForSingleObject(info.hProcess, INFINITE);
-    DWORD code = ERROR_GEN_FAILURE;
-    GetExitCodeProcess(info.hProcess, &code);
-    CloseHandle(info.hProcess);
-    if (code == 0 || code == 3010) return true;
-    error = L"The elevated ZeroTier command failed.\n\nExit code " + std::to_wstring(code);
-    return false;
-}
-
-bool SetupZeroTier(HWND owner, const std::wstring& requestedNetwork, std::wstring& message) {
-    const std::wstring network = Trim(requestedNetwork);
-    if (!IsNetworkId(network)) {
-        message = L"Enter the 16-character hexadecimal ZeroTier network ID from ZeroTier Central.";
-        return false;
-    }
-    std::wstring cli = FindZeroTierCli();
-    if (cli.empty()) {
-        wchar_t tempDirectory[MAX_PATH]{};
-        if (!GetTempPathW(MAX_PATH, tempDirectory)) {
-            message = L"Cannot create a temporary download location.\n\nWindows error " + std::to_wstring(GetLastError());
-            return false;
-        }
-        wchar_t temporaryFile[MAX_PATH]{};
-        if (!GetTempFileNameW(tempDirectory, L"SCZ", 0, temporaryFile)) {
-            message = L"Cannot create a temporary MSI name.\n\nWindows error " + std::to_wstring(GetLastError());
-            return false;
-        }
-        std::wstring msi = temporaryFile;
-        DeleteFileW(msi.c_str());
-        msi += L".msi";
-        const HRESULT downloaded = URLDownloadToFileW(nullptr,
-            L"https://download.zerotier.com/dist/ZeroTier%20One.msi", msi.c_str(), 0, nullptr);
-        if (FAILED(downloaded)) {
-            message = L"Could not download the official ZeroTier installer.\n\nHRESULT " + std::to_wstring(static_cast<long>(downloaded));
-            return false;
-        }
-        std::wstring error;
-        const bool installed = RunElevatedAndWait(owner, L"msiexec.exe",
-            L"/i \"" + msi + L"\" /passive /norestart", error);
-        DeleteFileW(msi.c_str());
-        if (!installed) { message = error; return false; }
-        cli = FindZeroTierCli();
-        if (cli.empty()) {
-            message = L"ZeroTier installed, but its command-line client was not found yet. Restart Windows, then run this setup again to join the network.";
-            return false;
-        }
-    }
-    std::wstring error;
-    if (!RunElevatedAndWait(owner, cli, L"join " + network, error)) {
-        message = error;
-        return false;
-    }
-    message = L"ZeroTier is installed and this device requested to join network " + network +
-              L".\n\nOpen ZeroTier Central and authorize this device. Repeat on the other player’s PC, then put the host’s ZeroTier managed IP in the SifuCoop client host field.";
-    return true;
-}
-
-void OpenZeroTierCentral(HWND owner) {
-    ShellExecuteW(owner, L"open", L"https://central.zerotier.com/", nullptr, nullptr, SW_SHOWNORMAL);
-}
 bool CopyToStage(const std::wstring& source, const std::wstring& target, std::wstring& error) {
     const std::wstring stage = target + L".sifucoop.new";
     DeleteFileW(stage.c_str());
@@ -398,22 +301,13 @@ void Browse(HWND window) {
 
 void RunInstall(HWND window, bool commandLine) {
     const bool replaceConfig = IsDlgButtonChecked(window, kReplaceConfig) == BST_CHECKED;
-    const bool setupZeroTier = IsDlgButtonChecked(window, kZeroTierSetup) == BST_CHECKED;
     const std::wstring supplied = ControlText(GetDlgItem(window, kPath));
-    const std::wstring network = ControlText(GetDlgItem(window, kZeroTierNetwork));
-    if (setupZeroTier && !IsNetworkId(Trim(network))) {
-        const std::wstring error = L"Enter a 16-character hexadecimal ZeroTier network ID, or untick ZeroTier setup.";
-        MessageBoxW(window, error.c_str(), L"SifuCoop installer", MB_OK | MB_ICONERROR);
-        SetStatus(window, error);
-        return;
-    }
 
     InstallResult result = Install(supplied, replaceConfig);
     if (!result.ok && result.needsElevation && !commandLine) {
         const std::wstring executable = Join(ModuleDirectory(), L"SifuCoopInstaller.exe");
         std::wstring params = L"--install \"" + supplied + L"\"";
         if (replaceConfig) params += L" --replace-config";
-        if (setupZeroTier) params += L" --zerotier \"" + Trim(network) + L"\"";
         const intptr_t launch = reinterpret_cast<intptr_t>(
             ShellExecuteW(window, L"runas", executable.c_str(), params.c_str(), nullptr, SW_SHOWNORMAL));
         if (launch > 32) {
@@ -421,19 +315,9 @@ void RunInstall(HWND window, bool commandLine) {
             return;
         }
     }
-    if (result.ok && setupZeroTier) {
-        std::wstring zeroTier;
-        if (!SetupZeroTier(window, network, zeroTier)) {
-            result.message += L"\n\nSifuCoop installed, but ZeroTier setup did not finish:\n" + zeroTier;
-            MessageBoxW(window, result.message.c_str(), L"SifuCoop installer", MB_OK | MB_ICONWARNING);
-            SetStatus(window, zeroTier);
-            return;
-        }
-        result.message += L"\n\n" + zeroTier;
-    }
     if (result.ok) {
         MessageBoxW(window, result.message.c_str(), L"SifuCoop installer", MB_OK | MB_ICONINFORMATION);
-        SetStatus(window, setupZeroTier ? L"SifuCoop and ZeroTier setup complete." : L"Install complete.");
+        SetStatus(window, L"Install complete. Configure networking in Sifu or SifuCoopLauncher.");
     } else {
         MessageBoxW(window, result.message.c_str(), L"SifuCoop installer", MB_OK | MB_ICONERROR);
         SetStatus(window, result.message);
@@ -463,27 +347,18 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                       20, 140, 310, 22, window, reinterpret_cast<HMENU>(kReplaceConfig), g_instance, nullptr);
         CreateWindowW(L"STATIC", L"Existing dsound.dll is always backed up. Existing SifuCoop.ini is kept unless checked above.",
                       WS_CHILD | WS_VISIBLE, 20, 164, 500, 28, window, nullptr, g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Also install ZeroTier and join this network", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                      20, 202, 310, 22, window, reinterpret_cast<HMENU>(kZeroTierSetup), g_instance, nullptr);
-        CreateWindowW(L"STATIC", L"ZeroTier network ID (16 hex characters):", WS_CHILD | WS_VISIBLE,
-                      40, 228, 300, 20, window, nullptr, g_instance, nullptr);
-        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                        40, 249, 280, 24, window, reinterpret_cast<HMENU>(kZeroTierNetwork), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Open ZeroTier Central (login / authorize)", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                      330, 246, 160, 28, window, reinterpret_cast<HMENU>(kZeroTierCentral), g_instance, nullptr);
-        CreateWindowW(L"STATIC", L"After both PCs join, authorize both devices in ZeroTier Central. The client then uses the host’s ZeroTier managed IP.",
-                      WS_CHILD | WS_VISIBLE, 20, 282, 480, 34, window, nullptr, g_instance, nullptr);
+        CreateWindowW(L"STATIC", L"After installation, configure Host or Join in Sifu (F1) or SifuCoopLauncher.exe.",
+                      WS_CHILD | WS_VISIBLE, 20, 202, 480, 34, window, nullptr, g_instance, nullptr);
         CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT,
-                      20, 325, 470, 54, window, reinterpret_cast<HMENU>(kStatus), g_instance, nullptr);
+                      20, 246, 470, 54, window, reinterpret_cast<HMENU>(kStatus), g_instance, nullptr);
         CreateWindowW(L"BUTTON", L"Install", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                      380, 395, 110, 30, window, reinterpret_cast<HMENU>(kInstall), g_instance, nullptr);
+                      380, 316, 110, 30, window, reinterpret_cast<HMENU>(kInstall), g_instance, nullptr);
         DetectInto(window, false);
         return 0;
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
         case kDetect: DetectInto(window, true); return 0;
         case kBrowse: Browse(window); return 0;
-        case kZeroTierCentral: OpenZeroTierCentral(window); return 0;
         case kInstall: RunInstall(window, false); return 0;
         }
         break;
@@ -500,22 +375,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv && argc >= 3 && _wcsicmp(argv[1], L"--install") == 0) {
         bool replace = false;
-        std::wstring zeroTierNetwork;
         for (int i = 3; i < argc; ++i) {
             if (_wcsicmp(argv[i], L"--replace-config") == 0) replace = true;
-            if (_wcsicmp(argv[i], L"--zerotier") == 0 && i + 1 < argc)
-                zeroTierNetwork = argv[++i];
         }
         InstallResult result = Install(argv[2], replace);
-        if (result.ok && !zeroTierNetwork.empty()) {
-            std::wstring zeroTier;
-            if (!SetupZeroTier(nullptr, zeroTierNetwork, zeroTier)) {
-                result.ok = false;
-                result.message += L"\n\nSifuCoop installed, but ZeroTier setup did not finish:\n" + zeroTier;
-            } else {
-                result.message += L"\n\n" + zeroTier;
-            }
-        }
         MessageBoxW(nullptr, result.message.c_str(), L"SifuCoop installer",
                     MB_OK | (result.ok ? MB_ICONINFORMATION : MB_ICONERROR));
         LocalFree(argv);
@@ -538,7 +401,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     }
     HWND window = CreateWindowExW(0, klass, L"SifuCoop installer",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 530, 480, nullptr, nullptr, instance, nullptr);
+        CW_USEDEFAULT, CW_USEDEFAULT, 530, 400, nullptr, nullptr, instance, nullptr);
     if (!window) {
         MessageBoxW(nullptr, L"Could not create the installer window.",
                     L"SifuCoop installer", MB_OK | MB_ICONERROR);

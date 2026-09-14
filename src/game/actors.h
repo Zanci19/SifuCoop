@@ -104,6 +104,13 @@ int ReadRelationship(ue::UObject* from_actor, ue::UObject* to_actor);
 
 int ReadRelationshipViaComponent(ue::UObject* from_actor, ue::UObject* to_actor);
 
+// Suppressed means the write was never attempted (the world had not settled),
+// which is not the same as the game refusing it. Callers that draw a conclusion
+// from a failed write must tell the two apart.
+enum class RelationshipWrite { Suppressed, Wrote, Refused };
+
+RelationshipWrite WriteRelationshipChecked(ue::UObject* social, ue::UObject* toward, int value);
+
 bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value);
 
 int RelationshipMapSize(ue::UObject* social);

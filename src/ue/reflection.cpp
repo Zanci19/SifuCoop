@@ -354,7 +354,7 @@ bool IsValidObject(UObject* object) {
     const auto vtable = *reinterpret_cast<const std::uintptr_t*>(object);
     if (vtable < g_module_base || vtable - g_module_base > kModuleSpan) return false;
 
-    // UObjectBase::ClassPrivate.
+    // UObjectBase::ClassPrivate
     const auto class_private = *reinterpret_cast<const std::uintptr_t*>(
         reinterpret_cast<const std::uint8_t*>(object) + 0x10);
     if (class_private < 0x10000 || (class_private & 7) != 0) return false;

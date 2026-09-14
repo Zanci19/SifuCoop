@@ -1,5 +1,9 @@
 # Enemy sync bug investigation
 
+> Dated investigation, not a current release-status list. Some mitigations described here were
+> experimental or unconfirmed. Reproduce each symptom on the current protocol and verify it
+> against source and paired logs before applying a proposed fix.
+
 **Date:** 2026-08-12
 **Scope:** Identify causes and prescribe fixes. **Do not treat this file as implemented work.**
 **Protocol:** v17 (UDP mirror; no UE net driver).

@@ -1,5 +1,9 @@
 # Sifu Co-op — full two-player playthrough
 
+> Dated engineering plan and research record. It is useful context, but source code and the
+> current setup/developer guides take precedence where protocol numbers, defaults, UI, or
+> implementation status differ.
+
 The goal is two people playing Sifu together against the game's own enemies: shared
 encounters, shared kills, shared progress through a level. Sparring is a subset that
 already worked and is kept as *Versus* mode.

@@ -101,7 +101,7 @@ void RefreshLocalAddresses() {
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return;
 
     char hostname[256] = {};
-    wchar_t text[1024] = L"ZeroTier address (share the 10.x address with your partner):\r\n";
+    wchar_t text[1024] = L"Local addresses (usable only if reachable by your partner):\r\n";
 
     if (gethostname(hostname, sizeof(hostname)) == 0) {
         addrinfo hints = {};
@@ -118,10 +118,12 @@ void RefreshLocalAddresses() {
                 const unsigned long host_order = ntohl(addr->sin_addr.s_addr);
                 const unsigned int a = (host_order >> 24) & 0xFF;
                 const unsigned int b = (host_order >> 16) & 0xFF;
-                const bool vpn = (a == 10) || (a == 172 && b >= 16 && b <= 31);
+                const bool private_address = (a == 10) || (a == 172 && b >= 16 && b <= 31) ||
+                                             (a == 192 && b == 168);
 
                 wchar_t line[128] = {};
-                _snwprintf(line, 128, L"   %hs%s\r\n", ip, vpn ? L"   <- ZeroTier" : L"");
+                _snwprintf(line, 128, L"   %hs%s\r\n", ip,
+                           private_address ? L"   (private/LAN)" : L"");
                 wcsncat(text, line, 1023 - wcslen(text));
             }
             freeaddrinfo(results);
@@ -204,7 +206,7 @@ bool SaveSettings() {
         return true;
     }
 
-    SetStatus(hosting ? L"Saved. Share your ZeroTier address above."
+    SetStatus(hosting ? L"Saved. Share an address your partner can reach."
                       : L"Saved. Ready to join your partner.");
     return true;
 }
@@ -385,7 +387,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
     RegisterClassExW(&wc);
 
-    HWND window = CreateWindowExW(0, wc.lpszClassName, L"SifuCoop - ZeroTier Setup",
+    HWND window = CreateWindowExW(0, wc.lpszClassName, L"SifuCoop - Connection Setup",
                                   WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 470, 460, nullptr, nullptr,
                                   instance, nullptr);

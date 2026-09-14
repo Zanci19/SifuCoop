@@ -1,5 +1,9 @@
 # SifuCoop — Full Project Handoff
 
+> Historical engineering record. It intentionally preserves experiments and conclusions from
+> earlier builds. Treat current source, `README.md`, `SETUP.md`, and
+> `DEVELOPER_GUIDE.md` as authoritative for present behavior.
+
 ## 2026-08-15 locomotion and alternating-hit correction (protocol 19)
 
 Newest 21:19 paired host log made both regressions concrete. The remote player's
@@ -260,7 +264,7 @@ executable. No game files are modified; uninstall = delete those two files.
   all floats are NaN/range-checked before becoming positions/health. Crypto is self-contained
   (`src/net/crypto.cpp`, RFC 6234/2104) and **verified against published FIPS 180-4 / RFC 4231
   test vectors on every build — the build fails if any vector mismatches** (`tools/cryptotest/`).
-- **Connectivity:** ZeroTier/VPN (recommended), host port-forward, or STUN + UDP hole-punching
+- **Connectivity:** LAN/private VPN, host port-forward, or STUN + UDP hole-punching
   (STUN client on the game's own socket; "Find my public address" button in the overlay).
 - **In-game overlay/menu (F1):** Dear ImGui drawn by hooking the D3D11 swap chain. Purely
   cosmetic. Can be disabled with `in_game_overlay=0` (it's the riskiest thing the mod does).
@@ -297,7 +301,7 @@ src/
   net/protocol.h         wire format (v18), packet structs, static_asserts
   net/session.cpp        socket, auth, STUN/punch, interpolation, all packet handlers
   net/crypto.cpp         SHA-256 + HMAC-SHA256 (verified against test vectors)
-  ui/d3d_overlay.cpp     ImGui menu via swap-chain hook (Lobby/Levels/Sync/Tuning/Internet/Network/How-to)
+  ui/d3d_overlay.cpp     ImGui menu via swap-chain hook (Play/Setup/Options/Diagnostics)
   ui/overlay.cpp         fallback status window (when swap-chain hook unavailable)
 tools/
   pdbdump/pdbdump.py     offset generator (WANTED funcs + WANTED_MEMBERS)
@@ -563,8 +567,8 @@ heartbeat (role, RTT, levels, enemies known/active/driven/unmatched, damage out/
 one-time `FIRST peer damage applied` / `FIRST local hit` markers. Put two machines' logs side by
 side to see what each saw. `verbose_enemies`/`verbose_orders` add per-event detail.
 
-**Two real machines:** connect via ZeroTier (both join one network at my.zerotier.com, tick the
-Auth box for each device, use the `10.x` Managed IP), matching passphrase; host loads a level, the
+**Two real machines:** connect through the same LAN or private VPN and use the host address
+reachable by the client, with a matching passphrase; host loads a level, the
 joiner is auto-pulled in. Then check: see each other move; enemy positions/health/death agree; the
 joiner can kill a real enemy; room clears on both; level transitions carry the joiner along.
 

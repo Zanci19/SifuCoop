@@ -5,6 +5,7 @@
 #include "../game/enemies.h"
 #include "../game/orders.h"
 #include "../game/puppet.h"
+#include "../game/replay.h"
 #include "../game/runstate.h"
 #include "../game/selftest.h"
 #include "../ue/reflection.h"
@@ -44,6 +45,7 @@ void OnFrame() {
     if (!player) return;
 
     sifucoop::game::TickRunState(player);
+    sifucoop::game::TickReplayProbe();
 
     if (!sifucoop::game::IsOrderHookInstalled()) {
         sifucoop::game::InstallOrderHook(g_base, player);

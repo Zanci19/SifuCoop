@@ -12,11 +12,14 @@ Sifu\Binaries\Win64\
     SifuCoop.ini      <- its configuration
 ```
 
-**[SETUP.md](SETUP.md)** is the install and first-connection guide, and has a step-by-step
-test list that isolates a failure to one layer. **[COOP-PLAN.md](COOP-PLAN.md)** is the
-engineering account: what works, what is approximate, what is untried, and why.
-**[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)** explains the codebase, networking model,
-Unreal integration, debugging workflow, and safe contribution process.
+**[SETUP.md](md/SETUP.md)** is the install and first-connection guide, and has a step-by-step
+test list that isolates a failure to one layer. **[COOP-PLAN.md](md/COOP-PLAN.md)**
+preserves the dated engineering investigation and should be checked against current source
+before implementation. **[DEVELOPER_GUIDE.md](md/DEVELOPER_GUIDE.md)** explains the current
+codebase, networking model, Unreal integration, debugging workflow, and safe contribution
+process.
+**[KAKO-DELUJE-SL.md](md/KAKO-DELUJE-SL.md)** explains installation, networking,
+architecture, limitations, and development in Slovenian.
 
 ## Install
 
@@ -27,9 +30,17 @@ before replacement. Existing SifuCoop.ini settings stay intact unless you explic
 to replace them.
 
 For a manual install, copy dsound.dll and SifuCoop.ini next to Sifu-Win64-Shipping.exe.
-See [SETUP.md](SETUP.md) for connection steps.
+See [SETUP.md](md/SETUP.md) for connection steps.
 
 ---
+
+## Current status
+
+The source and supporting tools build as one distribution, and the network design is
+internally coherent. That does not prove a full playthrough: combat behavior can only be
+validated with two supported copies of Sifu on separate PCs. Treat the table below as the
+implemented design, with the stated limitations, rather than a promise that every encounter
+has been play-tested.
 
 ## What it does
 
@@ -128,4 +139,4 @@ regenerated locally in about two seconds; see `.gitignore`.
 ## Licence
 
 MIT, see [LICENSE](LICENSE). Bundled Dear ImGui and MinHook keep their own; see
-[THIRD_PARTY.md](THIRD_PARTY.md).
+[THIRD_PARTY.md](md/THIRD_PARTY.md).

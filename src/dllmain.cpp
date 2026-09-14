@@ -10,6 +10,7 @@
 #include "game/orders.h"
 #include "game/player2.h"
 #include "game/puppet.h"
+#include "game/replay.h"
 #include "game/selftest.h"
 #include "net/instance_guard.h"
 #include "net/session.h"
@@ -186,7 +187,7 @@ DWORD WINAPI Bootstrap(LPVOID) {
     if (!network_started && sifucoop::net::GetRole() == sifucoop::net::Role::Host) {
         const char* failure = sifucoop::net::GetStartFailure();
         if (!failure || !failure[0]) failure = "The SifuCoop host socket could not start.";
-        SC_LOG("bootstrap: host startup failed before hooks -- mod is inert: %s", failure);
+        SC_LOG("bootstrap: host startup failed before hooks, mod is inert: %s", failure);
         MessageBoxA(nullptr, failure, "SifuCoop host not started",
                     MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
         return 0;
@@ -198,6 +199,7 @@ DWORD WINAPI Bootstrap(LPVOID) {
     sifucoop::game::InitEnemies(base);
     sifucoop::game::InstallPlayOrderHook(base);
     sifucoop::game::InitSelfTest();
+    sifucoop::game::InitReplayProbe();
 
     bool in_game = false;
     if (sifucoop::coop::Get().in_game_overlay) {

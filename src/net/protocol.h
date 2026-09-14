@@ -7,7 +7,7 @@ namespace sifucoop::net {
 
 constexpr std::uint32_t kMagic = 0x53434F50;
 
-constexpr std::uint16_t kProtocolVersion = 21;
+constexpr std::uint16_t kProtocolVersion = 22;
 
 constexpr int kAuthTagSize = 8;
 
@@ -52,6 +52,7 @@ enum class PacketType : std::uint16_t {
     OwnedEnemy = 13,
     InviteReply = 14,
     CheatState = 15,
+    OrderAck = 16,
 };
 
 enum class AnimationSemantic : std::uint8_t {
@@ -112,6 +113,15 @@ struct OrderEventPacket {
     std::uint32_t order_type = 0;
     std::int32_t attack_index = 0;
     std::int32_t attack_depth = 0;
+
+    // Stable across retransmits, unlike header.sequence. Identifies the event
+    // for acknowledgement and duplicate rejection; see CODE-NOTES.md.
+    std::uint32_t event_id = 0;
+};
+
+struct OrderAckPacket {
+    PacketHeader header;
+    std::uint32_t event_id = 0;
 };
 
 struct LevelSyncPacket {
@@ -256,7 +266,8 @@ struct MontagePacket {
 
 static_assert(sizeof(PacketHeader) == 24, "header layout changed");
 static_assert(sizeof(SnapshotPacket) == 24 + 36 + 12 + 4, "snapshot layout changed");
-static_assert(sizeof(OrderEventPacket) == 24 + 16, "order event layout changed");
+static_assert(sizeof(OrderEventPacket) == 24 + 20, "order event layout changed");
+static_assert(sizeof(OrderAckPacket) == 24 + 4, "order ack layout changed");
 static_assert(sizeof(EnemyEntry) == 64, "enemy entry layout changed");
 static_assert(sizeof(RunStatePacket) == 24 + 4 + 4 + 4 + 192, "run state layout changed");
 static_assert(sizeof(CheatStatePacket) <= kMaxPacketSize, "cheat state packet exceeds buffer");

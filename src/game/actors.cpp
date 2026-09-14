@@ -514,28 +514,26 @@ int ReadRelationshipViaComponent(ue::UObject* from_actor, ue::UObject* to_actor)
     return params.ReturnValue;
 }
 
-bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
-    if (!social || !toward || value < 0) return false;
+RelationshipWrite WriteRelationshipChecked(ue::UObject* social, ue::UObject* toward,
+                                           int value) {
+    if (!social || !toward || value < 0) return RelationshipWrite::Refused;
 
-    if (!ue::IsValidObject(social) || !ue::IsValidObject(toward)) return false;
+    if (!ue::IsValidObject(social) || !ue::IsValidObject(toward)) {
+        return RelationshipWrite::Refused;
+    }
 
     static ue::UObject* seen_world = nullptr;
     static DWORD world_settled_at = 0;
     ue::UObject* world = ue::GetWorld();
-    if (!world) return false;
+    if (!world) return RelationshipWrite::Suppressed;
     const DWORD now = GetTickCount();
     if (world != seen_world) {
         seen_world = world;
         world_settled_at = now;
-        return false;
+        return RelationshipWrite::Suppressed;
     }
     constexpr DWORD kWorldSettleMs = 5000;
-    if (now - world_settled_at < kWorldSettleMs) return false;
-
-    if (g_set_relationship) {
-        g_set_relationship(social, toward, static_cast<std::uint8_t>(value));
-        return true;
-    }
+    if (now - world_settled_at < kWorldSettleMs) return RelationshipWrite::Suppressed;
 
     struct Params {
         ue::UObject* Actor;
@@ -543,7 +541,22 @@ bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
     } params = {};
     params.Actor = toward;
     params.eRelation = static_cast<std::uint8_t>(value);
-    return ue::CallFunction(social, L"BPF_ServerChangeRelationship", &params);
+
+    // Drive both setters. The native one owns m_Relationships; the Blueprint
+    // wrapper is what the game itself calls, so anything it refreshes besides
+    // the map only happens on this path.
+    bool wrote = false;
+    if (g_set_relationship) {
+        g_set_relationship(social, toward, static_cast<std::uint8_t>(value));
+        wrote = true;
+    }
+    if (ue::CallFunction(social, L"BPF_ServerChangeRelationship", &params)) wrote = true;
+
+    return wrote ? RelationshipWrite::Wrote : RelationshipWrite::Refused;
+}
+
+bool WriteRelationship(ue::UObject* social, ue::UObject* toward, int value) {
+    return WriteRelationshipChecked(social, toward, value) == RelationshipWrite::Wrote;
 }
 
 constexpr std::uintptr_t kSocialRelationshipsMap = 0x0318;

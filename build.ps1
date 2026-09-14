@@ -77,6 +77,7 @@ $sources = @(
     "src\game\selftest.cpp"
     "src\game\puppet.cpp"
     "src\game\runstate.cpp"
+    "src\game\replay.cpp"
     "src\game\player2.cpp"
     "src\net\crypto.cpp"
     "src\net\session.cpp"
@@ -166,7 +167,7 @@ if ($LASTEXITCODE -ne 0) {
 $installer = Join-Path $OutDir "SifuCoopInstaller.exe"
 $installerLog = Join-Path $OutDir "installer.build.log"
 $installerSource = Join-Path $Root "installer\installer.cpp"
-cmd /c ('g++ -o "{0}" "{1}" {2} -mwindows -municode -lshlwapi -lshell32 -lcomdlg32 -lole32 -ladvapi32 -lurlmon > "{3}" 2>&1' -f $installer, $installerSource, $flags, $installerLog)
+cmd /c ('g++ -o "{0}" "{1}" {2} -mwindows -municode -lshlwapi -lshell32 -lcomdlg32 -lole32 -ladvapi32 > "{3}" 2>&1' -f $installer, $installerSource, $flags, $installerLog)
 if ($LASTEXITCODE -ne 0) {
     Get-Content $installerLog | ForEach-Object { Write-Host $_ }
     throw "installer build failed"
@@ -177,23 +178,30 @@ if ($LASTEXITCODE -ne 0) {
 
 
 
-$Dist = Join-Path $Root "dist"
+$Dist = [IO.Path]::GetFullPath((Join-Path $Root "dist"))
+$RootPrefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+if (-not $Dist.StartsWith($RootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "refusing to clean distribution path outside project: $Dist"
+}
+if (Test-Path $Dist) { Remove-Item -Recurse -Force -LiteralPath $Dist }
 New-Item -ItemType Directory -Force $Dist | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $Dist "tools") | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $Dist "md") | Out-Null
 
 Copy-Item $dll (Join-Path $Dist "dsound.dll") -Force
 if (Test-Path $launcher) { Copy-Item $launcher (Join-Path $Dist "SifuCoopLauncher.exe") -Force }
 Copy-Item $installer (Join-Path $Dist "SifuCoopInstaller.exe") -Force
 if (Test-Path $testClient) { Copy-Item $testClient (Join-Path $Dist "tools\testclient.exe") -Force }
-Copy-Item (Join-Path $Root "SETUP.md") (Join-Path $Dist "SETUP.md") -Force
+Copy-Item (Join-Path $Root "md\SETUP.md") (Join-Path $Dist "SETUP.md") -Force
+Copy-Item (Join-Path $Root "md\KAKO-DELUJE-SL.md") (Join-Path $Dist "KAKO-DELUJE-SL.md") -Force
+Copy-Item (Join-Path $Root "md\*.md") (Join-Path $Dist "md") -Force
 Copy-Item (Join-Path $Root "README.md") (Join-Path $Dist "README.md") -Force
 
 
 $distIni = Join-Path $Dist "SifuCoop.ini"
-if (-not (Test-Path $distIni)) {
     @"
 ; SifuCoop configuration. Edit by hand, use SifuCoopLauncher.exe, or press F1
-; in game -- the Tuning tab writes this file back.
+; in game -- the Options tab saves the settings exposed there.
 ;
 ;   mode       = off | host | client
 ;   host       = the HOST's address (client mode only)
@@ -205,7 +213,7 @@ if (-not (Test-Path $distIni)) {
 ;                fine on a forwarded port.
 ;
 ; For hole punching over the internet, both players also set:
-;   punch      = the OTHER player's public address:port (F1 -> Internet finds it)
+;   punch      = the OTHER player's public address:port (F1 -> Setup can find it)
 ;   local_port = the same fixed number on both machines
 [net]
 mode=host
@@ -213,8 +221,8 @@ host=127.0.0.1
 port=7777
 passphrase=
 
-; Everything below defaults to on. Each line names one part of the machinery;
-; turning one off is how you find out which half is misbehaving.
+; Primary synchronization defaults are shown below. Change one setting at a
+; time while diagnosing and restore it before testing another subsystem.
 ;   versus              = 1 to spar against each other instead of co-operating
 ;   echo_enemy_attacks  = replay the host's enemy swings on the joining screen
 ;   report_damage       = let the joining player hurt what the host can see
@@ -253,7 +261,6 @@ in_game_overlay=1
 ; you. Leave it 0 for normal play; it moves enemies around.
 selftest=0
 "@ | Set-Content $distIni -Encoding ascii
-}
 
 Write-Host "packaged -> $Dist" -ForegroundColor Green
 
@@ -263,7 +270,3 @@ if ($Deploy) {
     Write-Host "deployed to $GameDir" -ForegroundColor Green
     Write-Host "remove with: Remove-Item '$GameDir\dsound.dll'" -ForegroundColor DarkGray
 }
-
-
-
-

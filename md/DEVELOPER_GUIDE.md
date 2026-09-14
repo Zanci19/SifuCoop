@@ -25,7 +25,8 @@ If both copies decide an enemy's AI, both apply damage, or both move an actor, t
 - C++17, built with MinGW `g++`.
 - A raw WinSock2 UDP protocol, not ENet, Steam Networking, EOS, or UE replication.
 - A UE4.26 reverse-engineering project using PDB-derived symbols and Blueprint reflection.
-- A two-machine mod, normally connected through ZeroTier or another VPN.
+- A two-machine mod connected through reachable UDP: LAN, a private VPN, port forwarding,
+  or supported hole punching.
 
 ### It is not
 
@@ -143,7 +144,8 @@ sendto / recvfrom
 closesocket / WSACleanup
 ```
 
-The default port is `7777`. ZeroTier is not embedded in the DLL; it only creates a private network interface. SifuCoop sends normal UDP packets to the peer's ZeroTier address.
+The default port is `7777`. No VPN product is embedded in the DLL or installer. SifuCoop
+sends normal UDP packets to the configured peer address.
 
 ### 6.1 Connection roles
 
@@ -330,7 +332,7 @@ Use flags to isolate one subsystem, not to hide failures. Change one group at a 
 - Python on `PATH` for PDB tooling.
 - WinLibs/MinGW `g++` with C++17 support.
 - Two real machines for meaningful co-op tests.
-- ZeroTier/private LAN for easiest connectivity.
+- Same LAN or an existing private VPN for easiest connectivity.
 
 ### Normal local build
 
@@ -502,7 +504,7 @@ Good habits:
 
 Do not begin by trying to fix every enemy bug. Build confidence in layers.
 
-1. Build with `-NoGen`, launch one host/client pair over ZeroTier, open F1 menu, and locate both logs.
+1. Build with `-NoGen`, launch one host/client pair over a LAN or private VPN, open F1 menu, and locate both logs.
 2. Read `dllmain.cpp`, `protocol.h`, and public APIs in `session.h`.
 3. Reproduce one enemy-death mismatch and identify actor hash, death flag, and owner in both logs.
 4. Make one diagnostic-only change around that transition; build/deploy and compare evidence.

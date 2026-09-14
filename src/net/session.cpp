@@ -118,6 +118,47 @@ int g_order_write = 0;
 int g_order_read = 0;
 std::uint32_t g_last_order_sequence = 0;
 
+// Attacks, dodges and guards are one-shot events: a dropped packet is a swing
+// that never happens on the other screen. They are retransmitted until the peer
+// acknowledges them; see CODE-NOTES.md.
+constexpr int kPendingOrderSlots = 24;
+constexpr DWORD kOrderRetryMs = 40;
+constexpr int kOrderMaxAttempts = 6;
+
+struct PendingOrder {
+    OrderEventPacket packet;
+    DWORD last_sent_ms = 0;
+    int attempts = 0;
+    bool live = false;
+};
+
+PendingOrder g_pending_orders[kPendingOrderSlots];
+std::uint32_t g_next_order_event_id = 1;
+
+constexpr int kSeenOrderIds = 64;
+std::uint32_t g_seen_order_ids[kSeenOrderIds] = {};
+int g_seen_order_write = 0;
+
+bool OrderAlreadySeen(std::uint32_t event_id) {
+    for (std::uint32_t seen : g_seen_order_ids) {
+        if (seen != 0 && seen == event_id) return true;
+    }
+    return false;
+}
+
+void RememberOrderId(std::uint32_t event_id) {
+    g_seen_order_ids[g_seen_order_write] = event_id;
+    g_seen_order_write = (g_seen_order_write + 1) % kSeenOrderIds;
+}
+
+void HandleOrderAck(const OrderAckPacket& packet) {
+    for (PendingOrder& pending : g_pending_orders) {
+        if (!pending.live || pending.packet.event_id != packet.event_id) continue;
+        pending.live = false;
+        return;
+    }
+}
+
 EnemyStateOut g_enemies_live[kMaxTrackedEnemies];
 int g_enemy_live_count = 0;
 bool g_enemy_sweep_seen = false;
@@ -424,8 +465,11 @@ void LogLocalAddresses(int port) {
         const unsigned int first = (host_order >> 24) & 0xFF;
         const unsigned int second = (host_order >> 16) & 0xFF;
 
-        const bool likely_vpn = (first == 10) || (first == 172 && second >= 16 && second <= 31);
-        SC_LOG("net:   %s:%d%s", ip, port, likely_vpn ? "   <-- likely ZeroTier/VPN" : "");
+        const bool private_address = (first == 10) ||
+                                     (first == 172 && second >= 16 && second <= 31) ||
+                                     (first == 192 && second == 168);
+        SC_LOG("net:   %s:%d%s", ip, port,
+               private_address ? "   <-- private/LAN address" : "");
     }
     freeaddrinfo(results);
 }
@@ -546,6 +590,9 @@ void ResetPeerState() {
     g_last_snapshot_sequence = 0;
     g_order_read = g_order_write;
     g_last_order_sequence = 0;
+    for (PendingOrder& pending : g_pending_orders) pending = {};
+    for (std::uint32_t& seen : g_seen_order_ids) seen = 0;
+    g_seen_order_write = 0;
     g_peer_state_valid = false;
     g_peer_vitals = PeerVitals();
     g_peer_run_valid = false;
@@ -874,8 +921,18 @@ void HandleCheatState(const CheatStatePacket& packet) {
 }
 void QueueOrder(const OrderEventPacket& packet) {
 
-    if (g_last_order_sequence != 0 &&
-        packet.header.sequence <= g_last_order_sequence) {
+    if (packet.event_id != 0) {
+        // Acknowledge every copy, including duplicates: the ack itself can be
+        // lost, and a peer still retransmitting needs to hear it again.
+        OrderAckPacket ack = {};
+        FillHeader(&ack.header, PacketType::OrderAck);
+        ack.event_id = packet.event_id;
+        SendPacket(&ack, sizeof(ack));
+
+        if (OrderAlreadySeen(packet.event_id)) return;
+        RememberOrderId(packet.event_id);
+    } else if (g_last_order_sequence != 0 &&
+               packet.header.sequence <= g_last_order_sequence) {
         return;
     }
     g_last_order_sequence = packet.header.sequence;
@@ -1029,6 +1086,13 @@ void PumpReceive() {
                     OrderEventPacket order = {};
                     memcpy(&order, buffer, sizeof(order));
                     QueueOrder(order);
+                }
+                break;
+            case PacketType::OrderAck:
+                if (fits(sizeof(OrderAckPacket))) {
+                    OrderAckPacket ack = {};
+                    memcpy(&ack, buffer, sizeof(ack));
+                    HandleOrderAck(ack);
                 }
                 break;
             case PacketType::LevelSync:
@@ -1361,9 +1425,55 @@ void SendOrderEvent(std::uint32_t actor_hash, std::uint32_t order_type,
     packet.order_type = order_type;
     packet.attack_index = attack_index;
     packet.attack_depth = attack_depth;
+    packet.event_id = g_next_order_event_id++;
+    if (g_next_order_event_id == 0) g_next_order_event_id = 1;
 
     SendPacket(&packet, sizeof(packet));
+
+    PendingOrder* slot = nullptr;
+    for (PendingOrder& candidate : g_pending_orders) {
+        if (!candidate.live) {
+            slot = &candidate;
+            break;
+        }
+    }
+    if (!slot) {
+        // Full: drop the oldest rather than the newest, since a stale swing
+        // matters less than the one just thrown.
+        DWORD oldest = 0;
+        for (PendingOrder& candidate : g_pending_orders) {
+            if (!slot || candidate.last_sent_ms < oldest) {
+                slot = &candidate;
+                oldest = candidate.last_sent_ms;
+            }
+        }
+    }
+    slot->packet = packet;
+    slot->last_sent_ms = NowMs();
+    slot->attempts = 1;
+    slot->live = true;
 }
+
+void RetransmitPendingOrders(DWORD now) {
+    if (!g_connected) return;
+    for (PendingOrder& pending : g_pending_orders) {
+        if (!pending.live) continue;
+        if (now - pending.last_sent_ms < kOrderRetryMs) continue;
+        if (pending.attempts >= kOrderMaxAttempts) {
+            SC_LOG("net: order event %u never acknowledged after %d tries",
+                   pending.packet.event_id, pending.attempts);
+            pending.live = false;
+            continue;
+        }
+        // FillHeader again so the sequence and timestamp are current; event_id
+        // is what identifies the event and it does not change.
+        FillHeader(&pending.packet.header, PacketType::OrderEvent);
+        SendPacket(&pending.packet, sizeof(pending.packet));
+        pending.last_sent_ms = now;
+        ++pending.attempts;
+    }
+}
+
 
 bool PopOrderEvent(std::uint32_t* actor_hash, std::uint32_t* order_type,
                    std::int32_t* attack_index, std::int32_t* attack_depth) {
@@ -1789,6 +1899,7 @@ void TickSession(const LocalState& local) {
     last_tick_ms = now;
 
     UpdateRates(now);
+    RetransmitPendingOrders(now);
 
     // Grace for either role while loading; see CODE-NOTES.md.
     const bool level_traffic_recent =

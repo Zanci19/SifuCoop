@@ -85,8 +85,9 @@ bundled `builds\epic.json` → verifies the crypto test vectors → compiles
 **Read the output.** You want to see:
 
 - `wrote ...\builds\steam.json: build 'steam' stamp=0x... size=0x... (N offsets)`
-  — **N must equal the Epic build's count.** As of this kit that is **69**. If it is
-  lower, you are on a different patch than Epic (see the warning at the top).
+  — **N must equal the Epic build's count in `builds\epic.json`.** Do not trust a
+  number copied from an older guide; the required symbol set grows as the project changes.
+  If the counts differ, check the game patches and generated files before building.
 - `all vectors pass`
 - `built ...\build\dsound.dll (...)` with no warnings
 - `deployed to ...Steam...\Win64`
@@ -137,9 +138,9 @@ means a different patch — see the top warning.
 
 ## 8. Connect and test
 
-Easiest link is ZeroTier: both PCs join one network at my.zerotier.com, authorise
-each device, use the `10.x` Managed IPs (client's `host=` is the host's `10.x`).
-Same passphrase. Then follow the test order in `SETUP.md`: see each other move →
+Put both PCs on the same LAN or an existing private VPN and use an address the client can
+reach (`host=` is the host's reachable address). Use the same passphrase. Then follow the
+test order in `SETUP.md`: see each other move →
 enemy positions/health/death agree → the joiner kills a real enemy → the room clears
 on both → level transitions carry the joiner along.
 
@@ -160,8 +161,9 @@ On the Steam PC, in the unzipped kit folder:
 python tools\pdbdump\pdbdump.py "C:\Program Files (x86)\Steam\steamapps\common\Sifu\Sifu\Binaries\Win64\Sifu-Win64-Shipping.pdb" --exe "C:\Program Files (x86)\Steam\steamapps\common\Sifu\Sifu\Binaries\Win64\Sifu-Win64-Shipping.exe" --emit-build steam builds\steam.json
 ```
 
-It writes `builds\steam.json` (a few KB) and prints the offset count — still must be
-**69**. Send that one file to the Epic PC, drop it in its `builds\` folder, and there
+It writes `builds\steam.json` (a few KB) and prints the offset count. It must match
+the current `builds\epic.json` count. Send that one file to the Epic PC, drop it in
+its `builds\` folder, and there
 run:
 
 ```
