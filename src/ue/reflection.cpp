@@ -28,6 +28,7 @@ using StaticFindObjectSafeFn = UObject*(__fastcall*)(void* uclass, UObject* oute
 
 using OpenLevelFn = void(__fastcall*)(const UObject* world_context, FName level,
                                       bool absolute, void* options);
+using ConnectionCheckFn = void(__fastcall*)(const UObject* world_context, float, int, float, bool)
 
 FNameCtorFn g_fname_ctor = nullptr;
 FindFunctionFn g_find_function = nullptr;
@@ -40,6 +41,7 @@ GetPathNameFn g_get_path_name = nullptr;
 StaticFindObjectSafeFn g_static_find_object_safe = nullptr;
 OpenLevelFn g_open_level = nullptr;
 UObject** g_gworld = nullptr;
+ConnectionCheckFn = nullptr;
 
 bool g_ready = false;
 
@@ -371,6 +373,13 @@ float GetAnimationAssetLength(UObject* animation_asset) {
     } params = {};
     if (!CallFunction(animation_asset, L"GetPlayLength", &params)) return 0.f;
     return params.ReturnValue;
+}
+
+void AllowConnection(peer, peer, float, int, bool) {
+    unsigned int8_t ConnectionStatus;
+    bool IsConnected? = false;
+    constexpr std::uintptr_t ConnectionHzSpan = 0x10000000u;
+    
 }
 
 }
