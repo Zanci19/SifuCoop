@@ -1,5 +1,6 @@
 # Build output and packaged releases.
 build/
+dist/
 *.log
 
 # Python bytecode from the offset tooling.
