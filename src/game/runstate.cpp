@@ -433,7 +433,7 @@ void TickRunState(ue::UObject* player) {
 
         if (!g_logged_local_probe) {
             const int age = ReadLocalAge(player);
-            if (age >= 0) {
+            if (age > 0) {
                 SC_LOG("run: local read ok -- age=%d", age);
                 g_logged_local_probe = true;
             }
@@ -455,8 +455,11 @@ void TickRunState(ue::UObject* player) {
             local.outfit_index = outfit;
             local.outfit_valid = true;
         }
+        // Right after a respawn the stats component reads 0 for a moment; that
+        // is "not loaded yet", not an age, and it aged the partner's body to a
+        // child on the other screen.
         const int age = ReadLocalAge(player);
-        if (age >= 0) {
+        if (age > 0) {
             local.age = age;
             local.age_valid = true;
         }
@@ -485,7 +488,7 @@ void TickRunState(ue::UObject* player) {
     if (coop::Get().sync_peer_age && coop::Get().mode == coop::Mode::Coop) {
         net::RunSnapshot ages;
         ue::UObject* puppet = GetPuppet();
-        if (puppet && net::GetPeerRunState(&ages) && ages.age_valid && ages.age >= 0) {
+        if (puppet && net::GetPeerRunState(&ages) && ages.age_valid && ages.age > 0) {
             static ue::UObject* aged_puppet = nullptr;
             static ue::UObject* aged_world = nullptr;
             static int aged_to = INT_MIN;

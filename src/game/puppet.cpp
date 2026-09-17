@@ -105,6 +105,9 @@ struct EnemyPresentation {
     float v2 = 475.f;
 
     unsigned long long last_frame = 0;
+    DWORD last_diag_ms = 0;
+    int last_diag_graph = -1;
+    unsigned int forced = 0;
 };
 constexpr int kEnemyPresentationSlots = 96;
 EnemyPresentation g_enemy_presentation[kEnemyPresentationSlots];
@@ -461,6 +464,53 @@ void ApplyDrivenEnemyPresentation(EnemyPresentation& driven, ue::UObject* anim_i
     }
 }
 
+// Runs after the original update, like the puppet's own repair: when the
+// graph is still idling a body that is visibly moving, the speed state is set
+// on the anim instance directly. Without this the puppet also stood in an idle
+// pose sliding across the floor ("IDLE AT SPEED" in the logs), and the puppet
+// is the one body whose locomotion was seen working live.
+void RepairDrivenEnemyAfterUpdate(EnemyPresentation& driven, ue::UObject* anim_instance) {
+    if (!driven.thresholds_ok) return;
+    auto* bytes = reinterpret_cast<std::uint8_t*>(anim_instance);
+    const float speed = sqrtf(driven.velocity.X * driven.velocity.X +
+                              driven.velocity.Y * driven.velocity.Y);
+    const int graph_band = bytes[kAnimSpeedState + 4];
+    const float native_speed = ReadFloatAt(bytes, kAnimOwnerVelocityLength);
+
+    const DWORD now = GetTickCount();
+    const bool disagree = graph_band != driven.band;
+    if ((disagree != (driven.last_diag_graph != driven.band) && speed > 25.f) ||
+        (disagree && now - driven.last_diag_ms >= 2000)) {
+        driven.last_diag_ms = now;
+        static unsigned int logged = 0;
+        if (++logged <= 60 || coop::Get().verbose_enemies) {
+            SC_LOG("enemy anim: speed=%.0f native=%.0f wanted=V%d graph=V%d commanded=V%d "
+                   "alphas %.2f/%.2f/%.2f/%.2f forced=%u",
+                   speed, native_speed, driven.band, graph_band, driven.last_commanded_band,
+                   ReadFloatAt(bytes, kAnimSpeedStateAlphaV0),
+                   ReadFloatAt(bytes, kAnimSpeedStateAlphaV0 + 4),
+                   ReadFloatAt(bytes, kAnimSpeedStateAlphaV0 + 8),
+                   ReadFloatAt(bytes, kAnimSpeedStateAlphaV0 + 12), driven.forced);
+        }
+    }
+    driven.last_diag_graph = graph_band;
+
+    if (graph_band != 0 || driven.band == 0 || speed <= 25.f) return;
+
+    if (g_set_player_anim_speed_state) {
+        g_set_player_anim_speed_state(anim_instance, static_cast<std::uint8_t>(driven.band));
+    } else {
+        std::uint8_t speed_state[5] = {};
+        speed_state[1] = static_cast<std::uint8_t>(1u << driven.band);
+        speed_state[4] = static_cast<std::uint8_t>(driven.band);
+        std::memcpy(bytes + kAnimSpeedState, speed_state, sizeof(speed_state));
+    }
+    float speed_alphas[4] = {};
+    speed_alphas[driven.band] = 1.f;
+    std::memcpy(bytes + kAnimSpeedStateAlphaV0, speed_alphas, sizeof(speed_alphas));
+    ++driven.forced;
+}
+
 void __fastcall SCAnimUpdateHook(ue::UObject* anim_instance, float delta_seconds) {
     const DWORD now = GetTickCount();
 
@@ -530,6 +580,12 @@ void __fastcall PlayerAnimUpdateHook(ue::UObject* anim_instance, float delta_sec
         std::memcpy(bytes + kAnimWantedSpeed, &speed, sizeof(speed));
     }
     if (g_original_player_anim_update) g_original_player_anim_update(anim_instance, delta_seconds);
+
+    if (!is_puppet_anim) {
+        if (EnemyPresentation* driven = FindDrivenEnemy(anim_instance)) {
+            RepairDrivenEnemyAfterUpdate(*driven, anim_instance);
+        }
+    }
 
     if (is_puppet_anim) {
         const DWORD now = GetTickCount();
@@ -719,11 +775,29 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
 
     ue::FRotator new_rotation = rotation;
     ue::FRotator current_rotation = {};
+    float yaw_delta = 0.f;
     if (ue::GetActorRotation(target_actor, &current_rotation)) {
-        float delta = rotation.Yaw - current_rotation.Yaw;
-        while (delta > 180.f) delta -= 360.f;
-        while (delta < -180.f) delta += 360.f;
-        new_rotation.Yaw = current_rotation.Yaw + delta * FrameRateAdjusted(kYawSmoothing);
+        yaw_delta = rotation.Yaw - current_rotation.Yaw;
+        while (yaw_delta > 180.f) yaw_delta -= 360.f;
+        while (yaw_delta < -180.f) yaw_delta += 360.f;
+        new_rotation.Yaw = current_rotation.Yaw + yaw_delta * FrameRateAdjusted(kYawSmoothing);
+    }
+
+    // A body that is already where it should be, facing the right way, needs
+    // no correction this frame. The teleport was refused and swept for
+    // nothing on every one of ~820 frames per five seconds while the partner
+    // stood still.
+    if (distance < 1.f && fabsf(dz) < 1.f && fabsf(yaw_delta) < 0.25f) {
+        ue::FVector flat = {reported_velocity.X, reported_velocity.Y, 0.f};
+        if (is_puppet) {
+            g_puppet_presentation_velocity = flat;
+            g_have_puppet_presentation_velocity = true;
+            g_puppet_anim_instance = ue::GetAnimInstance(target_actor);
+        } else {
+            SetPresentationVelocity(target_actor, flat);
+            NoteEnemyPresentation(target_actor, flat);
+        }
+        return;
     }
 
     if (distance > kSnapDistance || fabsf(dz) > kVerticalSnap) {
@@ -2082,6 +2156,9 @@ void TickPuppet() {
     if (net::ConsumeDisconnectedEvent()) {
         SC_LOG("net: peer left -- despawning puppet");
         DespawnPuppet();
+        // Whatever the peer owned, drove or hid is ours again. Without this
+        // the host's peer-owned enemies stayed brain-dead after a timeout.
+        OnSessionEnded();
     }
 
     if (CoopBodiesMayExist() && !g_puppet) {

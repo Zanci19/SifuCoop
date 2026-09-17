@@ -707,10 +707,22 @@ AppliedTotals AppliedTotalsValue(std::uint32_t hash) {
     return {};
 }
 
+// When the host's world reloads (its player died and respawned, a checkpoint
+// restart) every enemy comes back at full health and the host's applied
+// ledger restarts at zero, but the joiner is still reporting its old totals.
+// Measured 2026-09-15: five enemies died within 100 ms of the host's respawn.
+// The joiner resets when it sees the acknowledged total drop (below); the host
+// ignores reports for the round trip that takes.
+DWORD g_ledger_reset_ms = 0;
+constexpr DWORD kLedgerGraceMs = 2500;
+
 void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
 
     const bool same_world = ue::GetWorld() == g_tracked_world;
-    if (!same_world) ResetAppliedTotals();
+    if (!same_world) {
+        ResetAppliedTotals();
+        g_ledger_reset_ms = GetTickCount();
+    }
 
     ue::UObject* fighters[net::kMaxTrackedEnemies * 2] = {};
     const int count = EnumerateFighters(fighters, net::kMaxTrackedEnemies * 2);
@@ -887,6 +899,17 @@ void ApplyPeerDamage() {
     const int count = net::GetEnemyDamage(reports, net::kMaxDamagePerPacket);
     if (count == 0) return;
 
+    if (g_ledger_reset_ms != 0 && GetTickCount() - g_ledger_reset_ms < kLedgerGraceMs) {
+        static DWORD last_grace_log = 0;
+        if (last_grace_log != g_ledger_reset_ms) {
+            last_grace_log = g_ledger_reset_ms;
+            SC_LOG("enemies: world reloaded here -- ignoring the joiner's damage totals for "
+                   "%lums until it has seen the ledger restart",
+                   kLedgerGraceMs);
+        }
+        return;
+    }
+
     coop::Stats& stats = coop::GetStats();
 
     for (int i = 0; i < count; ++i) {
@@ -953,19 +976,15 @@ void ApplyPeerDamage() {
 
             entry.was_down = true;
 
-            SetDeathState(fighter);
-            const bool presented = PresentClientReplicaDeath(entry.actor);
-            entry.death_repair_attempts = presented ? 1 : 0;
-
-            NotifyDownStateChanged(fighter, true);
-            if (!presented || coop::Get().verbose_enemies) {
-                SC_LOG("death: %s client-replica presentation=%d", entry.name,
-                       presented ? 1 : 0);
-            }
-            if (coop::Get().verbose_enemies) {
-                SC_LOG("enemies: %s killed by your partner -- forced down and presented",
-                       entry.name);
-            }
+            // The native lethal hit above owns the fall. Forcing the terminal
+            // down state on top of it is what left corpses standing: the
+            // state machine said "dead" and the animation never played. The
+            // body is repaired only if it is still upright 750 ms from now.
+            entry.death_repair_attempts = 0;
+            entry.next_death_repair = GetTickCount() + 750;
+            SC_LOG("death: %s killed by your partner -- native death (down=%d dead=%d), "
+                   "repair armed",
+                   entry.name, IsDown(fighter) ? 1 : 0, IsDead(fighter) ? 1 : 0);
             FreezeDeadEnemy(entry, GetTickCount());
         }
 
@@ -1128,6 +1147,23 @@ void PublishEnemies() {
             entry.peer_aggro_until = 0;
             entry.last_peer_target_ms = 0;
             entry.host_target_flags = 0;
+
+            // A peer-killed body that is still standing after the native
+            // death had its chance is put down explicitly, through the real
+            // Death state rather than the terminal one.
+            if (fighter.health && !IsDown(fighter) && entry.next_death_repair != 0 &&
+                entry.death_repair_attempts < 3 &&
+                static_cast<LONG>(now - entry.next_death_repair) >= 0) {
+                ++entry.death_repair_attempts;
+                entry.next_death_repair = now + 750;
+                const bool replica = PresentClientReplicaDeath(entry.actor);
+                SetDeathState(fighter);
+                NotifyDownStateChanged(fighter, true);
+                SC_LOG("death: %s standing at zero health -- repaired attempt=%u replica=%d "
+                       "down=%d",
+                       entry.name, static_cast<unsigned int>(entry.death_repair_attempts),
+                       replica ? 1 : 0, IsDown(fighter) ? 1 : 0);
+            }
         }
 
         if (fighter.health && !IsDown(fighter) && GetHealth(fighter) > 0.5f) {
@@ -1489,7 +1525,19 @@ void ApplyRemoteEnemies() {
         entry.ever_seen_from_host = true;
         entry.active = (state.flags & net::kEnemyActive) != 0;
         // What the host has acknowledged of our damage: read on every packet,
-        // it is what decides which totals still need repeating.
+        // it is what decides which totals still need repeating. An
+        // acknowledged total that goes DOWN means the host's world reloaded
+        // and its ledger restarted; ours must restart too, or every old hit is
+        // dealt again to a fresh body.
+        if (state.damage_applied + 0.05f < entry.host_applied ||
+            state.guard_damage_applied + 0.05f < entry.host_guard_applied) {
+            SC_LOG("enemies: host ledger for %s restarted (%.0f -> %.0f) -- our totals reset",
+                   entry.name, entry.host_applied, state.damage_applied);
+            entry.reported_total = 0.f;
+            entry.reported_guard_total = 0.f;
+            entry.last_local_health = -1.f;
+            entry.last_local_guard = -1.f;
+        }
         entry.host_applied = state.damage_applied;
         entry.host_guard_applied = state.guard_damage_applied;
 
@@ -1755,12 +1803,16 @@ void ApplyRemoteEnemies() {
 
             if (!entry.was_down) {
                 entry.was_down = true;
-                if (fighter.health && !entry.local_brain) {
-                    SetDeathState(fighter);
-                    NotifyDownStateChanged(fighter, true);
-                    SC_LOG("death: %s presented locally (down=%d) ahead of the host's "
-                           "confirmation",
-                           entry.name, IsDown(fighter) ? 1 : 0);
+                if (fighter.health) {
+                    // It died through a real lethal hit here (our brain, or
+                    // the host's damage applied natively); its fall is
+                    // playing. Arm the repair instead of forcing over it.
+                    entry.death_repair_attempts = 0;
+                    entry.next_death_repair = GetTickCount() + 750;
+                    SC_LOG("death: %s died here first (down=%d, %s) -- fall left to the "
+                           "game, repair armed",
+                           entry.name, IsDown(fighter) ? 1 : 0,
+                           entry.local_brain ? "our brain" : "host damage applied here");
                 }
             }
         } else if (entry.was_down != dead) {
@@ -1778,30 +1830,29 @@ void ApplyRemoteEnemies() {
                 if (!killer && death_world) killer = ue::GetPlayerCharacter(death_world, 0);
 
                 const float local_now = GetHealth(fighter);
-                if (local_now > 0.5f) {
+                bool killed = local_now <= 0.5f;
+                if (!killed) {
                     ArmReplicatedKillInstigator(fighter.health, killer);
                     ApplyDamage(fighter, local_now + 1.f);
                     ClearReplicatedKillInstigator();
+                    killed = GetHealth(fighter) <= 0.5f;
                 }
-
-                bool killed = GetHealth(fighter) <= 0.5f;
                 if (!killed) {
                     killed = KillWithAnimation(
                         fighter, killer, have_death_anim ? entry.pending_death_anim : nullptr);
                 }
 
-                SetDeathState(fighter);
-                const bool replica_presented = PresentClientReplicaDeath(entry.actor);
-                entry.death_repair_attempts = replica_presented ? 1 : 0;
+                // No forced state here. The lethal call above and the exact
+                // death sequence (played through the cinematic slot) get 750 ms
+                // to put the body down themselves; only a body still upright
+                // after that is pushed into the Death state.
+                entry.death_repair_attempts = 0;
                 entry.next_death_repair = death_now + 750;
 
-                NotifyDownStateChanged(fighter, true);
-
                 if (have_death_anim) entry.death_anim_presented = true;
-                SC_LOG("death: %s kill=%d anim=%d replica=%d health_comp=%d -> down=%d",
+                SC_LOG("death: %s kill=%d anim=%d health_comp=%d -> down=%d (repair armed)",
                        entry.name, killed ? 1 : 0, have_death_anim ? 1 : 0,
-                       replica_presented ? 1 : 0, fighter.health ? 1 : 0,
-                       IsDown(fighter) ? 1 : 0);
+                       fighter.health ? 1 : 0, IsDown(fighter) ? 1 : 0);
             }
             entry.pending_death_anim = nullptr;
 
@@ -1818,19 +1869,19 @@ void ApplyRemoteEnemies() {
             }
         }
 
-        if (dead && fighter.health && !IsDown(fighter) &&
-            entry.death_repair_attempts < 3 &&
-            (entry.next_death_repair == 0 ||
-             static_cast<LONG>(own_now - entry.next_death_repair) >= 0)) {
+        const bool corpse_here = fighter.health && GetHealth(fighter) <= 0.5f;
+        if ((dead || locally_dead_before_sync) && corpse_here && !IsDown(fighter) &&
+            entry.next_death_repair != 0 && entry.death_repair_attempts < 3 &&
+            static_cast<LONG>(own_now - entry.next_death_repair) >= 0) {
             ++entry.death_repair_attempts;
             entry.next_death_repair = own_now + 750;
             const bool replica_presented = PresentClientReplicaDeath(entry.actor);
             SetDeathState(fighter);
             NotifyDownStateChanged(fighter, true);
-            SC_LOG("death: %s repaired missed corpse edge attempt=%u replica=%d down=%d",
+            SC_LOG("death: %s standing at zero health -- repaired attempt=%u replica=%d down=%d",
                    entry.name, static_cast<unsigned int>(entry.death_repair_attempts),
                    replica_presented ? 1 : 0, IsDown(fighter) ? 1 : 0);
-        } else if (!dead) {
+        } else if (!dead && !locally_dead_before_sync) {
             entry.death_repair_attempts = 0;
             entry.next_death_repair = 0;
         }
@@ -2120,6 +2171,41 @@ void ForgetEnemyWorldObjects() {
     // silence it in every later one.
     g_hostility_hopeless = false;
     g_hostility_attempts = 0;
+}
+
+void OnSessionEnded() {
+    int brains = 0;
+    int unparked = 0;
+    for (int i = 0; i < g_tracked_count; ++i) {
+        Tracked& entry = g_tracked[i];
+        if (!entry.actor || !ue::IsValidObject(entry.actor)) continue;
+        entry.local_brain = false;
+        entry.owned_since = 0;
+        entry.ours_wanted_since = 0;
+        entry.not_ours_since = 0;
+        entry.peer_aggro_until = 0;
+        entry.mirrored_target = nullptr;
+        entry.host_target_flags = 0;
+        SetActorTimeDilation(entry.actor, 1.f);
+        if (entry.parked) {
+            SetActorPresent(entry.actor, true);
+            entry.parked = false;
+            entry.present = true;
+            ++unparked;
+        }
+        if (entry.ai_stopped) {
+            Fighter fighter = ResolveFighter(entry.actor);
+            const bool alive =
+                !fighter.health || (GetHealth(fighter) > 0.5f && !IsDead(fighter));
+            if (alive && StartBrain(entry.actor)) ++brains;
+            entry.ai_stopped = false;
+        }
+    }
+    g_had_host_sweep = false;
+    ResetEnemyLedgers();
+    SC_LOG("enemies: session ended -- %d brains restarted, %d bodies unparked; this is a "
+           "single-player fight again",
+           brains, unparked);
 }
 
 void ResetEnemyLedgers() {

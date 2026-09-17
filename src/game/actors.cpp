@@ -71,7 +71,11 @@ Fn Resolve(std::uintptr_t base, std::uint32_t rva) {
 
 constexpr int kDownStateDown = 0;
 
-constexpr int kDownStateDeath = 7;
+// EDownState from the executable's enumerator table: Down=0, StandingUp=1,
+// WaitingForRespawn=2, DownNoRespawn=3, Death=4, DeathWaitingRespawn=5,
+// DeathRespawn=6, DeathNoRespawn=7, Count=8, None=9. Forcing 7 jumped past the
+// fall animation; 4 is the state a dying body actually enters.
+constexpr int kDownStateDeath = 4;
 constexpr int kDownStateNone = 9;
 
 float* FloatAt(ue::UObject* object, std::uint32_t offset) {

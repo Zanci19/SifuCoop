@@ -1815,7 +1815,10 @@ void SendOwnedEnemies(const OwnedEnemy* entries, int count) {
 bool GetOwnedEnemy(std::uint32_t name_hash, OwnedEnemy* out) {
     if (!out || g_owned_enemy_count <= 0) return false;
 
-    constexpr DWORD kOwnershipStaleMs = 1500;
+    // 1.5 s handed leases back on every network hiccup (measured: three
+    // enemies flapped between the two brains at 480 ms ping); a released lease
+    // is announced explicitly now, so staleness only has to cover a real loss.
+    constexpr DWORD kOwnershipStaleMs = 3500;
     if (NowMs() - g_owned_enemies_at > kOwnershipStaleMs) return false;
     for (int i = 0; i < g_owned_enemy_count; ++i) {
         if (g_owned_enemies[i].name_hash != name_hash) continue;

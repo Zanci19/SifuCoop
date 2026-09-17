@@ -16,6 +16,10 @@ void ForgetEnemyWorldObjects();
 // side. Called when a session is (re)established so a peer whose totals restart
 // from zero is not read as "everything happened again".
 void ResetEnemyLedgers();
+
+// The peer is gone: give every stopped brain back, unpark hidden bodies and
+// forget leases, so the level plays on as a normal single-player fight.
+void OnSessionEnded();
 void NotifyPuppetWillBeDestroyed(ue::UObject* puppet);
 
 ue::UObject* FindEnemyByHash(std::uint32_t hash);
