@@ -96,6 +96,20 @@ bool g_have_last_output = false;
 std::int64_t g_clock_offset = 0;
 bool g_clock_offset_valid = false;
 
+// Places a peer send stamp on this machine's timeline, the same conversion the
+// player snapshot buffer uses. Enemy samples were stamped with their ARRIVAL
+// time instead, which is wrong twice over: a sweep that spans several chunks
+// gave bodies from one instant timestamps spread across the chunks' arrival
+// skew, and every enemy sat one extra one-way trip behind the partner's body,
+// because the interpolation delay was being applied on top of the latency
+// already baked into an arrival stamp. Both are now on the sender's clock.
+// Before the offset is known there is nothing to convert to, so the arrival
+// time is still the best available answer.
+DWORD PeerSendToLocalMs(std::uint32_t send_time_ms, DWORD received_ms) {
+    if (!g_clock_offset_valid) return received_ms;
+    return static_cast<DWORD>(static_cast<std::int64_t>(send_time_ms) + g_clock_offset);
+}
+
 constexpr DWORD kClockWindowMs = 2000;
 std::int64_t g_clock_window_min = 0;
 bool g_clock_window_valid = false;
@@ -570,7 +584,13 @@ std::uint32_t g_last_animation_sequence = 0;
 
 OwnedEnemyEntry g_owned_enemies[kMaxOwnedEnemiesTotal];
 int g_owned_enemy_count = 0;
+// Arrival time, which is what staleness has to be measured against: an
+// ownership lease goes stale because nothing has arrived, on this clock.
 DWORD g_owned_enemies_at = 0;
+// The same round placed on the sender's clock, which is what interpolation
+// has to be driven from. The two are a one-way trip apart and must not be
+// confused for each other.
+DWORD g_owned_enemies_sample_ms = 0;
 
 OwnedEnemyEntry g_owned_staging[kMaxOwnedEnemiesTotal];
 int g_owned_staging_count = 0;
@@ -644,6 +664,8 @@ void HandleOwnedEnemies(const OwnedEnemyPacket& packet) {
     for (int i = 0; i < g_owned_staging_count; ++i) g_owned_enemies[i] = g_owned_staging[i];
     g_owned_enemy_count = g_owned_staging_count;
     g_owned_enemies_at = NowMs();
+    g_owned_enemies_sample_ms =
+        PeerSendToLocalMs(packet.header.send_time_ms, g_owned_enemies_at);
     g_owned_committed_round = packet.round;
     g_owned_have_committed_round = true;
     ResetOwnedStaging();
@@ -891,6 +913,7 @@ void HandleEnemyState(const EnemyStatePacket& packet) {
             out.time_dilation = 1.f;
         }
         out.flags = in.flags;
+        out.sample_ms = PeerSendToLocalMs(packet.header.send_time_ms, NowMs());
         if (g_enemy_sweep_seen) MergeEnemyLive(out);
     }
     if (g_enemy_sweep_seen && count > 0) g_enemy_sweep_at = NowMs();
@@ -1831,9 +1854,31 @@ bool GetOwnedEnemy(std::uint32_t name_hash, OwnedEnemy* out) {
         out->velocity_x = in.velocity_x;
         out->velocity_y = in.velocity_y;
         out->velocity_z = in.velocity_z;
+        out->sample_ms = g_owned_enemies_sample_ms;
         return true;
     }
     return false;
+}
+
+unsigned long ClockNowMs() { return NowMs(); }
+
+// Both machines stamp their logs on ONE clock -- the host's -- so two logs
+// from the same session can be laid side by side without guessing which local
+// wall-clock line matches which. The host is the reference and returns its own
+// clock; the client converts with the offset the snapshot stream already
+// estimates (g_clock_offset = local - peer, min-filtered). The client's stamps
+// therefore read about one one-way trip early, which is far below the
+// resolution at which divergences are read.
+unsigned long SharedClockMs() {
+    if (g_role == Role::Client && g_clock_offset_valid) {
+        return static_cast<unsigned long>(static_cast<std::int64_t>(NowMs()) - g_clock_offset);
+    }
+    return NowMs();
+}
+
+bool SharedClockValid() {
+    if (g_role == Role::Host) return true;
+    return g_role == Role::Client && g_clock_offset_valid;
 }
 
 void SendEnemyDamage(const DamageReport* entries, int count) {

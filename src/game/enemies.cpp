@@ -142,7 +142,128 @@ struct Tracked {
     DWORD pending_death_anim_ms = 0;
 
     DWORD local_reaction_motion_until = 0;
+
+    // Recent wire samples; the body is driven towards where the sender was
+    // one interpolation delay ago, between two samples, instead of snapping
+    // to every packet as it lands.
+    struct MotionSample {
+        DWORD ms = 0;
+        ue::FVector at = {};
+        float yaw = 0.f;
+        ue::FVector velocity = {};
+    };
+    MotionSample motion[3] = {};
+    int motion_count = 0;
+
+    // Action channel: the animation the enemy's own anim instance says it is
+    // playing, sent on change to the machine that only shows this body.
+    ue::UObject* action_anim_instance = nullptr;
+    bool action_probe_ok = false;
+    ue::UObject* last_action_sent = nullptr;
+    float last_action_cursor = 0.f;
 };
+
+void PushMotionSample(Tracked& entry, DWORD ms, const ue::FVector& at, float yaw,
+                      const ue::FVector& velocity) {
+    // Samples carry the sender's clock, so UDP can hand us one older than the
+    // newest we hold. Letting it in would put motion[0] behind motion[1]: the
+    // span underflows to about four billion, alpha collapses to zero, and the
+    // body is driven to the stale sample instead of the fresh one -- a
+    // one-frame jerk backwards every time a packet overtakes another. The
+    // sample is simply dropped; the next one in order carries the whole state.
+    if (entry.motion_count > 0 && static_cast<LONG>(ms - entry.motion[0].ms) <= 0) return;
+    for (int i = 2; i > 0; --i) entry.motion[i] = entry.motion[i - 1];
+    entry.motion[0] = {ms, at, yaw, velocity};
+    if (entry.motion_count < 3) ++entry.motion_count;
+}
+
+// Where the sender was at target_ms, from the samples around it. With one
+// sample, or a target newer than the newest sample, the newest sample is
+// used as-is: no extrapolation, a late packet is a short freeze, not a lunge.
+bool InterpolatedMotion(const Tracked& entry, DWORD target_ms, ue::FVector* at, float* yaw,
+                        ue::FVector* velocity) {
+    if (entry.motion_count == 0) return false;
+    const Tracked::MotionSample& newest = entry.motion[0];
+    if (entry.motion_count == 1 || static_cast<LONG>(target_ms - newest.ms) >= 0) {
+        *at = newest.at;
+        *yaw = newest.yaw;
+        *velocity = newest.velocity;
+        return true;
+    }
+    const Tracked::MotionSample* older = &entry.motion[1];
+    const Tracked::MotionSample* newer = &newest;
+    if (entry.motion_count == 3 && static_cast<LONG>(target_ms - entry.motion[1].ms) < 0) {
+        older = &entry.motion[2];
+        newer = &entry.motion[1];
+    }
+    const DWORD span = newer->ms - older->ms;
+    float alpha = span == 0 ? 1.f : static_cast<float>(target_ms - older->ms) / span;
+    if (alpha < 0.f) alpha = 0.f;
+    if (alpha > 1.f) alpha = 1.f;
+    at->X = older->at.X + (newer->at.X - older->at.X) * alpha;
+    at->Y = older->at.Y + (newer->at.Y - older->at.Y) * alpha;
+    at->Z = older->at.Z + (newer->at.Z - older->at.Z) * alpha;
+    float delta_yaw = newer->yaw - older->yaw;
+    while (delta_yaw > 180.f) delta_yaw -= 360.f;
+    while (delta_yaw < -180.f) delta_yaw += 360.f;
+    *yaw = older->yaw + delta_yaw * alpha;
+    velocity->X = older->velocity.X + (newer->velocity.X - older->velocity.X) * alpha;
+    velocity->Y = older->velocity.Y + (newer->velocity.Y - older->velocity.Y) * alpha;
+    velocity->Z = older->velocity.Z + (newer->velocity.Z - older->velocity.Z) * alpha;
+    return true;
+}
+
+DWORD InterpolationTargetMs() {
+    return static_cast<DWORD>(net::ClockNowMs()) -
+           static_cast<DWORD>(net::GetInterpolationDelayMs());
+}
+
+// Sends the action animation this body is playing whenever it changes or
+// restarts. This is the same field the player channel already relies on;
+// enemies share UPlayerAnim, so it is there for them too.
+void CaptureEnemyAction(Tracked& entry) {
+    if (!coop::Get().sync_enemy_actions || !net::IsConnected() || !entry.actor) return;
+    if (!entry.action_anim_instance || !ue::IsValidObject(entry.action_anim_instance)) {
+        entry.action_anim_instance = ue::GetAnimInstance(entry.actor);
+        entry.action_probe_ok = false;
+        entry.last_action_sent = nullptr;
+        if (!entry.action_anim_instance) return;
+        ue::UObject* probe_asset = nullptr;
+        float probe_cursor = 0.f;
+        entry.action_probe_ok =
+            ReadEnemyActionAnim(entry.action_anim_instance, &probe_asset, &probe_cursor);
+        static unsigned int probed = 0;
+        if (++probed <= 6 || coop::Get().verbose_orders) {
+            SC_LOG("action: enemy %s action channel %s", entry.name,
+                   entry.action_probe_ok ? "armed" : "unavailable (not UPlayerAnim-sized)");
+        }
+    }
+    if (!entry.action_probe_ok) return;
+
+    ue::UObject* asset = nullptr;
+    float cursor = 0.f;
+    if (!ReadEnemyActionAnim(entry.action_anim_instance, &asset, &cursor)) return;
+    const bool restarted = cursor + 0.01f < entry.last_action_cursor;
+    const bool changed = asset != entry.last_action_sent;
+    entry.last_action_cursor = cursor;
+    if (!asset) {
+        entry.last_action_sent = nullptr;
+        return;
+    }
+    if (!changed && !restarted) return;
+    entry.last_action_sent = asset;
+    if (!ue::IsValidObject(asset) || !ue::ObjectClassIs(asset, "AnimSequence")) return;
+
+    char path[192] = {};
+    if (!ue::GetObjectPathName(asset, path, sizeof(path))) return;
+    if (strncmp(path, "/Game/", 6) != 0) return;
+    net::SendAnimationSequence(path, entry.wire_hash ? entry.wire_hash : entry.hash,
+                               net::AnimationSemantic::Generic, cursor);
+    static unsigned int sent = 0;
+    if (++sent <= 12 || coop::Get().verbose_orders) {
+        SC_LOG("action: enemy %s plays '%s' cursor=%.2f -- sent", entry.name, path, cursor);
+    }
+}
 
 Tracked g_tracked[net::kMaxTrackedEnemies];
 int g_tracked_count = 0;
@@ -837,6 +958,20 @@ void RefreshTracked(ue::UObject* player, ue::UObject* puppet) {
             entry.pending_death_anim_ms = previous[k].pending_death_anim_ms;
             entry.local_reaction_motion_until =
                 previous[k].local_reaction_motion_until;
+            // Both caches below describe one body, and the identity carried
+            // across a refresh is the spawner name, not the pool body behind
+            // it. When the pool hands this identity a different actor, the
+            // samples would drag the fresh body back to where the previous
+            // occupant last stood, and the action channel would publish that
+            // other body's animation under this enemy's id.
+            if (previous[k].actor == entry.actor) {
+                for (int m = 0; m < 3; ++m) entry.motion[m] = previous[k].motion[m];
+                entry.motion_count = previous[k].motion_count;
+                entry.action_anim_instance = previous[k].action_anim_instance;
+                entry.action_probe_ok = previous[k].action_probe_ok;
+                entry.last_action_sent = previous[k].last_action_sent;
+                entry.last_action_cursor = previous[k].last_action_cursor;
+            }
             entry.revive_refused = previous[k].revive_refused;
             entry.host_target_flags = previous[k].host_target_flags;
             entry.mirrored_target = previous[k].mirrored_target;
@@ -875,6 +1010,38 @@ bool PresentClientReplicaDeath(ue::UObject* actor) {
         bool ClientReplicaFastDeath;
     } params = {true};
     return ue::CallFunction(actor, L"CLast Hitted", &params);
+}
+
+// How long a dead body is given to put itself down before the repair forces
+// it. See the death notes in CODE-NOTES.md: the wait was 750 ms and measurably
+// bought nothing, but the right value is a judgement about animation rather
+// than something the logs can settle, so it is tunable without a rebuild.
+DWORD DeathRepairDelayMs() {
+    int value = coop::Get().death_repair_ms;
+    if (value < 0) value = 0;
+    if (value > 2000) value = 2000;
+    return static_cast<DWORD>(value);
+}
+
+// How many times a standing corpse is pushed before it is left alone, and how
+// long to wait before each push.
+//
+// These two numbers multiply, and that is the trap: the attempt budget was
+// three and the interval was a flat 750 ms, so a body had 2.25 s to be
+// rescued. Shortening the interval to 100 ms -- correct in itself, the wait
+// was measured doing nothing -- silently shortened the whole rescue window to
+// 300 ms, after which `death_repair_attempts < kMaxDeathRepairAttempts` is
+// false forever and the corpse stands for the rest of the level. The first
+// attempt still comes at death_repair_ms; later ones back off, so the window
+// stays about 2.5 s whatever the first delay is set to.
+constexpr unsigned int kMaxDeathRepairAttempts = 5;
+
+DWORD DeathRepairRetryMs(unsigned int attempts_made) {
+    constexpr DWORD kCeiling = 800;
+    DWORD delay = DeathRepairDelayMs();
+    if (delay < 50) delay = 50;
+    for (unsigned int i = 0; i < attempts_made && delay < kCeiling; ++i) delay *= 3;
+    return delay > kCeiling ? kCeiling : delay;
 }
 
 bool LaunchReplicatedImpact(Tracked& entry, float replicated_delta) {
@@ -979,9 +1146,9 @@ void ApplyPeerDamage() {
             // The native lethal hit above owns the fall. Forcing the terminal
             // down state on top of it is what left corpses standing: the
             // state machine said "dead" and the animation never played. The
-            // body is repaired only if it is still upright 750 ms from now.
+            // body is repaired only if it is still upright by then.
             entry.death_repair_attempts = 0;
-            entry.next_death_repair = GetTickCount() + 750;
+            entry.next_death_repair = GetTickCount() + DeathRepairDelayMs();
             SC_LOG("death: %s killed by your partner -- native death (down=%d dead=%d), "
                    "repair armed",
                    entry.name, IsDown(fighter) ? 1 : 0, IsDead(fighter) ? 1 : 0);
@@ -1152,10 +1319,10 @@ void PublishEnemies() {
             // death had its chance is put down explicitly, through the real
             // Death state rather than the terminal one.
             if (fighter.health && !IsDown(fighter) && entry.next_death_repair != 0 &&
-                entry.death_repair_attempts < 3 &&
+                entry.death_repair_attempts < kMaxDeathRepairAttempts &&
                 static_cast<LONG>(now - entry.next_death_repair) >= 0) {
                 ++entry.death_repair_attempts;
-                entry.next_death_repair = now + 750;
+                entry.next_death_repair = now + DeathRepairRetryMs(entry.death_repair_attempts);
                 const bool replica = PresentClientReplicaDeath(entry.actor);
                 SetDeathState(fighter);
                 NotifyDownStateChanged(fighter, true);
@@ -1249,29 +1416,34 @@ void PublishEnemies() {
                 SC_LOG("authority: %s actions handed to peer; host brain stopped", entry.name);
             }
             if (!reaction_motion_here) {
-                const ue::FVector target = {owned.x, owned.y, owned.z};
-                const ue::FRotator facing = {0.f, owned.yaw, 0.f};
-                const ue::FVector velocity = {owned.velocity_x, owned.velocity_y,
-                                              owned.velocity_z};
+                PushMotionSample(entry, owned.sample_ms, {owned.x, owned.y, owned.z}, owned.yaw,
+                                 {owned.velocity_x, owned.velocity_y, owned.velocity_z});
+                ue::FVector target = {owned.x, owned.y, owned.z};
+                float yaw = owned.yaw;
+                ue::FVector velocity = {owned.velocity_x, owned.velocity_y, owned.velocity_z};
+                InterpolatedMotion(entry, InterpolationTargetMs(), &target, &yaw, &velocity);
+                const ue::FRotator facing = {0.f, yaw, 0.f};
                 DriveActorTo(entry.actor, target, facing, velocity);
                 location = target;
                 state.x = target.X;
                 state.y = target.Y;
                 state.z = target.Z;
-                state.yaw = owned.yaw;
-                state.velocity_x = owned.velocity_x;
-                state.velocity_y = owned.velocity_y;
-                state.velocity_z = owned.velocity_z;
+                state.yaw = yaw;
+                state.velocity_x = velocity.X;
+                state.velocity_y = velocity.Y;
+                state.velocity_z = velocity.Z;
             }
         } else if (entry.ai_stopped) {
 
             const bool may_resume = entry.active && entry.health > 0.5f && !IsDead(fighter);
             if (may_resume && StartBrain(entry.actor)) {
                 entry.ai_stopped = false;
+                entry.motion_count = 0;
                 SC_LOG("authority: %s actions returned to host; host brain restarted",
                        entry.name);
             }
         }
+        if (!peer_owned && alive) CaptureEnemyAction(entry);
 
         entry.last_host_location = location;
         entry.last_host_motion_ms = now;
@@ -1615,6 +1787,8 @@ void ApplyRemoteEnemies() {
         if (fights_us != entry.local_brain) {
             entry.local_brain = fights_us;
             entry.owned_since = fights_us ? own_now : 0;
+            entry.motion_count = 0;
+            entry.last_action_sent = nullptr;
             if (fights_us) {
                 // The host's hitstop dilation was being copied onto this body;
                 // its own brain owns time from here on.
@@ -1664,6 +1838,11 @@ void ApplyRemoteEnemies() {
                           (state.max_health > 0.f && state.health <= 0.5f);
         const bool knocked_down = (state.flags & net::kEnemyDown) != 0;
         if (entry.active && !dead) ++alive_count;
+        if (entry.local_brain && entry.active && !dead) CaptureEnemyAction(entry);
+        if (!entry.local_brain && entry.active) {
+            PushMotionSample(entry, state.sample_ms, {state.x, state.y, state.z}, state.yaw,
+                             {state.velocity_x, state.velocity_y, state.velocity_z});
+        }
 
         const bool should_be_present = entry.active && !dead;
         if (should_be_present && (!entry.present || entry.parked || first_host_state)) {
@@ -1808,7 +1987,7 @@ void ApplyRemoteEnemies() {
                     // the host's damage applied natively); its fall is
                     // playing. Arm the repair instead of forcing over it.
                     entry.death_repair_attempts = 0;
-                    entry.next_death_repair = GetTickCount() + 750;
+                    entry.next_death_repair = GetTickCount() + DeathRepairDelayMs();
                     SC_LOG("death: %s died here first (down=%d, %s) -- fall left to the "
                            "game, repair armed",
                            entry.name, IsDown(fighter) ? 1 : 0,
@@ -1843,11 +2022,11 @@ void ApplyRemoteEnemies() {
                 }
 
                 // No forced state here. The lethal call above and the exact
-                // death sequence (played through the cinematic slot) get 750 ms
-                // to put the body down themselves; only a body still upright
-                // after that is pushed into the Death state.
+                // death sequence (played through the cinematic slot) get
+                // death_repair_ms to put the body down themselves; only a body
+                // still upright after that is pushed into the Death state.
                 entry.death_repair_attempts = 0;
-                entry.next_death_repair = death_now + 750;
+                entry.next_death_repair = death_now + DeathRepairDelayMs();
 
                 if (have_death_anim) entry.death_anim_presented = true;
                 SC_LOG("death: %s kill=%d anim=%d health_comp=%d -> down=%d (repair armed)",
@@ -1871,10 +2050,12 @@ void ApplyRemoteEnemies() {
 
         const bool corpse_here = fighter.health && GetHealth(fighter) <= 0.5f;
         if ((dead || locally_dead_before_sync) && corpse_here && !IsDown(fighter) &&
-            entry.next_death_repair != 0 && entry.death_repair_attempts < 3 &&
+            entry.next_death_repair != 0 &&
+            entry.death_repair_attempts < kMaxDeathRepairAttempts &&
             static_cast<LONG>(own_now - entry.next_death_repair) >= 0) {
             ++entry.death_repair_attempts;
-            entry.next_death_repair = own_now + 750;
+            entry.next_death_repair =
+                own_now + DeathRepairRetryMs(entry.death_repair_attempts);
             const bool replica_presented = PresentClientReplicaDeath(entry.actor);
             SetDeathState(fighter);
             NotifyDownStateChanged(fighter, true);
@@ -1892,10 +2073,11 @@ void ApplyRemoteEnemies() {
             // Nothing below may move a body on stale data.
         } else if (host_reaction_motion && !dead && config.sync_enemies &&
             !reaction_motion_here) {
-            const ue::FVector target = {state.x, state.y, state.z};
-            const ue::FRotator facing = {0.f, state.yaw, 0.f};
-            const ue::FVector velocity = {state.velocity_x, state.velocity_y,
-                                          state.velocity_z};
+            ue::FVector target = {state.x, state.y, state.z};
+            float yaw = state.yaw;
+            ue::FVector velocity = {state.velocity_x, state.velocity_y, state.velocity_z};
+            InterpolatedMotion(entry, InterpolationTargetMs(), &target, &yaw, &velocity);
+            const ue::FRotator facing = {0.f, yaw, 0.f};
             DriveActorTo(entry.actor, target, facing, velocity);
             entry.driven = true;
             ++driven;
@@ -1938,9 +2120,11 @@ void ApplyRemoteEnemies() {
         }
 
         if (sweep_fresh && !dead && config.sync_enemies && !local_ai && !host_reaction_motion) {
-            const ue::FVector target = {state.x, state.y, state.z};
-            const ue::FRotator facing = {0.f, state.yaw, 0.f};
-            const ue::FVector velocity = {state.velocity_x, state.velocity_y, state.velocity_z};
+            ue::FVector target = {state.x, state.y, state.z};
+            float yaw = state.yaw;
+            ue::FVector velocity = {state.velocity_x, state.velocity_y, state.velocity_z};
+            InterpolatedMotion(entry, InterpolationTargetMs(), &target, &yaw, &velocity);
+            const ue::FRotator facing = {0.f, yaw, 0.f};
             DriveActorTo(entry.actor, target, facing, velocity);
             entry.driven = true;
             ++driven;

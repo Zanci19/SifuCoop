@@ -295,6 +295,13 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         DisableThreadLibraryCalls(instance);
         sifucoop::log::Open();
 
+        // From here every log line carries the host's clock and this machine's
+        // role, so the two logs of one session can be read against each other.
+        // Installed before anything else runs; it reports nothing until a
+        // session exists, and costs two reads per line after that.
+        sifucoop::log::SetSharedClock(&sifucoop::net::SharedClockMs,
+                                      &sifucoop::net::SharedClockValid);
+
         if (!sifucoop::proxy::Init()) {
             SC_LOG("proxy: init incomplete -- audio may misbehave");
         }

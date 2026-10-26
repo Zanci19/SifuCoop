@@ -795,6 +795,7 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
             g_puppet_anim_instance = ue::GetAnimInstance(target_actor);
         } else {
             SetPresentationVelocity(target_actor, flat);
+            RequestDirectMove(target_actor, flat, false);
             NoteEnemyPresentation(target_actor, flat);
         }
         return;
@@ -818,6 +819,7 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
             g_puppet_anim_instance = ue::GetAnimInstance(target_actor);
         } else {
             SetPresentationVelocity(target_actor, flat);
+            RequestDirectMove(target_actor, flat, false);
             NoteEnemyPresentation(target_actor, flat);
         }
         return;
@@ -900,6 +902,13 @@ void DriveTo(ue::UObject* target_actor, const ue::FVector& target,
         }
         TeleportActor(target_actor, corrected, new_rotation);
         SetPresentationVelocity(target_actor, presentation_velocity);
+
+        // The movement component recomputes the speed band from its own move
+        // input every tick, and a driven body has none, so every command
+        // was undone a frame later (graph=V0 while forced climbed past 2000 in
+        // the 2026-09-17 log). A direct-move request IS that input: the
+        // component then derives the band itself and carries the body.
+        RequestDirectMove(target_actor, presentation_velocity, false);
 
         // The band is owned by the presentation slot and commanded from the
         // anim-update hook, once per change. It was also being commanded from
@@ -1379,6 +1388,12 @@ void InvitePeerHere(const char* current_level, bool have_level) {
         SC_LOG("lobby: no playable pawn/level yet -- press Story -> Continue first");
         coop::ReportProblem("press Story -> Continue before inviting");
     } else {
+        // The button fired fifteen times in 250 ms once (a stalled frame
+        // replayed the click); one invitation per second is plenty.
+        static DWORD last_invite_ms = 0;
+        const DWORD now = GetTickCount();
+        if (last_invite_ms != 0 && now - last_invite_ms < 1000) return;
+        last_invite_ms = now;
         g_coop_started = true;
         lstrcpynA(g_announced_level, current_level, sizeof(g_announced_level));
         net::BumpLevelRequest();
@@ -1788,6 +1803,17 @@ void DriveActorTo(ue::UObject* actor, const ue::FVector& target,
     DriveTo(actor, target, rotation, reported_velocity, false);
 }
 
+bool ReadEnemyActionAnim(ue::UObject* anim_instance, ue::UObject** asset, float* cursor) {
+    if (!anim_instance || !asset || !cursor) return false;
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(anim_instance);
+    if (!ue::RangeReadable(bytes, kAnimSpeedStateAlphaV0 + 16)) return false;
+    float v0 = 0.f, v1 = 0.f, v2 = 0.f;
+    if (!ReadLocomotionThresholds(bytes, &v0, &v1, &v2)) return false;
+    std::memcpy(asset, bytes + kAnimLastActionAnim, sizeof(*asset));
+    std::memcpy(cursor, bytes + kAnimLastActionCursor, sizeof(*cursor));
+    return true;
+}
+
 ue::UObject* GetPuppet() {
 
     return g_puppet_world == ue::GetWorld() ? g_puppet : nullptr;
@@ -2050,6 +2076,17 @@ void TickPuppet() {
         }
         const bool raw_sequence = asset_kind == net::AnimationAssetKind::Sequence;
         const bool pose_asset = asset_kind == net::AnimationAssetKind::PoseAsset;
+        // When the partner's attacks are replayed natively (versus, friendly
+        // fire), the body already animates the swing; the cosmetic copy on the
+        // cinematic slot would play over it and hide the real one.
+        const bool native_player_replay = coop::Get().mode == coop::Mode::Versus ||
+                                          coop::Get().echo_player_attacks ||
+                                          coop::Get().friendly_fire;
+        if (actor_hash == 0 && semantic == net::AnimationSemantic::Attack &&
+            native_player_replay) {
+            continue;
+        }
+
         const bool enemy_death = actor_hash != 0 && raw_sequence &&
                                  semantic == net::AnimationSemantic::Death;
         const bool peer_authored_death =
@@ -2084,6 +2121,31 @@ void TickPuppet() {
         }
 
         if (actor_hash && EnemyRunsLocalBrain(actor_hash) && !enemy_death) continue;
+
+        // The attack hook and the action channel can both announce one clip;
+        // the second copy would restart it.
+        if (actor_hash) {
+            struct RecentClip {
+                std::uint32_t actor_hash = 0;
+                std::uint32_t path_hash = 0;
+                DWORD at_ms = 0;
+            };
+            static RecentClip recent[8] = {};
+            static int recent_write = 0;
+            const std::uint32_t path_hash = HashName(path);
+            const DWORD clip_now = GetTickCount();
+            bool duplicate = false;
+            for (const RecentClip& r : recent) {
+                if (r.actor_hash == actor_hash && r.path_hash == path_hash &&
+                    clip_now - r.at_ms < 250) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+            recent[recent_write] = {actor_hash, path_hash, clip_now};
+            recent_write = (recent_write + 1) % 8;
+        }
 
         if (raw_sequence && !ue::ObjectClassIs(animation, "AnimSequence")) {
             static char refused_class[160] = {};

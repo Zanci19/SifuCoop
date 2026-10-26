@@ -53,6 +53,7 @@ has been play-tested.
 | Your partner's age and outfit on their body | yes |
 | Your partner's held weapon on their body | no — it is reported but not equipped |
 | Dodges, guards and parries as reliable events | no — only attacks are; the rest travel as animation |
+| Friendly fire | optional — `friendly_fire=1` (or F1 → Options) replays your partner's swings as real attacks |
 | Shrines, upgrades, age, death counter, save progress | no — each player keeps their own |
 | Bosses and cutscenes | untested; expect them to go their own way |
 | More than two players | no |

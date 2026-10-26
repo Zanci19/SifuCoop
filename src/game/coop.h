@@ -18,7 +18,17 @@ struct Config {
     bool park_extra_enemies = true;
     bool echo_enemy_attacks = true;
 
+    // Every action animation an authoritative enemy plays (hits, pushes,
+    // falls, attacks) is captured from its anim instance and shown on the
+    // other screen. The order hooks only ever produced deflect clips.
+    bool sync_enemy_actions = true;
+
     bool echo_player_attacks = false;
+
+    // Friendly fire: your partner's swings are replayed on their body here as
+    // real attacks, so they can hit you. Each machine decides for itself
+    // whether it can be hit; both players should set it the same way.
+    bool friendly_fire = false;
 
     bool friendly_relationship = false;
 
@@ -76,6 +86,20 @@ struct Config {
     bool verbose_orders = false;
 
     bool selftest = false;
+
+    // The per-interval state digest (core/trace.cpp). On by default: it is the
+    // only record that shows the two machines disagreeing, it costs one line
+    // four times a second, and a session that misbehaves without it has to be
+    // played again.
+    bool trace = true;
+    int trace_hz = 4;
+
+    // How long a dead body is given to put itself down before the repair
+    // forces it. The original 750 ms was measured doing nothing -- every
+    // replicated death in the 2026-09-23 logs was still upright when it
+    // expired -- so the wait only showed a standing corpse. Tunable because
+    // the right value is an animation judgement, not something a log settles.
+    int death_repair_ms = 100;
 
     bool replay_probe = false;
 };

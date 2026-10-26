@@ -95,7 +95,21 @@ struct EnemyStateOut {
     float guard_damage_applied = 0.f;
     float time_dilation = 1.f;
     std::uint8_t flags = 0;
+    // Local clock (ClockNowMs) when this sample arrived; drives interpolation.
+    std::uint32_t sample_ms = 0;
 };
+
+// The session's monotonic millisecond clock, for timestamps that must agree
+// with sample_ms.
+unsigned long ClockNowMs();
+
+// Milliseconds on the HOST's clock, on both machines. Log timestamps taken
+// from this align across the two logs of one session; see session.cpp.
+unsigned long SharedClockMs();
+
+// False before the client has estimated the offset (and always when offline),
+// meaning SharedClockMs is still just the local clock.
+bool SharedClockValid();
 
 void SendEnemyStates(const EnemyStateOut* entries, int count);
 
@@ -123,6 +137,7 @@ struct OwnedEnemy {
     float x = 0.f, y = 0.f, z = 0.f;
     float yaw = 0.f;
     float velocity_x = 0.f, velocity_y = 0.f, velocity_z = 0.f;
+    std::uint32_t sample_ms = 0;
 };
 
 void SendOwnedEnemies(const OwnedEnemy* entries, int count);

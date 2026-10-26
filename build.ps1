@@ -71,6 +71,7 @@ $sources = @(
     "src\dllmain.cpp"
     "src\core\log.cpp"
     "src\core\hooks.cpp"
+    "src\core\trace.cpp"
     "src\ue\reflection.cpp"
     "src\game\actors.cpp"
     "src\game\coop.cpp"
@@ -180,7 +181,22 @@ if ($LASTEXITCODE -ne 0) {
 $installer = Join-Path $OutDir "SifuCoopInstaller.exe"
 $installerLog = Join-Path $OutDir "installer.build.log"
 $installerSource = Join-Path $Root "installer\installer.cpp"
-cmd /c ('g++ -o "{0}" "{1}" {2} -mwindows -municode -lshlwapi -lshell32 -lcomdlg32 -lole32 -ladvapi32 > "{3}" 2>&1' -f $installer, $installerSource, $flags, $installerLog)
+
+# The manifest is what gives the installer themed (comctl32 v6) controls, the
+# shell UI font instead of the 1995 bitmap one, and per-monitor DPI awareness.
+# It only takes effect when compiled into the EXE as RT_MANIFEST, so windres
+# has to run first -- linking the .cpp alone silently produces the old look.
+$installerRes = Join-Path $OutDir "installer.res.o"
+$installerRc = Join-Path $Root "installer\installer.rc"
+cmd /c ('windres --input-format=rc -O coff -I "{0}" "{1}" "{2}" > "{3}" 2>&1' -f
+        (Join-Path $Root "installer"), $installerRc, $installerRes, $installerLog)
+if ($LASTEXITCODE -ne 0) {
+    Get-Content $installerLog | ForEach-Object { Write-Host $_ }
+    throw "installer manifest resource failed to compile"
+}
+
+cmd /c ('g++ -o "{0}" "{1}" "{2}" {3} -mwindows -municode -lcomctl32 -lshlwapi -lshell32 -lcomdlg32 -lole32 -ladvapi32 > "{4}" 2>&1' -f
+        $installer, $installerSource, $installerRes, $flags, $installerLog)
 if ($LASTEXITCODE -ne 0) {
     Get-Content $installerLog | ForEach-Object { Write-Host $_ }
     throw "installer build failed"
@@ -205,6 +221,9 @@ Copy-Item $dll (Join-Path $Dist "dsound.dll") -Force
 if (Test-Path $launcher) { Copy-Item $launcher (Join-Path $Dist "SifuCoopLauncher.exe") -Force }
 Copy-Item $installer (Join-Path $Dist "SifuCoopInstaller.exe") -Force
 if (Test-Path $testClient) { Copy-Item $testClient (Join-Path $Dist "tools\testclient.exe") -Force }
+# Shipped next to the mod so a tester can run it on their own two logs without
+# a checkout of the source.
+Copy-Item (Join-Path $Root "tools\tracediff\tracediff.py") (Join-Path $Dist "tools\tracediff.py") -Force
 Copy-Item (Join-Path $Root "md\SETUP.md") (Join-Path $Dist "SETUP.md") -Force
 Copy-Item (Join-Path $Root "md\KAKO-DELUJE-SL.md") (Join-Path $Dist "KAKO-DELUJE-SL.md") -Force
 Copy-Item (Join-Path $Root "md\*.md") (Join-Path $Dist "md") -Force
@@ -249,11 +268,17 @@ suppress_client_ai=1
 sync_enemy_vitals=1
 park_extra_enemies=1
 echo_enemy_attacks=1
+; Every action animation an enemy plays on the machine that owns it (hits,
+; pushes, falls, attacks) is shown on the other machine.
+sync_enemy_actions=1
 ; Replaying the remote PLAYER's attacks is off: the replay is a real hitbox and
 ; same-faction does not stop it hurting you, so with this on your co-op partner's
 ; swings kill you. Their damage already resolved on their own machine. Versus
 ; mode replays them regardless (hitting each other is the point there).
 echo_player_attacks=0
+; Friendly fire: your partner's swings are replayed here as real attacks and can
+; hit you. Each PC decides for itself whether it can be hit, so set it on both.
+friendly_fire=0
 report_damage=1
 mirror_peer_vitals=1
 auto_follow_level=1
@@ -293,6 +318,23 @@ friendly_relationship=0
 ; Extra log detail for a paired play-test; both are off for normal play.
 verbose_enemies=0
 verbose_orders=0
+
+; The state digest: one line four times a second describing where both bodies
+; are, what each is animating, and how the link is doing. Both machines stamp
+; it on the HOST's clock, so after a session that misbehaved the two logs can
+; be laid side by side with:
+;   python tools\tracediff\tracediff.py host-SifuCoop.log client-SifuCoop.log
+; It is what makes a disagreement between the two PCs visible at all, costs
+; about 4 MB an hour, and should be left on.
+trace=1
+trace_hz=4
+
+; How long (ms) a dead enemy is given to put itself down before the mod forces
+; the death pose. The original 750 was measured doing nothing at all -- every
+; replicated death was still standing when it expired -- which is why dead
+; enemies stood upright for three quarters of a second on the other screen.
+; Raise it if corpses start snapping down before their fall animation plays.
+death_repair_ms=100
 
 ; The F1 menu draws by hooking the game's swap chain. That is the riskiest
 ; thing this mod does and it is purely cosmetic -- set this to 0 if the game

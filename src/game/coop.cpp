@@ -64,6 +64,9 @@ void Load() {
                                            g_config.echo_enemy_attacks, ini);
     g_config.echo_player_attacks = ReadBool("echo_player_attacks",
                                             g_config.echo_player_attacks, ini);
+    g_config.sync_enemy_actions = ReadBool("sync_enemy_actions",
+                                           g_config.sync_enemy_actions, ini);
+    g_config.friendly_fire = ReadBool("friendly_fire", g_config.friendly_fire, ini);
     g_config.friendly_relationship = ReadBool("friendly_relationship",
                                               g_config.friendly_relationship, ini);
     g_config.real_second_player = ReadBool("real_second_player",
@@ -130,6 +133,14 @@ void Load() {
     g_config.menu_exclusive_input =
         ReadBool("menu_exclusive_input", g_config.menu_exclusive_input, ini);
     g_config.selftest = ReadBool("selftest", g_config.selftest, ini);
+    g_config.trace = ReadBool("trace", g_config.trace, ini);
+    g_config.trace_hz = GetPrivateProfileIntA(kSection, "trace_hz", g_config.trace_hz, ini);
+    g_config.death_repair_ms =
+        GetPrivateProfileIntA(kSection, "death_repair_ms", g_config.death_repair_ms, ini);
+    if (g_config.death_repair_ms < 0) g_config.death_repair_ms = 0;
+    if (g_config.death_repair_ms > 2000) g_config.death_repair_ms = 2000;
+    if (g_config.trace_hz < 1) g_config.trace_hz = 1;
+    if (g_config.trace_hz > 30) g_config.trace_hz = 30;
     g_config.replay_probe = ReadBool("replay_probe", g_config.replay_probe, ini);
     g_config.verbose_enemies = ReadBool("verbose_enemies", g_config.verbose_enemies, ini);
     g_config.verbose_orders = ReadBool("verbose_orders", g_config.verbose_orders, ini);
@@ -154,12 +165,12 @@ void Load() {
            g_config.adaptive_interp);
     // The complete effective configuration, so a log can be tied to behaviour
     // without guessing which defaults a fresh install picked up.
-    SC_LOG("coop: effective -- echo_player=%d friendly_rel=%d remote_player_attacks=%d "
+    SC_LOG("coop: effective -- echo_player=%d friendly_fire=%d friendly_rel=%d remote_player_attacks=%d "
            "montages=%d peer_vitals=%d run_state=%d hit_reactions=%d peer_age=%d "
            "visual_age=%d client_sim=%d peer_fights_locally=%d retarget_down=%d "
            "observer_cosmetic=%d death_anims=%d puppet_invincible=%d pawn_collision_off=%d "
            "auto_join=%d interp=%dms hz=%d overlay=%d verbose=%d/%d",
-           g_config.echo_player_attacks, g_config.friendly_relationship,
+           g_config.echo_player_attacks, g_config.friendly_fire, g_config.friendly_relationship,
            g_config.remote_player_attacks, g_config.sync_montages,
            g_config.mirror_peer_vitals, g_config.sync_run_state,
            g_config.mirror_hit_reactions, g_config.sync_peer_age,
@@ -170,6 +181,8 @@ void Load() {
            g_config.puppet_ignores_pawn_collision, g_config.auto_join_level,
            g_config.interp_delay_ms, g_config.snapshot_hz, g_config.in_game_overlay,
            g_config.verbose_enemies, g_config.verbose_orders);
+    SC_LOG("coop: trace=%d trace_hz=%d death_repair_ms=%d", g_config.trace,
+           g_config.trace_hz, g_config.death_repair_ms);
 }
 
 void Save() {
@@ -184,6 +197,8 @@ void Save() {
     WriteBool("park_extra_enemies", g_config.park_extra_enemies, ini);
     WriteBool("echo_enemy_attacks", g_config.echo_enemy_attacks, ini);
     WriteBool("echo_player_attacks", g_config.echo_player_attacks, ini);
+    WriteBool("sync_enemy_actions", g_config.sync_enemy_actions, ini);
+    WriteBool("friendly_fire", g_config.friendly_fire, ini);
     WriteBool("friendly_relationship", g_config.friendly_relationship, ini);
     WriteBool("real_second_player", g_config.real_second_player, ini);
     WriteBool("second_player_disable_splitscreen",
@@ -216,6 +231,9 @@ void Save() {
     WriteBool("menu_exclusive_input", g_config.menu_exclusive_input, ini);
     WriteBool("verbose_enemies", g_config.verbose_enemies, ini);
     WriteBool("verbose_orders", g_config.verbose_orders, ini);
+    WriteBool("trace", g_config.trace, ini);
+    WriteInt("trace_hz", g_config.trace_hz, ini);
+    WriteInt("death_repair_ms", g_config.death_repair_ms, ini);
     WriteInt("interp_delay_ms", g_config.interp_delay_ms, ini);
     WriteInt("snapshot_hz", g_config.snapshot_hz, ini);
 }

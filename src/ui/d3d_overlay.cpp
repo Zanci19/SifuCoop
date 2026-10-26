@@ -291,6 +291,8 @@ void DrawOptionsTab() {
     ImGui::Checkbox("Hide my partner's health bar", &config.hide_second_player_hud);
     ImGui::Checkbox("Show my partner's attacks", &config.remote_player_attacks);
     ImGui::TextColored(dim, "Visual only -- their hits are resolved on their own PC.");
+    ImGui::Checkbox("Friendly fire: my partner's hits can hurt me", &config.friendly_fire);
+    ImGui::TextColored(dim, "Their swings become real attacks here. Set it on both PCs.");
 
     ImGui::SeparatorText("This menu");
     ImGui::Checkbox("Block the game while this menu is open", &config.menu_exclusive_input);

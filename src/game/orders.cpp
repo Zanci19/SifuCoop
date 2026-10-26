@@ -191,10 +191,35 @@ void __fastcall HealthKillHook(void* health_component, std::int32_t behavior,
     const bool publish_death = (role == net::Role::Host && coop::Get().echo_enemy_attacks) ||
                                (role == net::Role::Client &&
                                 coop::Get().sync_enemy_death_animations);
-    if (net::IsConnected() && publish_death && death_animation) {
+    // The 2026-09-23 paired logs carried anim=0 on every replicated death and
+    // not one "exact enemy sequence sent" line on either machine, with no way
+    // to tell which of these four conditions refused. Each one now says so
+    // once, because the difference between "the game passed no animation" and
+    // "we did not consider this enemy ours" is the difference between two
+    // completely different fixes.
+    const auto declined = [](const char* reason) {
+        static const char* last = nullptr;
+        if (last == reason && !coop::Get().verbose_enemies) return;
+        last = reason;
+        SC_LOG("death: no exact sequence published -- %s", reason);
+    };
+
+    if (!net::IsConnected()) {
+        // Solo play; nothing to publish to and nothing worth saying.
+    } else if (!publish_death) {
+        declined(role == net::Role::Host ? "echo_enemy_attacks is off"
+                                         : "sync_enemy_death_animations is off");
+    } else if (!death_animation) {
+        declined("the game killed this body with no death animation");
+    } else {
         actor_hash = EnemyHashForHealthComponent(health_component);
-        if (!actor_hash || !EnemyActionsAreLocallyAuthoritative(actor_hash, true) ||
-            !ue::GetObjectPathName(death_animation, death_path, sizeof(death_path))) {
+        if (!actor_hash) {
+            declined("this health component belongs to no tracked enemy");
+        } else if (!EnemyActionsAreLocallyAuthoritative(actor_hash, true)) {
+            declined("this enemy is not ours to speak for");
+            actor_hash = 0;
+        } else if (!ue::GetObjectPathName(death_animation, death_path, sizeof(death_path))) {
+            declined("the death animation has no resolvable path");
             actor_hash = 0;
         }
     }
@@ -1051,7 +1076,10 @@ void PumpRemoteOrders() {
 
     const bool versus = coop::Get().mode == coop::Mode::Versus;
 
-    const bool replay_player = versus || coop::Get().echo_player_attacks;
+    // A replayed partner attack is a real attack with a real hitbox: in versus
+    // that is the point, and with friendly fire on it is what lets them hit you.
+    const bool replay_player =
+        versus || coop::Get().echo_player_attacks || coop::Get().friendly_fire;
 
     if (g_have_template && replay_player && g_deferred_player_order_count > 0) {
         SC_LOG("remote: replaying %d peer attacks held until local template",

@@ -12,6 +12,7 @@
 #include "../ue/reflection.h"
 #include "log.h"
 #include "offsets.g.h"
+#include "trace.h"
 
 namespace sifucoop::hooks {
 namespace {
@@ -40,6 +41,10 @@ void OnFrame() {
     sifucoop::game::TickEnemies();
     sifucoop::game::TickPuppet();
     sifucoop::game::TickSelfTest();
+
+    // After everything has moved this frame, so the digest describes the state
+    // the player actually saw.
+    sifucoop::trace::Tick();
 
     if (g_frames % 30 != 0) return;
 

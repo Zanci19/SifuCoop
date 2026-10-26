@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <commctrl.h>
 #include <shlobj.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
@@ -6,9 +7,21 @@
 #include <string>
 #include <vector>
 
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
+#ifndef EM_SETCUEBANNER
+#define EM_SETCUEBANNER 0x1501
+#endif
+
 namespace {
 constexpr int kPath = 1001, kDetect = 1002, kBrowse = 1003, kReplaceConfig = 1004,
-              kInstall = 1005, kStatus = 1006;
+              kStatus = 1006, kHeader = 1007, kSubtitle = 1008, kPathLabel = 1009,
+              kNote = 1010, kStatusIcon = 1011, kSeparator = 1012;
+// The Install button answers to IDOK so that Return activates it, the way it
+// does in any dialog.
+constexpr int kInstall = IDOK;
+
 HINSTANCE g_instance;
 
 std::wstring Parent(std::wstring value) {
@@ -268,20 +281,191 @@ std::wstring ControlText(HWND control) {
     return result;
 }
 
-void SetStatus(HWND window, const std::wstring& text) {
+// ---------------------------------------------------------------------------
+// Presentation
+//
+// Everything below is layout. It is written against DPI-independent pixels and
+// scaled through Scale(), because a hard-coded pixel layout is wrong on every
+// display that is not 96 DPI -- which by now is most of them.
+// ---------------------------------------------------------------------------
+
+UINT g_dpi = 96;
+HFONT g_font = nullptr;        // Segoe UI 9pt: the shell's own UI font
+HFONT g_headerFont = nullptr;  // Segoe UI 14pt semibold
+
+int Scale(int value) { return MulDiv(value, static_cast<int>(g_dpi), 96); }
+
+UINT DpiForWindow(HWND window) {
+    // Win10 1607+. On anything older the process is at best system-DPI aware
+    // and the desktop value is the right answer anyway.
+    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+    static auto fn = reinterpret_cast<GetDpiForWindowFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    if (fn) {
+        const UINT dpi = fn(window);
+        if (dpi) return dpi;
+    }
+    HDC dc = GetDC(nullptr);
+    const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+    if (dc) ReleaseDC(nullptr, dc);
+    return dpi > 0 ? static_cast<UINT>(dpi) : 96;
+}
+
+bool MessageFontForDpi(UINT dpi, LOGFONTW* out) {
+    using SpiForDpiFn = BOOL(WINAPI*)(UINT, UINT, PVOID, UINT, UINT);
+    static auto fn = reinterpret_cast<SpiForDpiFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "SystemParametersInfoForDpi"));
+
+    NONCLIENTMETRICSW metrics{};
+    metrics.cbSize = sizeof(metrics);
+    if (fn && fn(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi)) {
+        *out = metrics.lfMessageFont;
+        return true;
+    }
+    if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0)) {
+        return false;
+    }
+    // The unscaled call returns the font for the primary display, so it has to
+    // be scaled by hand for any other DPI.
+    *out = metrics.lfMessageFont;
+    out->lfHeight = MulDiv(out->lfHeight, static_cast<int>(dpi), 96);
+    return true;
+}
+
+void BuildFonts(UINT dpi) {
+    if (g_font) DeleteObject(g_font);
+    if (g_headerFont) DeleteObject(g_headerFont);
+    g_font = nullptr;
+    g_headerFont = nullptr;
+
+    LOGFONTW body{};
+    if (!MessageFontForDpi(dpi, &body)) {
+        lstrcpynW(body.lfFaceName, L"Segoe UI", LF_FACESIZE);
+        body.lfHeight = -MulDiv(9, static_cast<int>(dpi), 72);
+    }
+    g_font = CreateFontIndirectW(&body);
+
+    LOGFONTW header = body;
+    header.lfHeight = -MulDiv(14, static_cast<int>(dpi), 72);
+    header.lfWeight = FW_SEMIBOLD;
+    g_headerFont = CreateFontIndirectW(&header);
+}
+
+void ApplyFonts(HWND window) {
+    const int ids[] = {kPath, kDetect, kBrowse, kReplaceConfig, kInstall,
+                       kStatus, kSubtitle, kPathLabel, kNote};
+    for (int id : ids) {
+        HWND control = GetDlgItem(window, id);
+        if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
+    }
+    HWND header = GetDlgItem(window, kHeader);
+    if (header) {
+        SendMessageW(header, WM_SETFONT, reinterpret_cast<WPARAM>(g_headerFont), TRUE);
+    }
+}
+
+void ApplyStatusIcon(HWND window, const wchar_t* which) {
+    HWND control = GetDlgItem(window, kStatusIcon);
+    if (!control) return;
+    const int size = Scale(16);
+    HICON icon = static_cast<HICON>(
+        LoadImageW(nullptr, which, IMAGE_ICON, size, size, LR_SHARED));
+    SendMessageW(control, STM_SETICON, reinterpret_cast<WPARAM>(icon), 0);
+    ShowWindow(control, icon ? SW_SHOW : SW_HIDE);
+}
+
+void Layout(HWND window) {
+    RECT client{};
+    GetClientRect(window, &client);
+    const int width = client.right;
+    const int height = client.bottom;
+
+    const int margin = Scale(16);
+    const int gap = Scale(8);
+    const int buttonWidth = Scale(96);
+    const int buttonHeight = Scale(27);
+    const int footer = Scale(20) + buttonHeight + Scale(16);
+    const int content = width - margin * 2;
+
+    HDWP defer = BeginDeferWindowPos(12);
+    const auto place = [&](int id, int x, int y, int cx, int cy) {
+        HWND control = GetDlgItem(window, id);
+        if (control) {
+            defer = DeferWindowPos(defer, control, nullptr, x, y, cx, cy,
+                                   SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    };
+
+    int y = margin;
+    place(kHeader, margin, y, content, Scale(26));
+    y += Scale(26) + Scale(2);
+    place(kSubtitle, margin, y, content, Scale(18));
+    y += Scale(18) + Scale(18);
+
+    place(kPathLabel, margin, y, content, Scale(17));
+    y += Scale(17) + Scale(3);
+    const int browseWidth = Scale(92);
+    place(kPath, margin, y + Scale(2), content - browseWidth - gap, Scale(23));
+    place(kBrowse, width - margin - browseWidth, y, browseWidth, buttonHeight);
+    y += buttonHeight + Scale(14);
+
+    place(kReplaceConfig, margin, y, content, Scale(20));
+    y += Scale(20) + Scale(4);
+    place(kNote, margin + Scale(20), y, content - Scale(20), Scale(32));
+    y += Scale(32) + Scale(10);
+
+    const int statusTop = y;
+    const int statusBottom = height - footer;
+    place(kStatusIcon, margin, statusTop + Scale(1), Scale(16), Scale(16));
+    place(kStatus, margin + Scale(16) + gap, statusTop,
+          content - Scale(16) - gap, statusBottom > statusTop ? statusBottom - statusTop : 0);
+
+    place(kSeparator, 0, height - footer, width, Scale(1));
+    const int buttonTop = height - footer + Scale(20);
+    place(kInstall, width - margin - buttonWidth, buttonTop, buttonWidth, buttonHeight);
+    place(kDetect, width - margin - buttonWidth * 2 - gap, buttonTop, buttonWidth, buttonHeight);
+
+    EndDeferWindowPos(defer);
+    InvalidateRect(window, nullptr, TRUE);
+}
+
+void SetStatus(HWND window, const std::wstring& text, const wchar_t* icon = IDI_INFORMATION) {
     SetWindowTextW(GetDlgItem(window, kStatus), text.c_str());
+    ApplyStatusIcon(window, icon);
 }
 
 void DetectInto(HWND window, bool announce) {
     const auto found = DetectInstalls();
     if (found.empty()) {
-        SetStatus(window, L"No Sifu installation was found automatically. Use Browse to select your Sifu folder.");
+        SetStatus(window,
+                  L"No Sifu installation was found automatically. Use Browse to select "
+                  L"your Sifu folder.",
+                  IDI_WARNING);
         return;
     }
     SetWindowTextW(GetDlgItem(window, kPath), found.front().c_str());
     SetStatus(window, std::wstring(L"Detected: ") + found.front() +
         (found.size() > 1 ? L"\n\nMore than one install was found; choose another folder with Browse if needed." : L""));
     if (announce) MessageBoxW(window, L"An installation was detected and selected.", L"SifuCoop installer", MB_OK | MB_ICONINFORMATION);
+}
+
+// Typing a path is not rare -- people paste one -- and saying whether it
+// resolved only after Install is pressed is a needless round trip.
+void ValidatePath(HWND window) {
+    const std::wstring supplied = Trim(ControlText(GetDlgItem(window, kPath)));
+    if (supplied.empty()) {
+        SetStatus(window, L"Choose your Sifu folder, or press Auto-detect.");
+        return;
+    }
+    const std::wstring resolved = ToBinDirectory(supplied);
+    if (resolved.empty()) {
+        SetStatus(window,
+                  L"No Sifu-Win64-Shipping.exe under this folder. Pick the Sifu folder "
+                  L"itself, or its Binaries\\Win64 folder.",
+                  IDI_WARNING);
+        return;
+    }
+    SetStatus(window, L"Ready to install into:\n" + resolved);
 }
 
 void Browse(HWND window) {
@@ -294,7 +478,7 @@ void Browse(HWND window) {
     wchar_t path[MAX_PATH]{};
     if (SHGetPathFromIDListW(item, path)) {
         SetWindowTextW(GetDlgItem(window, kPath), path);
-        SetStatus(window, L"Selected: " + std::wstring(path));
+        ValidatePath(window);
     }
     CoTaskMemFree(item);
 }
@@ -311,18 +495,53 @@ void RunInstall(HWND window, bool commandLine) {
         const intptr_t launch = reinterpret_cast<intptr_t>(
             ShellExecuteW(window, L"runas", executable.c_str(), params.c_str(), nullptr, SW_SHOWNORMAL));
         if (launch > 32) {
-            SetStatus(window, L"Administrator approval requested. Complete the elevated installer window.");
+            SetStatus(window,
+                      L"Administrator approval requested. Complete the elevated installer "
+                      L"window.");
             return;
         }
     }
     if (result.ok) {
         MessageBoxW(window, result.message.c_str(), L"SifuCoop installer", MB_OK | MB_ICONINFORMATION);
-        SetStatus(window, L"Install complete. Configure networking in Sifu or SifuCoopLauncher.");
+        SetStatus(window, L"Install complete. Configure networking in Sifu (F1) or "
+                          L"SifuCoopLauncher.exe.");
     } else {
         MessageBoxW(window, result.message.c_str(), L"SifuCoop installer", MB_OK | MB_ICONERROR);
-        SetStatus(window, result.message);
+        SetStatus(window, result.message, IDI_ERROR);
     }
 }
+
+void CreateControls(HWND window) {
+    const auto make = [&](const wchar_t* klass, const wchar_t* text, DWORD style, int id,
+                          DWORD exStyle = 0) {
+        return CreateWindowExW(exStyle, klass, text, style | WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
+                               window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                               g_instance, nullptr);
+    };
+
+    make(L"STATIC", L"Install SifuCoop", SS_LEFT | SS_NOPREFIX, kHeader);
+    make(L"STATIC", L"Choose your Sifu installation.", SS_LEFT | SS_NOPREFIX, kSubtitle);
+
+    make(L"STATIC", L"Sifu folder", SS_LEFT, kPathLabel);
+    HWND path = make(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, kPath, WS_EX_CLIENTEDGE);
+    SendMessageW(path, EM_SETCUEBANNER, TRUE,
+                 reinterpret_cast<LPARAM>(L"C:\\...\\Sifu\\Binaries\\Win64"));
+    make(L"BUTTON", L"Browse...", WS_TABSTOP, kBrowse);
+
+    make(L"BUTTON", L"Replace SifuCoop.ini", WS_TABSTOP | BS_AUTOCHECKBOX, kReplaceConfig);
+    make(L"STATIC",
+         L"An existing dsound.dll is always backed up first. An existing SifuCoop.ini is "
+         L"kept unless this is ticked, and is backed up either way.",
+         SS_LEFT | SS_NOPREFIX, kNote);
+
+    make(L"STATIC", L"", SS_ICON | SS_REALSIZECONTROL, kStatusIcon);
+    make(L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_EDITCONTROL, kStatus);
+
+    make(L"STATIC", L"", SS_ETCHEDHORZ, kSeparator);
+    make(L"BUTTON", L"Auto-detect", WS_TABSTOP, kDetect);
+    make(L"BUTTON", L"Install", WS_TABSTOP | BS_DEFPUSHBUTTON, kInstall);
+}
+
 // lparam is NAMED and forwarded. It was discarded, and DefWindowProcW was
 // called with a hardcoded 0 -- which breaks WM_NCCREATE, the message Windows
 // sends BEFORE WM_CREATE carrying the CREATESTRUCT in lparam. DefWindowProc
@@ -333,36 +552,74 @@ void RunInstall(HWND window, bool commandLine) {
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_CREATE:
-        CreateWindowW(L"STATIC", L"SifuCoop installer", WS_CHILD | WS_VISIBLE,
-                      20, 18, 480, 25, window, nullptr, g_instance, nullptr);
-        CreateWindowW(L"STATIC", L"Sifu folder or Binaries\\Win64 folder:", WS_CHILD | WS_VISIBLE,
-                      20, 48, 430, 20, window, nullptr, g_instance, nullptr);
-        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                        20, 69, 470, 24, window, reinterpret_cast<HMENU>(kPath), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Auto-detect", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                      20, 103, 120, 28, window, reinterpret_cast<HMENU>(kDetect), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                      150, 103, 100, 28, window, reinterpret_cast<HMENU>(kBrowse), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Replace SifuCoop.ini (back it up first)", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                      20, 140, 310, 22, window, reinterpret_cast<HMENU>(kReplaceConfig), g_instance, nullptr);
-        CreateWindowW(L"STATIC", L"Existing dsound.dll is always backed up. Existing SifuCoop.ini is kept unless checked above.",
-                      WS_CHILD | WS_VISIBLE, 20, 164, 500, 28, window, nullptr, g_instance, nullptr);
-        CreateWindowW(L"STATIC", L"After installation, configure Host or Join in Sifu (F1) or SifuCoopLauncher.exe.",
-                      WS_CHILD | WS_VISIBLE, 20, 202, 480, 34, window, nullptr, g_instance, nullptr);
-        CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT,
-                      20, 246, 470, 54, window, reinterpret_cast<HMENU>(kStatus), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Install", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                      380, 316, 110, 30, window, reinterpret_cast<HMENU>(kInstall), g_instance, nullptr);
+        g_dpi = DpiForWindow(window);
+        BuildFonts(g_dpi);
+        CreateControls(window);
+        ApplyFonts(window);
+        Layout(window);
         DetectInto(window, false);
         return 0;
+
+    case WM_SIZE:
+        Layout(window);
+        return 0;
+
+    case WM_GETMINMAXINFO: {
+        auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+        // Window size, not client: the default client height of 320 plus the
+        // frame. Smaller than this and the status line loses its second row.
+        info->ptMinTrackSize.x = Scale(470);
+        info->ptMinTrackSize.y = Scale(360);
+        return 0;
+    }
+
+    case WM_DPICHANGED: {
+        // Dragged to a display with a different scale. The suggested rectangle
+        // is the same window at the new scale; everything inside it has to be
+        // rebuilt at that scale too.
+        g_dpi = HIWORD(wparam);
+        BuildFonts(g_dpi);
+        ApplyFonts(window);
+        const RECT* suggested = reinterpret_cast<const RECT*>(lparam);
+        SetWindowPos(window, nullptr, suggested->left, suggested->top,
+                     suggested->right - suggested->left, suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        Layout(window);
+        return 0;
+    }
+
+    // Static text draws on the dialog background rather than white, and the
+    // secondary lines are drawn in the system's grey so the header and the
+    // status line carry the emphasis.
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = reinterpret_cast<HDC>(wparam);
+        const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lparam));
+        SetBkMode(dc, TRANSPARENT);
+        if (id == kSubtitle || id == kNote) {
+            SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+        } else {
+            SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+        }
+        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+    }
+
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
         case kDetect: DetectInto(window, true); return 0;
         case kBrowse: Browse(window); return 0;
         case kInstall: RunInstall(window, false); return 0;
+        case IDCANCEL: DestroyWindow(window); return 0;
+        case kPath:
+            if (HIWORD(wparam) == EN_CHANGE) ValidatePath(window);
+            return 0;
         }
         break;
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+
+    case WM_DESTROY:
+        if (g_font) { DeleteObject(g_font); g_font = nullptr; }
+        if (g_headerFont) { DeleteObject(g_headerFont); g_headerFont = nullptr; }
+        PostQuitMessage(0);
+        return 0;
     }
     return DefWindowProcW(window, message, wparam, lparam);
 }
@@ -371,6 +628,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     g_instance = instance;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    INITCOMMONCONTROLSEX controls{};
+    controls.dwSize = sizeof(controls);
+    controls.dwICC = ICC_STANDARD_CLASSES;
+    InitCommonControlsEx(&controls);
+
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv && argc >= 3 && _wcsicmp(argv[1], L"--install") == 0) {
@@ -399,9 +662,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         CoUninitialize();
         return 1;
     }
-    HWND window = CreateWindowExW(0, klass, L"SifuCoop installer",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 530, 400, nullptr, nullptr, instance, nullptr);
+
+    // The window is sized in DIPs against the DPI it will open at, so it is the
+    // same apparent size on every display.
+    const UINT dpi = DpiForWindow(nullptr);
+    // Sized to the layout above: the content ends around 257 DIP and the
+    // footer band is 63, so anything taller is dead space above the buttons.
+    RECT wanted{0, 0, MulDiv(520, static_cast<int>(dpi), 96),
+                MulDiv(320, static_cast<int>(dpi), 96)};
+    AdjustWindowRectEx(&wanted, WS_OVERLAPPEDWINDOW, FALSE, 0);
+
+    HWND window = CreateWindowExW(WS_EX_CONTROLPARENT, klass, L"SifuCoop installer",
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+        wanted.right - wanted.left, wanted.bottom - wanted.top, nullptr, nullptr, instance, nullptr);
     if (!window) {
         MessageBoxW(nullptr, L"Could not create the installer window.",
                     L"SifuCoop installer", MB_OK | MB_ICONERROR);
@@ -413,7 +686,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     ShowWindow(window, show ? show : SW_SHOWNORMAL);
     UpdateWindow(window);
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    // IsDialogMessage is what makes Tab, the arrow keys, Return and Escape work
+    // in a plain window with child controls. Without it the WS_TABSTOP flags on
+    // every control meant nothing and the keyboard did not move focus at all.
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (IsDialogMessageW(window, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
     CoUninitialize();
     return static_cast<int>(msg.wParam);
 }
