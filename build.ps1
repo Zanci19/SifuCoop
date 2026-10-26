@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$Deploy,
     [switch]$NoGen,
     [string]$LocalBuildName = "epic",
@@ -82,6 +82,7 @@ $sources = @(
     "src\game\player2.cpp"
     "src\net\crypto.cpp"
     "src\net\session.cpp"
+    "src\net\tailscale.cpp"
     "src\\game\\orders.cpp"
     "src\\game\\enemies.cpp"
     "src\\ui\\overlay.cpp"
@@ -127,7 +128,7 @@ try {
 } catch {}
 $flags = "-O2 -std=c++17 -static -static-libgcc -static-libstdc++ $imguiInc " +
          "-DSIFUCOOP_COMMIT=\`"$commit\`" " +
-         "-Wall -Wextra -s -lkernel32 -luser32 -lws2_32 -lgdi32 -ld3d11 -ldxgi " +
+         "-Wall -Wextra -s -lkernel32 -luser32 -lws2_32 -liphlpapi -lgdi32 -ld3d11 -ldxgi " +
          "-ld3dcompiler -ldwmapi"
 $srcArgs = ($sources | ForEach-Object { "`"$_`"" }) -join " "
 $defFile = Join-Path $Root "src\proxy\dsound.def"

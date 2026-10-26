@@ -35,9 +35,29 @@ Run Sifu in **borderless**, not exclusive fullscreen, if you want the overlay to
 
 ## 2. Network (both players)
 
-There are three ways to reach each other. SifuCoop only sends UDP packets; it does not
+There are four ways to reach each other. SifuCoop only sends UDP packets; it does not
 install or manage a VPN. Use the **Setup** tab in the in-game menu (F1) to configure the
 connection.
+
+### Option 0 — Tailscale, if neither of you wants to touch a router
+
+[Tailscale](https://tailscale.com) puts both PCs on one small private network, so the
+host's address becomes reachable without port forwarding, hole punching or router access.
+It is free for personal use, and the only setup is installing it and signing in on both
+machines — the same account, or one of you shares the machine with the other.
+
+SifuCoop knows about it. When Tailscale is running, **Setup** grows a Tailscale section:
+
+* the host sees **This PC: 100.x.y.z** with a Copy button, which is the address to send;
+* the joiner sees the tailnet's machines by name and clicks the host's, which fills in
+  Partner's IP. Nobody reads an address out loud.
+
+Machines that are signed in but asleep are listed greyed out rather than hidden, because
+that is usually the right PC with the game not started yet. **Refresh list** asks again.
+
+Nothing about the protocol changes: it is still SifuCoop's own authenticated UDP, and
+Tailscale is only what makes the address reachable. If the section says Tailscale is not
+running, the other three options below are unaffected.
 
 ### Option 1 — the same LAN or an existing private VPN
 

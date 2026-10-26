@@ -28,7 +28,8 @@ struct MenuRequests {
     bool save_config = false;
     bool restart_network = false;
     bool disconnect_network = false;
-    bool log_roster = false;};
+    bool log_roster = false;
+    bool refresh_tailnet = false;};
 
 bool TakeMenuRequests(MenuRequests* out);
 
@@ -65,9 +66,27 @@ struct MenuStatus {
     bool friendly_confirmed = false;
 
     char public_address[64] = {};
+
+    // This PC's own tailnet address, "" when Tailscale is not running here.
+    char tailnet_ip[64] = {};
+    // False until the first lookup has finished, so the Setup tab can say
+    // "looking" instead of announcing there is no Tailscale before it knows.
+    bool tailnet_answered = false;
 };
 
 void SetMenuStatus(const MenuStatus& status);
+
+// One machine on the tailnet, for the picker in Setup. Kept separate from
+// net::tailscale::Device so the overlay keeps knowing nothing about the
+// network, the same way SyncRow keeps it from knowing about enemies.
+struct TailnetRow {
+    char name[48] = {};
+    char ip[48] = {};
+    bool online = false;
+    bool self = false;
+};
+
+void SetTailnetRows(const TailnetRow* rows, int count);
 
 struct SyncRow {
     unsigned int hash = 0;

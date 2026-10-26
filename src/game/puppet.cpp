@@ -13,6 +13,7 @@
 #include "../core/offsets.g.h"
 #include "../net/protocol.h"
 #include "../net/session.h"
+#include "../net/tailscale.h"
 #include "../ue/reflection.h"
 #include "../ui/overlay.h"
 #include "actors.h"
@@ -1506,6 +1507,7 @@ void UpdateLobby(ue::UObject* player) {
                              requests.passphrase);
         }
         if (requests.discover_address) net::DiscoverPublicAddress();
+        if (requests.refresh_tailnet) net::tailscale::RequestRefresh();
         if (requests.save_config) coop::Save();
         if (requests.log_roster) DumpRoster();
         if (requests.spawn_puppet) SpawnPuppet();
@@ -1576,6 +1578,25 @@ void UpdateLobby(ue::UObject* player) {
     lstrcpynA(status.invite_level, LevelLeaf(g_invite_level), sizeof(status.invite_level));
     status.friendly_confirmed = g_friendly_verified;
     lstrcpynA(status.public_address, net::GetPublicAddress(), sizeof(status.public_address));
+
+    // The lookup runs on its own thread and this only reads its cache; the
+    // Setup tab is the only thing that wants it, and it is cheap enough not
+    // to be worth gating on the menu being open.
+    net::tailscale::Poll();
+    net::tailscale::GetSelfIp(status.tailnet_ip, sizeof(status.tailnet_ip));
+    status.tailnet_answered = net::tailscale::HaveAnswer();
+    {
+        net::tailscale::Device devices[net::tailscale::kMaxDevices];
+        const int count = net::tailscale::GetDevices(devices, net::tailscale::kMaxDevices);
+        ui::TailnetRow rows[net::tailscale::kMaxDevices];
+        for (int i = 0; i < count; ++i) {
+            lstrcpynA(rows[i].name, devices[i].name, sizeof(rows[i].name));
+            lstrcpynA(rows[i].ip, devices[i].ip, sizeof(rows[i].ip));
+            rows[i].online = devices[i].online;
+            rows[i].self = devices[i].self;
+        }
+        ui::SetTailnetRows(rows, count);
+    }
     lstrcpynA(status.detail, coop::GetStats().last_problem, sizeof(status.detail));
     ui::SetMenuStatus(status);
 

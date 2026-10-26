@@ -125,6 +125,12 @@ bool g_field_hosting = true;
 bool g_fields_loaded = false;
 char g_public_address[64] = {};
 
+constexpr int kMaxTailnetRows = 16;
+TailnetRow g_tailnet_rows[kMaxTailnetRows];
+int g_tailnet_row_count = 0;
+char g_tailnet_ip[64] = {};
+bool g_tailnet_answered = false;
+
 void PostRequests(const MenuRequests& requests) {
     EnterCriticalSection(&g_menu_lock);
     g_requests = requests;
@@ -220,6 +226,79 @@ void DrawPlayTab(const MenuStatus& status) {
     }
 }
 
+// Tailscale puts both PCs on one private network, so the address that
+// reaches the host is an ordinary address again -- no port forwarding, no
+// hole punching, nothing for either player to configure on a router. The
+// only step left was reading the number out to each other, and this is that
+// step: the host sees their own address to send, and the joiner picks the
+// host's machine by name from the tailnet instead of typing it.
+void DrawTailnetPicker(const ImVec4& dim) {
+    if (!ImGui::TreeNodeEx("Tailscale", ImGuiTreeNodeFlags_DefaultOpen)) return;
+
+    if (!g_tailnet_answered) {
+        ImGui::TextColored(dim, "Looking for Tailscale...");
+        ImGui::TreePop();
+        return;
+    }
+
+    if (!g_tailnet_ip[0] && g_tailnet_row_count == 0) {
+        ImGui::TextColored(dim, "Tailscale is not running on this PC.");
+        ImGui::TextColored(dim, "Install it from tailscale.com, sign in on both PCs,");
+        ImGui::TextColored(dim, "and the other machine appears here by name.");
+        if (ImGui::Button("Look again", ImVec2(140, 0))) {
+            MenuRequests r;
+            r.refresh_tailnet = true;
+            PostRequests(r);
+        }
+        ImGui::TreePop();
+        return;
+    }
+
+    if (g_tailnet_ip[0]) {
+        ImGui::Text("This PC: %s", g_tailnet_ip);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(g_tailnet_ip);
+        if (g_field_hosting) {
+            ImGui::TextColored(dim, "Send this to your partner, or let them pick this");
+            ImGui::TextColored(dim, "machine by name from their own list.");
+        }
+    }
+
+    if (!g_field_hosting) {
+        int others = 0;
+        for (int i = 0; i < g_tailnet_row_count; ++i) {
+            if (!g_tailnet_rows[i].self) ++others;
+        }
+        if (others == 0) {
+            ImGui::TextColored(dim, "No other devices on your tailnet yet.");
+        } else {
+            ImGui::TextColored(dim, "Pick the host's machine:");
+            for (int i = 0; i < g_tailnet_row_count; ++i) {
+                const TailnetRow& row = g_tailnet_rows[i];
+                if (row.self) continue;
+                char label[128] = {};
+                _snprintf(label, sizeof(label) - 1, "%s  (%s)%s", row.name, row.ip,
+                          row.online ? "" : "  - offline");
+                // An offline device is still worth showing: it is usually the
+                // right machine with the game not started yet, and hiding it
+                // would look like the partner's PC had vanished.
+                ImGui::BeginDisabled(!row.online);
+                if (ImGui::Selectable(label, strcmp(g_field_address, row.ip) == 0)) {
+                    lstrcpynA(g_field_address, row.ip, sizeof(g_field_address));
+                }
+                ImGui::EndDisabled();
+            }
+        }
+    }
+
+    if (ImGui::SmallButton("Refresh list")) {
+        MenuRequests r;
+        r.refresh_tailnet = true;
+        PostRequests(r);
+    }
+    ImGui::TreePop();
+}
+
 void DrawSetupTab(const MenuStatus& status) {
     const ImVec4 dim(0.65f, 0.65f, 0.65f, 1.f);
 
@@ -240,6 +319,8 @@ void DrawSetupTab(const MenuStatus& status) {
     } else {
         ImGui::TextColored(dim, "Use the host's reachable LAN, VPN, or public address.");
     }
+
+    DrawTailnetPicker(dim);
 
     ImGui::InputInt("Port", &g_field_port);
     ImGui::InputText("Passphrase", g_field_passphrase, sizeof(g_field_passphrase),
@@ -695,6 +776,18 @@ void SetMenuStatus(const MenuStatus& status) {
                                  sizeof(g_field_passphrase), ini);
     }
     lstrcpynA(g_public_address, status.public_address, sizeof(g_public_address));
+    lstrcpynA(g_tailnet_ip, status.tailnet_ip, sizeof(g_tailnet_ip));
+    g_tailnet_answered = status.tailnet_answered;
+    LeaveCriticalSection(&g_menu_lock);
+}
+
+void SetTailnetRows(const TailnetRow* rows, int count) {
+    if (!g_menu_lock_ready || !rows) return;
+    if (count < 0) count = 0;
+    if (count > kMaxTailnetRows) count = kMaxTailnetRows;
+    EnterCriticalSection(&g_menu_lock);
+    for (int i = 0; i < count; ++i) g_tailnet_rows[i] = rows[i];
+    g_tailnet_row_count = count;
     LeaveCriticalSection(&g_menu_lock);
 }
 
